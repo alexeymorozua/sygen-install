@@ -57,5 +57,7 @@ services:
     command: --label-enable --monitor-only --interval 1800
     environment:
       - TZ=UTC
+      # Docker 29+ dropped API <1.40; Watchtower defaults to 1.25 otherwise.
+      - DOCKER_API_VERSION=1.40
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

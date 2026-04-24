@@ -138,8 +138,10 @@ mkdir -p /srv/sygen/data/_secrets
 
 if [ ! -f /srv/sygen/data/config/config.json ]; then
     log "Bootstrapping config.json (api on, host 0.0.0.0, port 8081)"
-    API_TOKEN=$(tr -dc 'A-Za-z0-9_-' </dev/urandom | head -c 42)
-    JWT_SECRET=$(tr -dc 'A-Za-z0-9_-' </dev/urandom | head -c 42)
+    # `openssl rand -hex 32` outputs 64 hex chars on one line — no SIGPIPE
+    # issues the way `tr -dc ... </dev/urandom | head -c N` has under pipefail.
+    API_TOKEN=$(openssl rand -hex 32)
+    JWT_SECRET=$(openssl rand -hex 32)
     cat > /srv/sygen/data/config/config.json <<JSON
 {
   "instance_name": "$SUB",

@@ -1,0 +1,41 @@
+# Sygen single-node docker-compose deployment.
+# Fetched by install.sh to /srv/sygen/docker-compose.yml.
+#
+# SYGEN_CORE_IMAGE and SYGEN_ADMIN_IMAGE can be pinned via .env next to
+# this file; defaults track :latest from GHCR.
+#
+# Ports bind to 127.0.0.1 only. nginx on the host proxies 443 to these.
+
+services:
+  core:
+    image: ${SYGEN_CORE_IMAGE:-ghcr.io/alexeymorozua/sygen-core:latest}
+    container_name: sygen-core
+    restart: unless-stopped
+    volumes:
+      - /srv/sygen/data:/data
+      # Persist Claude Code CLI credentials across container rebuilds.
+      - /srv/sygen/claude-auth:/root/.claude
+    environment:
+      - SYGEN_HOME=/data
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Provide either ANTHROPIC_API_KEY here, or run
+      # `docker compose exec core claude auth login` after first start.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    ports:
+      - "127.0.0.1:8081:8081"
+
+  admin:
+    image: ${SYGEN_ADMIN_IMAGE:-ghcr.io/alexeymorozua/sygen-admin:latest}
+    container_name: sygen-admin
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+      # Browser-side API URL. Empty string = same-origin, so the browser
+      # hits the nginx vhost and nginx reverse-proxies /api + /ws to core.
+      - NEXT_PUBLIC_SYGEN_API_URL=${NEXT_PUBLIC_SYGEN_API_URL:-}
+    depends_on:
+      - core
+    ports:
+      - "127.0.0.1:3000:3000"

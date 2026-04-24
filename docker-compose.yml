@@ -45,15 +45,16 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
 
-  # Polls GHCR hourly and recreates any container with the
-  # `com.centurylinklabs.watchtower.enable=true` label when a newer
-  # image digest is published. --label-enable scopes it to opted-in
-  # services, so watchtower never updates itself or user sidecars.
+  # Polls GHCR every 30 min for new image digests on labeled containers
+  # (--label-enable scopes this to `com.centurylinklabs.watchtower.enable=true`).
+  # --monitor-only means Watchtower never applies updates on its own — it only
+  # detects them. The sygen-updater sidecar + admin UI drive user-approved
+  # apply, so an in-flight session doesn't get killed mid-work.
   watchtower:
     image: containrrr/watchtower:latest
     container_name: sygen-watchtower
     restart: unless-stopped
-    command: --label-enable --cleanup --interval 3600
+    command: --label-enable --monitor-only --interval 1800
     environment:
       - TZ=UTC
     volumes:

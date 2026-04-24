@@ -2,10 +2,14 @@
 
 One-shot installer for a single-node Sygen deployment.
 
-Pulls the Sygen stack (core + admin web) from GHCR, provisions DNS + TLS via
-Cloudflare, and wires up an nginx reverse proxy.
+Supported: Linux (Debian 12+/Ubuntu 22+ VPS), macOS (local dev). Windows/WSL2
+is planned but not yet supported.
 
-## Usage
+Pulls the Sygen stack (core + admin web) from GHCR. On Linux it provisions
+DNS + TLS via Cloudflare and wires up an nginx reverse proxy; on macOS it
+runs everything inside Colima bound to `localhost` — no DNS/TLS/nginx.
+
+## Usage — Linux (VPS)
 
 ```bash
 curl -fsSL https://install.sygen.pro/install.sh | \
@@ -14,6 +18,26 @@ curl -fsSL https://install.sygen.pro/install.sh | \
     CF_ZONE_ID=6ae59801f8ac7b5dc33b6e32d844b0a6 \
     bash
 ```
+
+## Usage — macOS (local dev)
+
+```bash
+curl -fsSL https://install.sygen.pro/install.sh | bash
+```
+
+Requires [Homebrew](https://brew.sh). The installer will `brew install`
+Colima + docker CLI, start a 4-CPU / 8 GB / 50 GB Colima VM, and run Sygen at
+`http://localhost:8080`. No root, no DNS, no TLS.
+
+```
+Stop:       colima stop
+Start:      colima start && cd ~/.sygen-local && docker compose up -d
+Upgrade:    cd ~/.sygen-local && docker compose pull && docker compose up -d
+Uninstall:  colima delete && rm -rf ~/.sygen-local
+```
+
+Backups and auto-start on login are not configured on macOS yet — back up
+`~/.sygen-local` manually if needed.
 
 See the header of [`install.sh`](./install.sh) for the full env var list.
 

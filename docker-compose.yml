@@ -21,6 +21,7 @@ services:
       # Provide either ANTHROPIC_API_KEY here, or run
       # `docker compose exec core claude auth login` after first start.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
     ports:
       - "127.0.0.1:8081:8081"
 

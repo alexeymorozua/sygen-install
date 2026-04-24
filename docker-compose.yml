@@ -14,7 +14,7 @@ services:
     volumes:
       - /srv/sygen/data:/data
       # Persist Claude Code CLI credentials across container rebuilds.
-      - /srv/sygen/claude-auth:/root/.claude
+      - /srv/sygen/claude-auth:/home/sygen/.claude
     environment:
       - SYGEN_HOME=/data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

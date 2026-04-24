@@ -234,6 +234,10 @@ log "Preparing $SYGEN_ROOT"
 mkdir -p "$SYGEN_ROOT"/{data,claude-auth}
 mkdir -p "$SYGEN_ROOT/data/config"
 mkdir -p "$SYGEN_ROOT/data/_secrets"
+# Secrets dir holds .initial_admin_password + future per-install secrets.
+# 0700 so only root/sygen-uid can read; 0755 default leaks directory listing
+# to any local user on the VPS even though file contents need their own read perm.
+chmod 0700 "$SYGEN_ROOT/data/_secrets"
 
 if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
     log "Bootstrapping config.json (api on, host 0.0.0.0, port 8081)"
@@ -433,6 +437,10 @@ if [ ! -d "$SRC/data" ]; then
 fi
 
 mkdir -p "$DEST"
+# 0700 on the backup dir: defence-in-depth against regressions where an archive
+# later ends up 0644 — the dir itself should never be world-listable since it
+# names tarballs that contain .env + claude-auth + _secrets/.
+chmod 0700 "$DEST"
 STAMP=$(date -u +%Y-%m-%d)
 OUT="$DEST/sygen-${STAMP}.tar.gz"
 

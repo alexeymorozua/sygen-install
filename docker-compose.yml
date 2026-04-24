@@ -96,7 +96,9 @@ services:
       # State file shared with core; core mounts /srv/sygen/data at /data
       # so it reads /data/_updates.json.
       - /srv/sygen/data:/state
-    labels:
-      # Watchtower picks the updater up too — operator can redeploy this
-      # sidecar out-of-band (it cannot restart itself).
-      - "com.centurylinklabs.watchtower.enable=true"
+    # NOTE: deliberately NOT labeled with com.centurylinklabs.watchtower.enable.
+    # Watchtower currently runs in --monitor-only mode (it never applies),
+    # so the label is harmless today. But one flag flip turns Watchtower
+    # into an applier, and it would happily kill the updater container in
+    # the middle of an apply request. Operator redeploys the sidecar
+    # manually:  docker compose pull updater && docker compose up -d updater.

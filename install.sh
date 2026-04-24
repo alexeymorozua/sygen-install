@@ -57,9 +57,20 @@ case "$OS" in
         ;;
 esac
 
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64|amd64|aarch64|arm64) ;;
+    *) die "Unsupported architecture: $ARCH. Supported: x86_64/amd64, aarch64/arm64." ;;
+esac
+
 # ---------- Env parsing (conditional) ----------
 DOMAIN="${SYGEN_DOMAIN:-sygen.pro}"
-BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://install.sygen.pro}"
+# Default to raw.githubusercontent.com so re-running install.sh always
+# fetches the current docker-compose.yml + nginx.conf.tmpl. The GitHub
+# Pages CDN at install.sygen.pro caches for ~10 min, which causes
+# operators to silently install yesterday's compose file. Override
+# SYGEN_INSTALL_BASE_URL when testing a fork.
+BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://raw.githubusercontent.com/alexeymorozua/sygen-install/main}"
 CORE_TAG="${SYGEN_CORE_TAG:-latest}"
 ADMIN_TAG="${SYGEN_ADMIN_TAG:-latest}"
 CORE_IMAGE="${SYGEN_CORE_IMAGE:-ghcr.io/alexeymorozua/sygen-core:${CORE_TAG}}"
@@ -252,29 +263,54 @@ if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
 JSON
 fi
 
-# Preserve an existing SYGEN_UPDATER_TOKEN across re-runs of install.sh
-# so the token stays stable between the core and updater services.
-EXISTING_UPDATER_TOKEN=""
-if [ -f "$SYGEN_ROOT/.env" ]; then
-    EXISTING_UPDATER_TOKEN=$(grep -E '^SYGEN_UPDATER_TOKEN=' "$SYGEN_ROOT/.env" \
-        | head -n1 | cut -d= -f2- || true)
+# Preserve user-set values across re-runs of install.sh. Each call to
+# get_env reads from the existing .env (if any) and falls back to the
+# given default when missing. Avoids stomping on operator edits like
+# ANTHROPIC_API_KEY, pinned image tags, or the updater bearer token.
+get_env() {
+    local key="$1"
+    local default="${2:-}"
+    if [ -f "$SYGEN_ROOT/.env" ]; then
+        local existing
+        existing=$(grep -E "^${key}=" "$SYGEN_ROOT/.env" 2>/dev/null \
+            | head -n1 | cut -d= -f2- || true)
+        if [ -n "$existing" ]; then
+            printf '%s' "$existing"
+            return
+        fi
+    fi
+    printf '%s' "$default"
+}
+
+# Image refs: env var > existing .env > computed default. Lets an operator
+# pin a tag in .env (or via SYGEN_*_IMAGE) and have it survive re-runs.
+EFFECTIVE_CORE_IMAGE=$(get_env SYGEN_CORE_IMAGE "$CORE_IMAGE")
+EFFECTIVE_ADMIN_IMAGE=$(get_env SYGEN_ADMIN_IMAGE "$ADMIN_IMAGE")
+# Secrets: existing wins; otherwise generate or pull from process env.
+EFFECTIVE_UPDATER_TOKEN=$(get_env SYGEN_UPDATER_TOKEN "$(openssl rand -hex 32)")
+EFFECTIVE_ANTHROPIC_KEY=$(get_env ANTHROPIC_API_KEY "${ANTHROPIC_API_KEY:-}")
+EFFECTIVE_OAUTH_TOKEN=$(get_env CLAUDE_CODE_OAUTH_TOKEN "${CLAUDE_CODE_OAUTH_TOKEN:-}")
+EFFECTIVE_LOG_LEVEL=$(get_env LOG_LEVEL "INFO")
+# NEXT_PUBLIC_SYGEN_API_URL: macOS forces localhost; on Linux preserve.
+if [ $LOCAL_MODE -eq 1 ]; then
+    EFFECTIVE_PUBLIC_API_URL="http://localhost:8081"
+else
+    EFFECTIVE_PUBLIC_API_URL=$(get_env NEXT_PUBLIC_SYGEN_API_URL "")
 fi
-UPDATER_TOKEN="${EXISTING_UPDATER_TOKEN:-$(openssl rand -hex 32)}"
 
 # docker-compose .env is auto-sourced by `docker compose`.
 umask 077
 {
-    echo "SYGEN_CORE_IMAGE=$CORE_IMAGE"
-    echo "SYGEN_ADMIN_IMAGE=$ADMIN_IMAGE"
-    echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"
-    echo "LOG_LEVEL=INFO"
+    echo "SYGEN_CORE_IMAGE=$EFFECTIVE_CORE_IMAGE"
+    echo "SYGEN_ADMIN_IMAGE=$EFFECTIVE_ADMIN_IMAGE"
+    echo "ANTHROPIC_API_KEY=$EFFECTIVE_ANTHROPIC_KEY"
+    echo "CLAUDE_CODE_OAUTH_TOKEN=$EFFECTIVE_OAUTH_TOKEN"
+    echo "LOG_LEVEL=$EFFECTIVE_LOG_LEVEL"
     # Shared secret for core ↔ updater-sidecar apply calls. Core authenticates
     # its POST to http://sygen-updater:8082/apply with this bearer token.
-    echo "SYGEN_UPDATER_TOKEN=$UPDATER_TOKEN"
-    if [ $LOCAL_MODE -eq 1 ]; then
-        # On macOS there's no nginx reverse proxy, so the admin browser must
-        # reach core directly. Core is published on 127.0.0.1:8081.
-        echo "NEXT_PUBLIC_SYGEN_API_URL=http://localhost:8081"
+    echo "SYGEN_UPDATER_TOKEN=$EFFECTIVE_UPDATER_TOKEN"
+    if [ -n "$EFFECTIVE_PUBLIC_API_URL" ]; then
+        echo "NEXT_PUBLIC_SYGEN_API_URL=$EFFECTIVE_PUBLIC_API_URL"
     fi
 } > "$SYGEN_ROOT/.env"
 umask 022
@@ -303,6 +339,37 @@ docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env"
 
 log "Starting Sygen stack"
 docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env" up -d
+
+# ---------- 6b. macOS smoke-test (Linux uses nginx + Let's Encrypt to verify) ----------
+if [ $LOCAL_MODE -eq 1 ]; then
+    log "macOS: smoke-testing endpoints (admin :${SYGEN_ADMIN_PORT}, core :8081)"
+    smoke_ok=0
+    for i in $(seq 1 30); do
+        admin_ok=0
+        core_ok=0
+        # Admin Next server returns 200 on /, but during boot it may 404
+        # /_next assets — accept any non-5xx as "alive".
+        admin_code=$(curl -fsS -o /dev/null -w '%{http_code}' \
+            "http://localhost:${SYGEN_ADMIN_PORT}" 2>/dev/null || echo "000")
+        case "$admin_code" in 200|301|302|404) admin_ok=1 ;; esac
+        # Core /api/system/status is unauthenticated-discoverable: returns
+        # 200 if you have a token, 401 otherwise. Both prove the server
+        # is up and routing — only a connect failure is a smoke-test fail.
+        core_code=$(curl -fsS -o /dev/null -w '%{http_code}' \
+            "http://localhost:8081/api/system/status" 2>/dev/null || echo "000")
+        case "$core_code" in 200|401|403) core_ok=1 ;; esac
+        if [ "$admin_ok" -eq 1 ] && [ "$core_ok" -eq 1 ]; then
+            log "  endpoints responding (admin=$admin_code core=$core_code)"
+            smoke_ok=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$smoke_ok" -ne 1 ]; then
+        warn "Smoke test failed after 60s: admin=$admin_code core=$core_code."
+        warn "Check: 'colima status' and 'docker compose -f $SYGEN_ROOT/docker-compose.yml logs'"
+    fi
+fi
 
 # ---------- 7. nginx vhost (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then

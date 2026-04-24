@@ -65,10 +65,13 @@ docker compose pull && docker compose up -d
 
 A fresh install keeps itself current without manual intervention:
 
-- **Container images** — a `watchtower` service in `docker-compose.yml`
-  polls GHCR hourly and recreates the `core` + `admin` containers when a
-  newer `:latest` digest is published. Only containers carrying the
-  `com.centurylinklabs.watchtower.enable=true` label are touched.
+- **Container images** — Watchtower polls GHCR every 30 minutes for new
+  digests on labeled containers and writes a state file that the admin
+  UI reads via `/api/system/updates`. Watchtower itself runs in
+  `--monitor-only` mode — it **detects** updates but never applies them.
+  The actual `docker compose pull && up -d` is driven by the
+  `sygen-updater` sidecar from an admin click, so an in-flight Claude
+  session is never killed mid-work.
 - **OS security patches** — `unattended-upgrades` is installed and
   enabled (`/etc/apt/apt.conf.d/20auto-upgrades`). The distro default
   `50unattended-upgrades` policy is security-only.
@@ -76,6 +79,22 @@ A fresh install keeps itself current without manual intervention:
   runs twice daily. A deploy hook at
   `/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh` reloads nginx
   after each successful renewal.
+
+### Updating the updater sidecar itself
+
+The `sygen-updater` service is intentionally **not** labeled for
+Watchtower (and the apply path excludes it from its own service list)
+because a container cannot safely tear itself down mid-request. To
+upgrade the sidecar, run:
+
+```bash
+cd /srv/sygen
+docker compose pull updater
+docker compose up -d updater
+```
+
+This is a once-per-release operator action. The core + admin containers
+keep getting one-click updates from the admin UI as normal.
 
 Opting out:
 

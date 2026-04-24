@@ -245,7 +245,65 @@ systemctl reload nginx
 HOOK
 chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 
-# ---------- 10. (reserved for backups — Phase 2.8) ----------
+# ---------- 10. Nightly backups ----------
+log "Installing nightly backup timer (/var/backups/sygen, 7-day retention)"
+
+cat > /usr/local/sbin/sygen-backup.sh <<'BACKUP'
+#!/usr/bin/env bash
+# Sygen nightly backup — managed by install.sh (Phase 2.8).
+# Snapshots /srv/sygen/{data,.env,docker-compose.yml,claude-auth} into
+# /var/backups/sygen/sygen-YYYY-MM-DD.tar.gz and prunes archives >7d old.
+set -euo pipefail
+
+SRC=/srv/sygen
+DEST=/var/backups/sygen
+
+if [ ! -d "$SRC/data" ]; then
+    echo "sygen-backup: $SRC/data missing — refusing to back up" >&2
+    exit 1
+fi
+
+mkdir -p "$DEST"
+STAMP=$(date -u +%Y-%m-%d)
+OUT="$DEST/sygen-${STAMP}.tar.gz"
+
+# .env / docker-compose.yml / claude-auth are optional on a partially
+# bootstrapped host — don't fail the run if any are missing.
+tar -czf "$OUT" -C "$SRC" data .env docker-compose.yml claude-auth 2>/dev/null || true
+
+# Archive contains api token, jwt secret, and Claude OAuth creds.
+chmod 600 "$OUT"
+
+find "$DEST" -maxdepth 1 -name 'sygen-*.tar.gz' -type f -mtime +7 -delete
+BACKUP
+chmod 0755 /usr/local/sbin/sygen-backup.sh
+
+cat > /etc/systemd/system/sygen-backup.service <<'UNIT'
+[Unit]
+Description=Sygen nightly backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sygen-backup.sh
+UNIT
+
+cat > /etc/systemd/system/sygen-backup.timer <<'UNIT'
+[Unit]
+Description=Run sygen-backup daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now sygen-backup.timer
+# Take the first snapshot now so a fresh install ships with one backup.
+systemctl start --no-block sygen-backup.service
 
 # ---------- 11. Done ----------
 cat <<DONE
@@ -271,6 +329,7 @@ cat <<DONE
   Admin image: $ADMIN_IMAGE
   Data dir:    /srv/sygen/data
   Compose:     /srv/sygen/docker-compose.yml  (--env-file /srv/sygen/.env)
+  Backups:     /var/backups/sygen/sygen-*.tar.gz  (daily, 7-day retention)
 
   Upgrade:     cd /srv/sygen && docker compose pull && docker compose up -d
   Logs:        docker compose -f /srv/sygen/docker-compose.yml logs -f core

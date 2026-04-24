@@ -66,6 +66,43 @@ systemctl disable --now unattended-upgrades
 rm /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 ```
 
+## Backups
+
+A `sygen-backup.timer` systemd unit runs daily and writes a compressed
+archive of `/srv/sygen/{data,.env,docker-compose.yml,claude-auth}` to
+`/var/backups/sygen/sygen-YYYY-MM-DD.tar.gz`. Archives older than 7 days
+are pruned automatically. Each archive is `chmod 600` because it contains
+the API token, JWT secret, and Claude OAuth credentials.
+
+The first snapshot is taken at the end of the install run, so a fresh
+host has a usable backup right away.
+
+### Restore on a new host
+
+After running `install.sh` on the replacement VPS (so DNS, certs, and the
+stack are wired up), drop a backup tarball into place:
+
+```bash
+cd /srv/sygen && docker compose down
+tar -xzf /var/backups/sygen/sygen-YYYY-MM-DD.tar.gz -C /srv/sygen/
+docker compose up -d
+```
+
+### Off-site copy
+
+The installer doesn't ship any off-site sync — pull or push the archives
+yourself. Example with rsync:
+
+```bash
+rsync -az /var/backups/sygen/ user@backup-host:/backups/sygen-$(hostname)/
+```
+
+### Disabling
+
+```bash
+systemctl disable --now sygen-backup.timer
+```
+
 ## Image sources
 
 - Core:  `ghcr.io/alexeymorozua/sygen-core:latest`

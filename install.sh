@@ -180,6 +180,15 @@ if [ ! -f /srv/sygen/data/config/config.json ]; then
 JSON
 fi
 
+# Preserve an existing SYGEN_UPDATER_TOKEN across re-runs of install.sh
+# so the token stays stable between the core and updater services.
+EXISTING_UPDATER_TOKEN=""
+if [ -f /srv/sygen/.env ]; then
+    EXISTING_UPDATER_TOKEN=$(grep -E '^SYGEN_UPDATER_TOKEN=' /srv/sygen/.env \
+        | head -n1 | cut -d= -f2- || true)
+fi
+UPDATER_TOKEN="${EXISTING_UPDATER_TOKEN:-$(openssl rand -hex 32)}"
+
 # docker-compose .env is auto-sourced by `docker compose`.
 umask 077
 cat > /srv/sygen/.env <<ENV
@@ -187,6 +196,9 @@ SYGEN_CORE_IMAGE=$CORE_IMAGE
 SYGEN_ADMIN_IMAGE=$ADMIN_IMAGE
 ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 LOG_LEVEL=INFO
+# Shared secret for core ↔ updater-sidecar apply calls. Core authenticates
+# its POST to http://sygen-updater:8082/apply with this bearer token.
+SYGEN_UPDATER_TOKEN=$UPDATER_TOKEN
 ENV
 umask 022
 chmod 600 /srv/sygen/.env

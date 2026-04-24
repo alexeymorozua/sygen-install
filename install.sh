@@ -74,6 +74,22 @@ if ! docker compose version >/dev/null 2>&1; then
     die "docker compose plugin missing — install manually and re-run"
 fi
 
+# ---------- 1b. Unattended-upgrades (OS security patches) ----------
+log "Enabling unattended-upgrades"
+apt-get install -y -qq unattended-upgrades
+
+# Idempotently enable daily check + unattended install. We deliberately
+# don't touch /etc/apt/apt.conf.d/50unattended-upgrades — the distro
+# default ships security-only, which is what we want.
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'APT'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+APT
+if systemctl list-unit-files unattended-upgrades.service >/dev/null 2>&1; then
+    systemctl enable --now unattended-upgrades.service >/dev/null 2>&1 || true
+fi
+
 # ---------- 2. Public IP + Cloudflare DNS ----------
 log "Detecting public IP"
 PUBLIC_IP=$(curl -fsS https://api.ipify.org || curl -fsS https://ifconfig.me)
@@ -213,7 +229,25 @@ for i in $(seq 1 60); do
     sleep 2
 done
 
-# ---------- 9. Done ----------
+# ---------- 9. Auto-updates & cert renewal ----------
+# Container image auto-updates run inside the stack via the Watchtower
+# service defined in docker-compose.yml — it polls GHCR hourly and
+# recreates any container labeled com.centurylinklabs.watchtower.enable.
+#
+# certbot's Debian/Ubuntu package installs certbot.timer (runs twice
+# daily), so cert renewals happen on their own. We just need nginx to
+# reload and pick up the new chain after a successful renew.
+log "Installing cert-renewal nginx reload hook"
+mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh <<'HOOK'
+#!/bin/sh
+systemctl reload nginx
+HOOK
+chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+
+# ---------- 10. (reserved for backups — Phase 2.8) ----------
+
+# ---------- 11. Done ----------
 cat <<DONE
 
 =====================================================================

@@ -37,6 +37,35 @@ cd /srv/sygen
 docker compose pull && docker compose up -d
 ```
 
+## Auto-updates
+
+A fresh install keeps itself current without manual intervention:
+
+- **Container images** — a `watchtower` service in `docker-compose.yml`
+  polls GHCR hourly and recreates the `core` + `admin` containers when a
+  newer `:latest` digest is published. Only containers carrying the
+  `com.centurylinklabs.watchtower.enable=true` label are touched.
+- **OS security patches** — `unattended-upgrades` is installed and
+  enabled (`/etc/apt/apt.conf.d/20auto-upgrades`). The distro default
+  `50unattended-upgrades` policy is security-only.
+- **TLS certs** — `certbot.timer` (shipped by the `certbot` package)
+  runs twice daily. A deploy hook at
+  `/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh` reloads nginx
+  after each successful renewal.
+
+Opting out:
+
+```bash
+# Stop container image updates
+cd /srv/sygen && docker compose rm -sf watchtower
+
+# Stop OS security updates
+systemctl disable --now unattended-upgrades
+
+# Stop the nginx reload on cert renewal (certs still renew)
+rm /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+```
+
 ## Image sources
 
 - Core:  `ghcr.io/alexeymorozua/sygen-core:latest`

@@ -22,6 +22,8 @@ services:
       # `docker compose exec core claude auth login` after first start.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "127.0.0.1:8081:8081"
 
@@ -38,5 +40,21 @@ services:
       - NEXT_PUBLIC_SYGEN_API_URL=${NEXT_PUBLIC_SYGEN_API_URL:-}
     depends_on:
       - core
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "127.0.0.1:3000:3000"
+
+  # Polls GHCR hourly and recreates any container with the
+  # `com.centurylinklabs.watchtower.enable=true` label when a newer
+  # image digest is published. --label-enable scopes it to opted-in
+  # services, so watchtower never updates itself or user sidecars.
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: sygen-watchtower
+    restart: unless-stopped
+    command: --label-enable --cleanup --interval 3600
+    environment:
+      - TZ=UTC
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro

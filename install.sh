@@ -442,22 +442,89 @@ if [ "$AUTO_MODE" -eq 1 ]; then
     # Re-run detection: a previous successful auto-mode install left
     # SYGEN_INSTALL_TOKEN in /srv/sygen/.env. Calling /api/provision again
     # would burn a fresh slot AND drop the existing live DNS/TLS into limbo,
-    # so we reuse what's already on disk instead.
+    # so we reuse what's already on disk instead — UNLESS the Worker has
+    # since sweep'd the reservation (>30 days no heartbeat: VPS was down,
+    # crontab broken, etc). In that case the install_token + cached FQDN
+    # are stale: A record is gone, heartbeat URL returns 404. We detect
+    # that with a probe call and fall through to fresh provision, leaving
+    # /srv/sygen/data/* untouched so the user keeps their data.
     if [ -f "$SYGEN_ROOT/.env" ] && grep -q '^SYGEN_INSTALL_TOKEN=' "$SYGEN_ROOT/.env"; then
-        AUTO_MODE_REUSE=1
-        log "Auto-mode re-run: SYGEN_INSTALL_TOKEN already in $SYGEN_ROOT/.env — skipping provision"
         SYGEN_INSTALL_TOKEN=$(grep '^SYGEN_INSTALL_TOKEN=' "$SYGEN_ROOT/.env" | head -n1 | cut -d= -f2-)
         SYGEN_INSTALL_HEARTBEAT_URL=$(grep '^SYGEN_INSTALL_HEARTBEAT_URL=' "$SYGEN_ROOT/.env" 2>/dev/null | head -n1 | cut -d= -f2- || true)
         SYGEN_DNS_CHALLENGE_URL=$(grep '^SYGEN_DNS_CHALLENGE_URL=' "$SYGEN_ROOT/.env" 2>/dev/null | head -n1 | cut -d= -f2- || true)
-        if [ -f "$SYGEN_ROOT/data/config/config.json" ]; then
-            SUB=$(jq -r '.instance_name // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)
+
+        # Probe Worker — is the reservation still alive? Default to the
+        # canonical heartbeat URL if .env didn't carry one (older installs).
+        PROBE_URL="${SYGEN_INSTALL_HEARTBEAT_URL:-https://install.${DOMAIN}/api/heartbeat}"
+        log "Auto-mode re-run: probing Worker reservation (heartbeat $PROBE_URL)"
+        PROBE_HTTP=$(curl -sS -o /tmp/sygen-heartbeat-probe.json -w '%{http_code}' \
+            -X POST -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg t "$SYGEN_INSTALL_TOKEN" '{install_token:$t}')" \
+            "$PROBE_URL" 2>/dev/null || echo "000")
+
+        if [ "$PROBE_HTTP" = "200" ]; then
+            AUTO_MODE_REUSE=1
+            log "Auto-mode re-run: reservation alive — skipping provision"
+            if [ -f "$SYGEN_ROOT/data/config/config.json" ]; then
+                SUB=$(jq -r '.instance_name // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)
+            fi
+            [ -n "${SUB:-}" ] || die "auto-mode re-run: heartbeat ok but cannot recover subdomain — config.json missing or has no instance_name. Wipe $SYGEN_ROOT/data/config and rerun."
+            FQDN="${SUB}.${DOMAIN}"
+            ADMIN_URL="https://$FQDN"
+            CORS_ORIGIN="https://$FQDN"
+            log "Auto-mode re-run: continuing with existing $FQDN"
+        elif [ "$PROBE_HTTP" = "404" ] || [ "$PROBE_HTTP" = "401" ]; then
+            warn "Auto-mode re-run: Worker dropped the reservation (probe HTTP $PROBE_HTTP)."
+            warn "  This means the VPS was offline >30 days OR weekly heartbeats were not running."
+            warn "  Recovering: requesting a NEW subdomain — the old one is freed."
+            warn "  YOUR DATA IS PRESERVED ($SYGEN_ROOT/data/*). Only the URL will change."
+            # Strip the now-orphaned token + URL hints from .env so the
+            # install.sh blocks below treat this as a fresh provision but
+            # DON'T touch /srv/sygen/data — the user's DB, secrets, sessions
+            # all survive. config.json's instance_name will be overwritten
+            # below once the new subdomain is assigned.
+            sed -i.bak \
+                -e '/^SYGEN_INSTALL_TOKEN=/d' \
+                -e '/^SYGEN_INSTALL_HEARTBEAT_URL=/d' \
+                -e '/^SYGEN_DNS_CHALLENGE_URL=/d' \
+                "$SYGEN_ROOT/.env" 2>/dev/null || true
+            rm -f "$SYGEN_ROOT/.env.bak" 2>/dev/null || true
+            # Also remove the dead LE cert dir if it exists; certbot will
+            # request a fresh one for the new FQDN below.
+            if [ -f "$SYGEN_ROOT/data/config/config.json" ]; then
+                OLD_SUB=$(jq -r '.instance_name // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)
+                if [ -n "$OLD_SUB" ] && [ -d "/etc/letsencrypt/live/${OLD_SUB}.${DOMAIN}" ]; then
+                    log "Removing stale LE cert for old FQDN ${OLD_SUB}.${DOMAIN}"
+                    rm -rf "/etc/letsencrypt/live/${OLD_SUB}.${DOMAIN}" \
+                           "/etc/letsencrypt/archive/${OLD_SUB}.${DOMAIN}" \
+                           "/etc/letsencrypt/renewal/${OLD_SUB}.${DOMAIN}.conf" 2>/dev/null || true
+                fi
+            fi
+            SYGEN_INSTALL_TOKEN=""
+            SYGEN_INSTALL_HEARTBEAT_URL=""
+            SYGEN_DNS_CHALLENGE_URL=""
+            # Fall through to fresh provision in the else-branch below.
+        else
+            # Network failure / Worker 5xx / DNS not resolving — DON'T
+            # nuke the local token (it might still be valid). Reuse it
+            # and let the rest of the script try; if DNS really gone,
+            # the propagation check at line ~510 will surface it.
+            warn "Auto-mode re-run: heartbeat probe inconclusive (HTTP $PROBE_HTTP) — keeping existing token"
+            AUTO_MODE_REUSE=1
+            if [ -f "$SYGEN_ROOT/data/config/config.json" ]; then
+                SUB=$(jq -r '.instance_name // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)
+            fi
+            [ -n "${SUB:-}" ] || die "auto-mode re-run: cannot recover subdomain — config.json missing or has no instance_name. Wipe $SYGEN_ROOT/data/config and rerun for a fresh provision."
+            FQDN="${SUB}.${DOMAIN}"
+            ADMIN_URL="https://$FQDN"
+            CORS_ORIGIN="https://$FQDN"
+            log "Auto-mode re-run: continuing with existing $FQDN"
         fi
-        [ -n "${SUB:-}" ] || die "auto-mode re-run: cannot recover subdomain — config.json missing or has no instance_name. Wipe $SYGEN_ROOT and rerun for a fresh provision."
-        FQDN="${SUB}.${DOMAIN}"
-        ADMIN_URL="https://$FQDN"
-        CORS_ORIGIN="https://$FQDN"
-        log "Auto-mode re-run: continuing with existing $FQDN"
-    else
+    fi
+
+    # Fresh provision: either no prior install OR a re-run where heartbeat
+    # probe revealed the reservation was sweep'd.
+    if [ -z "${SYGEN_INSTALL_TOKEN:-}" ]; then
         log "Auto-mode: requesting subdomain from $PROVISION_URL"
         PROVISION_RESPONSE=$(curl -fsS -X POST -H "Content-Type: application/json" \
             -d '{}' "$PROVISION_URL") \

@@ -23,12 +23,14 @@ subdomain-service/
     ├── lib/
     │   ├── cf.js            # Cloudflare API client
     │   ├── crypto.js        # install_token gen + sha256
+    │   ├── ratelimit.js     # KV-backed per-IP rate limit for /api/provision
     │   ├── response.js      # JSON response helper
     │   └── subdomain.js     # alphabet, generator, blacklist
     └── __tests__/
         ├── crypto.test.js
         ├── subdomain.test.js
         ├── dns_challenge.test.js
+        ├── provision.test.js
         └── sweep.test.js
 ```
 
@@ -112,11 +114,15 @@ The Worker binds to `install.sygen.pro/api/*`. Static install.sh and
 docker-compose.yml continue to be served via Pages on the same hostname;
 only `/api/*` paths route to this Worker.
 
-### 6. Configure rate limits in CF dashboard
+### 6. Rate limits
 
-These are enforced by Cloudflare zone rules in front of the Worker, **not**
-by the Worker itself. Set up under
-**Security → WAF → Rate limiting rules** on `sygen.pro`:
+The Worker enforces an **in-process** IP rate limit on `/api/provision`
+(5 requests per IP per hour, KV-backed, returns 429 with `Retry-After`).
+Override the cap via the `PROVISION_RATE_LIMIT` Worker env var if needed.
+
+CF WAF rate-limiting rules are still recommended as **defense-in-depth**
+in front of the Worker. Configure under **Security → WAF → Rate limiting
+rules** on `sygen.pro`:
 
 | Rule | Path | Limit | Action |
 |---|---|---|---|
@@ -196,9 +202,10 @@ No runtime dependencies; tests use Web Crypto from `globalThis`.
   in code we control. See `PHASE3_TLS_token_scoping_decision.md`.
 - **install_token is stored only as sha256 hex.** Plaintext lives only on
   the requesting client and in flight over TLS.
-- **DNS rollback on token-mint failure**: provision deletes the just-created
-  A record if the scoped token mint fails — otherwise we'd leak unused
-  records into the zone.
+- **DNS rollback on KV write failure**: provision deletes the just-created
+  A record if either KV put (`SUBDOMAIN_RESERVATIONS` or `TOKEN_INDEX`)
+  rejects. Without a reservation row the daily sweep can't reclaim the
+  record, so an orphaned A would otherwise leak into the zone.
 - **Release is idempotent**: unknown tokens return `200 {ok:true,
   released:false}` so `uninstall.sh` doesn't blow up on a double-uninstall
   or already-swept slot.

@@ -1,7 +1,8 @@
 import { jsonResponse } from "../lib/response.js";
 import { generateInstallToken, sha256Hex } from "../lib/crypto.js";
 import { generateSubdomain, isReserved, dnsRecordTypeForIp } from "../lib/subdomain.js";
-import { createDnsRecord, CfApiError } from "../lib/cf.js";
+import { createDnsRecord, deleteDnsRecord, CfApiError } from "../lib/cf.js";
+import { checkRateLimit } from "../lib/ratelimit.js";
 
 const MAX_CLAIM_ATTEMPTS = 4;
 
@@ -25,6 +26,20 @@ export async function handleProvision(request, env) {
   const dnsType = dnsRecordTypeForIp(callerIp);
   if (!dnsType) {
     return jsonResponse(400, { error: "missing_or_invalid_caller_ip" });
+  }
+
+  // Defense-in-depth IP rate limit. Operator is also asked to configure a
+  // CF WAF rule with the same shape; this guard kicks in even if that's
+  // skipped so an attacker can't burn the 1200/5min CF API quota for the
+  // zone.
+  const rl = await checkRateLimit(env, callerIp);
+  if (!rl.allowed) {
+    console.warn("provision: rate_limited", { ip: callerIp, cap: rl.cap });
+    return jsonResponse(
+      429,
+      { error: "rate_limited", retry_after: rl.retryAfter },
+      { "Retry-After": String(rl.retryAfter) },
+    );
   }
 
   // Atomic-ish claim. KV has no native CAS, so race window is the read↔write
@@ -74,10 +89,30 @@ export async function handleProvision(request, env) {
     cf_record_id: record.id,
   };
 
-  await Promise.all([
-    env.SUBDOMAIN_RESERVATIONS.put(subdomain, JSON.stringify(reservation)),
-    env.TOKEN_INDEX.put(tokenHash, subdomain),
-  ]);
+  try {
+    await Promise.all([
+      env.SUBDOMAIN_RESERVATIONS.put(subdomain, JSON.stringify(reservation)),
+      env.TOKEN_INDEX.put(tokenHash, subdomain),
+    ]);
+  } catch (e) {
+    // KV write failed — without a reservation row the daily sweep can't
+    // reclaim the just-created A record, so roll it back synchronously.
+    console.error("provision: kv_put_failed", {
+      subdomain,
+      record_id: record.id,
+      message: e.message,
+    });
+    try {
+      await deleteDnsRecord(env, record.id);
+    } catch (rollbackErr) {
+      console.error("provision: dns_rollback_failed", {
+        subdomain,
+        record_id: record.id,
+        message: rollbackErr.message,
+      });
+    }
+    return jsonResponse(503, { error: "kv_put_failed" });
+  }
 
   console.log("provision: ok", {
     subdomain,

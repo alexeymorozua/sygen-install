@@ -5,6 +5,9 @@ const JSON_HEADERS = {
   "Cache-Control": "no-store",
 };
 
-export function jsonResponse(status, body) {
-  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+export function jsonResponse(status, body, extraHeaders) {
+  const headers = extraHeaders
+    ? { ...JSON_HEADERS, ...extraHeaders }
+    : JSON_HEADERS;
+  return new Response(JSON.stringify(body), { status, headers });
 }

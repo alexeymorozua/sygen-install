@@ -1,0 +1,228 @@
+{
+  "version": 1,
+  "updated_at": "2026-04-25",
+  "schema_version": "1.0",
+  "providers": [
+    {
+      "id": "hetzner",
+      "name": "Hetzner Cloud",
+      "url": "https://www.hetzner.com/cloud",
+      "logo_url": "https://install.sygen.pro/providers/logos/hetzner.svg",
+      "description": "Cheapest in EU, very reliable, fast network",
+      "price_hint": "from €4.51/mo",
+      "min_specs": "CPX11: 2 vCPU, 2 GB RAM, 40 GB disk",
+      "regions": ["DE", "FI", "US", "SG"],
+      "recommended": true
+    },
+    {
+      "id": "digitalocean",
+      "name": "DigitalOcean",
+      "url": "https://www.digitalocean.com/products/droplets",
+      "logo_url": "https://install.sygen.pro/providers/logos/digitalocean.svg",
+      "description": "Popular global VPS, simple UI, lots of regions",
+      "price_hint": "from $6/mo",
+      "min_specs": "Regular: 1 vCPU, 1 GB RAM, 25 GB SSD",
+      "regions": ["US", "EU", "AS", "AU", "IN", "CA"],
+      "recommended": true
+    },
+    {
+      "id": "vultr",
+      "name": "Vultr",
+      "url": "https://www.vultr.com/products/cloud-compute/",
+      "logo_url": "https://install.sygen.pro/providers/logos/vultr.svg",
+      "description": "Global low-cost VPS with hourly billing",
+      "price_hint": "from $5/mo",
+      "min_specs": "Regular Cloud: 1 vCPU, 1 GB RAM, 25 GB",
+      "regions": ["US", "EU", "AS", "AU", "JP", "BR", "ZA"],
+      "recommended": false
+    },
+    {
+      "id": "linode",
+      "name": "Linode (Akamai)",
+      "url": "https://www.linode.com/products/shared/",
+      "logo_url": "https://install.sygen.pro/providers/logos/linode.svg",
+      "description": "Akamai-backed, mature platform, strong support",
+      "price_hint": "from $5/mo",
+      "min_specs": "Nanode 1GB: 1 vCPU, 1 GB RAM, 25 GB",
+      "regions": ["US", "EU", "AS", "AU", "IN"],
+      "recommended": false
+    },
+    {
+      "id": "contabo",
+      "name": "Contabo",
+      "url": "https://contabo.com/en/vps/",
+      "logo_url": "https://install.sygen.pro/providers/logos/contabo.svg",
+      "description": "Highest specs per dollar, EU + US datacenters",
+      "price_hint": "from €6/mo",
+      "min_specs": "VPS S: 4 vCPU, 8 GB RAM, 50 GB NVMe",
+      "regions": ["DE", "US", "UK", "JP", "SG"],
+      "recommended": true
+    },
+    {
+      "id": "aws-lightsail",
+      "name": "AWS Lightsail",
+      "url": "https://aws.amazon.com/lightsail/",
+      "logo_url": "https://install.sygen.pro/providers/logos/aws-lightsail.svg",
+      "description": "Simplified AWS for VPS use cases",
+      "price_hint": "from $5/mo",
+      "min_specs": "Nano: 1 vCPU, 512 MB RAM, 20 GB SSD (use Micro+ for Sygen)",
+      "regions": ["Global (AWS regions)"],
+      "recommended": false
+    },
+    {
+      "id": "hostinger",
+      "name": "Hostinger VPS",
+      "url": "https://www.hostinger.com/vps-hosting",
+      "logo_url": "https://install.sygen.pro/providers/logos/hostinger.svg",
+      "description": "Budget VPS with annual contract discounts",
+      "price_hint": "from $4/mo (annual)",
+      "min_specs": "KVM 1: 1 vCPU, 4 GB RAM, 50 GB NVMe",
+      "regions": ["US", "EU", "AS", "BR"],
+      "recommended": false
+    },
+    {
+      "id": "ovh",
+      "name": "OVHcloud",
+      "url": "https://www.ovhcloud.com/en/vps/",
+      "logo_url": "https://install.sygen.pro/providers/logos/ovh.svg",
+      "description": "EU-focused, GDPR-compliant, anti-DDoS included",
+      "price_hint": "from €5/mo",
+      "min_specs": "Starter: 1 vCPU, 2 GB RAM, 20 GB NVMe",
+      "regions": ["FR", "DE", "UK", "PL", "CA", "US", "SG", "AU"],
+      "recommended": false
+    },
+    {
+      "id": "scaleway",
+      "name": "Scaleway",
+      "url": "https://www.scaleway.com/en/virtual-instances/",
+      "logo_url": "https://install.sygen.pro/providers/logos/scaleway.svg",
+      "description": "EU-based, ARM + AMD options, hourly billing",
+      "price_hint": "from €4/mo",
+      "min_specs": "DEV1-S: 2 vCPU, 2 GB RAM, 20 GB",
+      "regions": ["FR", "NL", "PL"],
+      "recommended": false
+    },
+    {
+      "id": "time4vps",
+      "name": "Time4VPS",
+      "url": "https://www.time4vps.com/cart/?card=linux-vps",
+      "logo_url": "https://install.sygen.pro/providers/logos/time4vps.svg",
+      "description": "Cheap EU VPS (Lithuania), good for budget",
+      "price_hint": "from €3/mo",
+      "min_specs": "Linux 1: 1 vCPU, 2 GB RAM, 20 GB",
+      "regions": ["LT"],
+      "recommended": false
+    },
+    {
+      "id": "upcloud",
+      "name": "UpCloud",
+      "url": "https://upcloud.com/products/cloud-servers",
+      "logo_url": "https://install.sygen.pro/providers/logos/upcloud.svg",
+      "description": "Premium EU VPS, very fast NVMe, 100% uptime SLA",
+      "price_hint": "from $5/mo",
+      "min_specs": "1xCPU-1GB: 1 vCPU, 1 GB RAM, 25 GB NVMe",
+      "regions": ["FI", "DE", "NL", "UK", "PL", "ES", "US", "SG", "AU"],
+      "recommended": false
+    },
+    {
+      "id": "kamatera",
+      "name": "Kamatera",
+      "url": "https://www.kamatera.com/services/cloud-vps/",
+      "logo_url": "https://install.sygen.pro/providers/logos/kamatera.svg",
+      "description": "Enterprise-grade, 30-day free trial available",
+      "price_hint": "from $4/mo",
+      "min_specs": "Type A: 1 vCPU, 1 GB RAM, 20 GB SSD",
+      "regions": ["US", "EU", "IL", "HK", "CA"],
+      "recommended": false
+    },
+    {
+      "id": "ionos",
+      "name": "IONOS Cloud",
+      "url": "https://www.ionos.com/cloud/compute/cloud-server",
+      "logo_url": "https://install.sygen.pro/providers/logos/ionos.svg",
+      "description": "German cloud (1&1 brand), GDPR-compliant",
+      "price_hint": "from €1/mo (intro)",
+      "min_specs": "VPS S: 1 vCPU, 1 GB RAM, 10 GB SSD (use M+ for Sygen)",
+      "regions": ["DE", "ES", "FR", "GB", "US"],
+      "recommended": false
+    },
+    {
+      "id": "racknerd",
+      "name": "RackNerd",
+      "url": "https://www.racknerd.com/",
+      "logo_url": "https://install.sygen.pro/providers/logos/racknerd.svg",
+      "description": "US budget VPS, recurring KVM deals",
+      "price_hint": "from $11/year",
+      "min_specs": "varies by deal — look for ≥1 GB RAM",
+      "regions": ["US"],
+      "recommended": false
+    },
+    {
+      "id": "interserver",
+      "name": "InterServer",
+      "url": "https://www.interserver.net/vps/",
+      "logo_url": "https://install.sygen.pro/providers/logos/interserver.svg",
+      "description": "US-based VPS with price-lock guarantee",
+      "price_hint": "from $6/mo",
+      "min_specs": "Slice 1: 1 vCPU, 2 GB RAM, 30 GB SSD",
+      "regions": ["US"],
+      "recommended": false
+    },
+    {
+      "id": "namecheap",
+      "name": "Namecheap VPS",
+      "url": "https://www.namecheap.com/hosting/vps/",
+      "logo_url": "https://install.sygen.pro/providers/logos/namecheap.svg",
+      "description": "Domain-friendly, includes free WHOIS privacy",
+      "price_hint": "from $7/mo",
+      "min_specs": "Pulsar: 2 vCPU, 2 GB RAM, 40 GB SSD",
+      "regions": ["US", "UK", "NL"],
+      "recommended": false
+    },
+    {
+      "id": "binarylane",
+      "name": "BinaryLane",
+      "url": "https://www.binarylane.com.au/",
+      "logo_url": "https://install.sygen.pro/providers/logos/binarylane.svg",
+      "description": "Australian VPS provider, low ping for AU users",
+      "price_hint": "from $5/mo",
+      "min_specs": "1G: 1 vCPU, 1 GB RAM, 30 GB NVMe",
+      "regions": ["AU"],
+      "recommended": false
+    },
+    {
+      "id": "yandex-cloud",
+      "name": "Yandex Cloud",
+      "url": "https://yandex.cloud/en/services/compute",
+      "logo_url": "https://install.sygen.pro/providers/logos/yandex-cloud.svg",
+      "description": "Russian cloud, low latency for RU/BY users",
+      "price_hint": "varies (RU rubles)",
+      "min_specs": "small: 2 vCPU, 2 GB RAM, 20 GB",
+      "regions": ["RU"],
+      "recommended": false
+    },
+    {
+      "id": "selectel",
+      "name": "Selectel",
+      "url": "https://selectel.com/services/cloud-vps/",
+      "logo_url": "https://install.sygen.pro/providers/logos/selectel.svg",
+      "description": "Russian VPS, also accepts crypto payments",
+      "price_hint": "varies",
+      "min_specs": "S: 1 vCPU, 1 GB RAM, 10 GB",
+      "regions": ["RU", "EU"],
+      "recommended": false
+    },
+    {
+      "id": "fra1-cloud",
+      "name": "FRA1 / Other",
+      "url": "https://www.cheap-vps-list.com/",
+      "logo_url": null,
+      "description": "Other provider not listed? Browse cheap-vps-list for alternatives",
+      "price_hint": "varies",
+      "min_specs": "≥2 vCPU, ≥2 GB RAM, ≥20 GB disk recommended for Sygen",
+      "regions": ["Global"],
+      "recommended": false
+    }
+  ],
+  "minimum_specs_note": "Sygen needs at least 2 vCPU, 2 GB RAM, 20 GB disk to comfortably run core + admin + updater containers. 4 GB RAM recommended if you plan to run multiple sub-agents."
+}

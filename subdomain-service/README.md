@@ -18,6 +18,7 @@ subdomain-service/
     │   ├── provision.js
     │   ├── heartbeat.js
     │   ├── release.js
+    │   ├── dns_challenge.js # ACME DNS-01 TXT add/remove for owned subdomain
     │   └── health.js
     ├── lib/
     │   ├── cf.js            # Cloudflare API client
@@ -27,6 +28,7 @@ subdomain-service/
     └── __tests__/
         ├── crypto.test.js
         ├── subdomain.test.js
+        ├── dns_challenge.test.js
         └── sweep.test.js
 ```
 
@@ -34,12 +36,20 @@ subdomain-service/
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/provision` | Allocate fresh `<id>.sygen.pro` + install_token + scoped DNS-01 token |
+| `POST` | `/api/provision` | Allocate fresh `<id>.sygen.pro` + install_token. Worker also creates the A record from CF-Connecting-IP. |
 | `POST` | `/api/heartbeat` | Extend reservation TTL by `TTL_DAYS` (default 30) |
 | `DELETE` | `/api/release` | Free reservation on uninstall (idempotent) |
+| `POST` | `/api/dns-challenge` | Add ACME DNS-01 TXT for `_acme-challenge.<owned-subdomain>.sygen.pro`. Auth: `install_token` in body. |
+| `DELETE` | `/api/dns-challenge` | Remove the TXT created above. Idempotent. |
 | `GET` | `/api/health` | Admin health (requires `Authorization: Bearer $ADMIN_TOKEN`) |
 
 Full request/response contracts: `PHASE3_subdomain_provisioning_design.md` §2.
+
+`/api/dns-challenge` is the Worker-mediated path that lets `install.sh` answer
+Let's Encrypt DNS-01 challenges without ever holding a Cloudflare token. The
+Worker derives the expected TXT name (`_acme-challenge.<sub>.sygen.pro`) from
+the install_token and rejects any name outside that owned subdomain. See
+`PHASE3_TLS_token_scoping_decision.md` for the rationale.
 
 ## Scheduled tasks
 
@@ -56,17 +66,11 @@ owns `sygen.pro`.
 ### 1. Cloudflare account prerequisites
 
 - An API token (`CF_MASTER_API_TOKEN`) with these permissions:
-  - **Zone → DNS → Edit** on `sygen.pro`
-  - **User → API Tokens → Edit** (needed to mint short-lived per-install
-    DNS-01 tokens via `POST /user/tokens`)
-- The DNS Write permission group ID for your account:
-  ```bash
-  curl -H "Authorization: Bearer $CF_MASTER_API_TOKEN" \
-       https://api.cloudflare.com/client/v4/user/tokens/permission_groups \
-    | jq '.result[] | select(.name == "DNS Write")'
-  ```
-  Copy the `id` field into `CF_DNS_WRITE_PERMISSION_GROUP_ID` in
-  `wrangler.toml` (replacing the `REPLACE_WITH_DNS_WRITE_PG_ID` placeholder).
+  - **Zone → DNS → Edit** on `sygen.pro` — used to create the A record
+    during `/api/provision` and the TXT record during `/api/dns-challenge`.
+
+  No `User → API Tokens → Edit` permission is required — the Worker no
+  longer mints per-install scoped tokens.
 
 ### 2. Install wrangler and authenticate
 
@@ -119,6 +123,9 @@ by the Worker itself. Set up under
 | `provision` | `/api/provision` | 5 / hour / IP | 429 |
 | `heartbeat` | `/api/heartbeat` | 60 / hour / IP | 429 |
 | `release` | `/api/release` | 10 / hour / IP | 429 |
+| `dns-challenge` | `/api/dns-challenge` | 20 / hour / IP | 429 |
+
+(LE typically does 1–2 challenges per cert; 20/hour absorbs renewal retries.)
 
 ### 7. Smoke test
 
@@ -126,10 +133,18 @@ by the Worker itself. Set up under
 # Allocate
 curl -X POST https://install.sygen.pro/api/provision \
   -H "Content-Type: application/json" -d '{}'
-# → {"fqdn":"...","install_token":"sit_...","tls_dns_token":"..."}
+# → {"fqdn":"...","install_token":"sit_...","heartbeat_url":"...","dns_challenge_url":"..."}
 
 # Wait ~30s for DNS propagation, then verify
 dig +short <fqdn>
+
+# DNS-01 challenge (Worker-mediated; install.sh's certbot hooks call these)
+curl -X POST https://install.sygen.pro/api/dns-challenge \
+  -H "Content-Type: application/json" \
+  -d '{"install_token":"<token>","name":"_acme-challenge.<sub>.sygen.pro","value":"<acme-validation>"}'
+curl -X DELETE https://install.sygen.pro/api/dns-challenge \
+  -H "Content-Type: application/json" \
+  -d '{"install_token":"<token>","name":"_acme-challenge.<sub>.sygen.pro"}'
 
 # Heartbeat
 curl -X POST https://install.sygen.pro/api/heartbeat \
@@ -174,9 +189,11 @@ No runtime dependencies; tests use Web Crypto from `globalThis`.
 - **KV is eventually consistent** but reads after writes within the same
   colocation are strongly consistent. Provision retries claim attempts up
   to 4 times if the random subdomain happens to collide.
-- **Per-record CF token scoping is not exposed by the API today.** The
-  scoped token returned by `/api/provision` is whole-zone DNS:Edit with a
-  1 h `expires_on`. Short TTL bounds the abuse window.
+- **install.sh never receives a Cloudflare token.** Per-record CF token
+  scoping is not exposed by the API today, so we don't ship any CF token
+  to the host. The Worker mediates the DNS-01 challenge via
+  `/api/dns-challenge` and enforces the name scope (`_acme-challenge.<sub>.sygen.pro`)
+  in code we control. See `PHASE3_TLS_token_scoping_decision.md`.
 - **install_token is stored only as sha256 hex.** Plaintext lives only on
   the requesting client and in flight over TLS.
 - **DNS rollback on token-mint failure**: provision deletes the just-created

@@ -41,6 +41,35 @@ Backups and auto-start on login are not configured on macOS yet — back up
 
 See the header of [`install.sh`](./install.sh) for the full env var list.
 
+## Output formats
+
+By default `install.sh` prints a human-readable banner at the end with the
+admin URL, generated password, image refs, and follow-up commands.
+
+For SSH-driven deploy wizards (e.g. the iOS deploy flow), pass
+`--json-output` or set `SYGEN_JSON_OUTPUT=1` to get a single
+machine-parseable JSON line on stdout instead. Progress logs still go to
+stderr so the operator can watch the install in real time.
+
+```bash
+# success: one JSON line on stdout, ok=true
+curl -fsSL https://install.sygen.pro/install.sh | \
+    SYGEN_SUBDOMAIN=alice \
+    CF_API_TOKEN=cfat_xxx \
+    CF_ZONE_ID=6ae59801f8ac7b5dc33b6e32d844b0a6 \
+    SYGEN_JSON_OUTPUT=1 \
+    bash
+# {"ok":true,"fqdn":"alice.sygen.pro","admin_user":"admin","admin_password":"...","admin_url":"https://alice.sygen.pro/","core_image":"...","admin_image":"...","data_dir":"/srv/sygen/data","compose_file":"/srv/sygen/docker-compose.yml"}
+```
+
+On failure the script still emits a single JSON line and exits non-zero:
+
+```json
+{"ok":false,"error":"<reason>","stage":"deps|dns|cert|data|compose|smoke|nginx|bootstrap","details":"<short>"}
+```
+
+The default (no flag, no env var) banner output is unchanged.
+
 ## Files
 
 - [`install.sh`](./install.sh) — installer entry point

@@ -21,6 +21,10 @@
 #   SYGEN_CORE_TAG            default: latest (used when *_IMAGE unset)
 #   SYGEN_ADMIN_TAG           default: latest
 #   SYGEN_ADMIN_PORT          (macOS) host port for admin, default 8080
+#   SYGEN_JSON_OUTPUT=1       emit a single JSON line on stdout instead of the
+#                             human banner (progress logs still go to stderr).
+#                             Equivalent to passing `--json-output` as a flag.
+#                             Useful for SSH-driven deploy wizards.
 #
 # The admin panel bootstraps its own "admin" user on first boot and writes the
 # one-time password to $SYGEN_ROOT/data/_secrets/.initial_admin_password. The
@@ -39,9 +43,70 @@
 #   curl -fsSL https://install.sygen.pro/install.sh | bash
 set -euo pipefail
 
-log()  { printf '\033[0;36m==>\033[0m %s\n' "$*"; }
+# ---------- Output mode (human banner vs. machine-parseable JSON) ----------
+# --json-output (or SYGEN_JSON_OUTPUT=1) makes the installer emit a single
+# JSON line on stdout at the end (success or failure) and route progress
+# logs to stderr so SSH-driven deploy wizards can parse the result without
+# scraping a human banner that may change formatting.
+JSON_OUTPUT="${SYGEN_JSON_OUTPUT:-0}"
+for arg in "$@"; do
+    case "$arg" in
+        --json-output) JSON_OUTPUT=1 ;;
+    esac
+done
+JSON_DONE=0
+STAGE="init"
+
+log()  {
+    if [ "$JSON_OUTPUT" = "1" ]; then
+        printf '\033[0;36m==>\033[0m %s\n' "$*" >&2
+    else
+        printf '\033[0;36m==>\033[0m %s\n' "$*"
+    fi
+}
 warn() { printf '\033[0;33m!!\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[0;31mXX\033[0m %s\n' "$*" >&2; exit 1; }
+die()  {
+    printf '\033[0;31mXX\033[0m %s\n' "$*" >&2
+    if [ "$JSON_OUTPUT" = "1" ] && [ "$JSON_DONE" = "0" ]; then
+        emit_json_error "$*"
+    fi
+    exit 1
+}
+
+# Minimal JSON string escape: backslash, double-quote, and the common
+# control chars. Sufficient for the values we emit (paths, image refs,
+# fqdns, the alphanumeric admin password). No NUL handling — shell vars
+# can't carry NUL anyway.
+json_escape() {
+    local s=${1-}
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    printf '"%s"' "$s"
+}
+
+emit_json_error() {
+    if [ "$JSON_OUTPUT" != "1" ] || [ "$JSON_DONE" = "1" ]; then return 0; fi
+    JSON_DONE=1
+    local err="${1:-install failed}"
+    local details="${2:-}"
+    printf '{"ok":false,"error":%s,"stage":%s,"details":%s}\n' \
+        "$(json_escape "$err")" \
+        "$(json_escape "$STAGE")" \
+        "$(json_escape "$details")"
+}
+
+# Catch unexpected non-zero exits (set -e failures from commands that
+# don't go through die()) so JSON consumers always get one final line.
+on_exit() {
+    local code=$?
+    if [ "$JSON_OUTPUT" = "1" ] && [ "$JSON_DONE" = "0" ] && [ "$code" -ne 0 ]; then
+        emit_json_error "install script exited with code $code" "stage=$STAGE"
+    fi
+}
+trap on_exit EXIT
 
 # ---------- Platform detection ----------
 OS="$(uname -s)"
@@ -106,6 +171,7 @@ else
 fi
 
 # ---------- 1. System packages ----------
+STAGE="deps"
 if [ $LOCAL_MODE -eq 0 ]; then
     log "Installing system packages"
     export DEBIAN_FRONTEND=noninteractive
@@ -171,6 +237,7 @@ fi
 
 # ---------- 2. Public IP + Cloudflare DNS (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
+    STAGE="dns"
     log "Detecting public IP"
     PUBLIC_IP=$(curl -fsS https://api.ipify.org || curl -fsS https://ifconfig.me)
     [ -n "$PUBLIC_IP" ] || die "Could not determine public IP"
@@ -209,6 +276,7 @@ fi
 
 # ---------- 3. TLS cert (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
+    STAGE="cert"
     log "Obtaining Let's Encrypt cert via Cloudflare DNS-01"
     mkdir -p /etc/letsencrypt/sygen
     umask 077
@@ -230,6 +298,7 @@ CF_INI
 fi
 
 # ---------- 4. Data dirs + bootstrap config ----------
+STAGE="data"
 log "Preparing $SYGEN_ROOT"
 mkdir -p "$SYGEN_ROOT"/{data,claude-auth}
 mkdir -p "$SYGEN_ROOT/data/config"
@@ -330,6 +399,7 @@ umask 022
 chmod 600 "$SYGEN_ROOT/.env"
 
 # ---------- 5. docker-compose.yml ----------
+STAGE="compose"
 log "Fetching docker-compose.yml from $BASE_URL"
 curl -fsSL -o "$SYGEN_ROOT/docker-compose.yml" "$BASE_URL/docker-compose.yml" \
     || die "could not fetch docker-compose.yml"
@@ -355,6 +425,7 @@ docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env"
 
 # ---------- 6b. macOS smoke-test (Linux uses nginx + Let's Encrypt to verify) ----------
 if [ $LOCAL_MODE -eq 1 ]; then
+    STAGE="smoke"
     log "macOS: smoke-testing endpoints (admin :${SYGEN_ADMIN_PORT}, core :8081)"
     smoke_ok=0
     for i in $(seq 1 30); do
@@ -386,6 +457,7 @@ fi
 
 # ---------- 7. nginx vhost (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
+    STAGE="nginx"
     log "Configuring nginx vhost for $FQDN"
     curl -fsSL -o /tmp/sygen.nginx.tmpl "$BASE_URL/nginx.conf.tmpl" \
         || die "could not fetch nginx.conf.tmpl"
@@ -397,6 +469,7 @@ if [ $LOCAL_MODE -eq 0 ]; then
 fi
 
 # ---------- 8. Wait for admin bootstrap ----------
+STAGE="bootstrap"
 log "Waiting for core to generate initial admin password..."
 PW_FILE="$SYGEN_ROOT/data/_secrets/.initial_admin_password"
 ADMIN_PASS=""
@@ -493,6 +566,27 @@ UNIT
 fi
 
 # ---------- 11. Done ----------
+STAGE="done"
+
+if [ "$JSON_OUTPUT" = "1" ]; then
+    if [ -z "$ADMIN_PASS" ]; then
+        emit_json_error \
+            "core did not write initial admin password within 2 min" \
+            "see: docker compose -f $SYGEN_ROOT/docker-compose.yml logs core"
+        exit 1
+    fi
+    JSON_DONE=1
+    printf '{"ok":true,"fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_image":%s,"admin_image":%s,"data_dir":%s,"compose_file":%s}\n' \
+        "$(json_escape "$FQDN")" \
+        "$(json_escape "$ADMIN_PASS")" \
+        "$(json_escape "$ADMIN_URL")" \
+        "$(json_escape "$CORE_IMAGE")" \
+        "$(json_escape "$ADMIN_IMAGE")" \
+        "$(json_escape "$SYGEN_ROOT/data")" \
+        "$(json_escape "$SYGEN_ROOT/docker-compose.yml")"
+    exit 0
+fi
+
 cat <<DONE
 
 =====================================================================

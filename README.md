@@ -105,6 +105,13 @@ The default (no flag, no env var) banner output is unchanged.
 - [`docker-compose.yml`](./docker-compose.yml) — the stack
 - [`nginx.conf.tmpl`](./nginx.conf.tmpl) — nginx vhost template (`__FQDN__`
   is substituted by the installer)
+- [`providers.json`](./providers.json) — VPS provider catalogue consumed by
+  the iOS app onboarding flow
+- [`providers/logos/`](./providers/logos) — 64×64 SVG logos referenced by
+  `providers.json#logo_url` (one per provider id, plus `_default.svg`).
+  Major brands use [Simple Icons](https://simpleicons.org/) on a brand-tinted
+  circle; regional providers fall back to a single-letter monogram. To add
+  a new provider, drop `<id>.svg` here and reference it from `providers.json`.
 - `CNAME` — custom-domain marker for GitHub Pages
 
 ## Hosting

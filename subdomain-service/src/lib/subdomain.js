@@ -60,10 +60,46 @@ export function isValidShape(name) {
 
 // IPv4 in dotted-quad with octets 0-255.
 const IPV4_RE = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
-// IPv6 — pragmatic match (presence of ':'). CF gives us a well-formed value.
+
+// IPv4 ranges that must never end up in a public *.sygen.pro A record:
+//   RFC1918 private   10/8, 172.16/12, 192.168/16
+//   CGNAT             100.64/10
+//   loopback          127/8
+//   link-local        169.254/16
+//   broadcast/this    0/8, 255.255.255.255
+//   multicast/reserved 224/4, 240/4
+function isPublicIPv4(ip) {
+  const parts = ip.split(".").map(Number);
+  const [a, b] = parts;
+  if (a === 10) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 0) return false;
+  if (a >= 224) return false;
+  if (a === 255 && b === 255 && parts[2] === 255 && parts[3] === 255) return false;
+  return true;
+}
+
+// IPv6 — minimal validation: presence of ':' and reject obvious non-public
+// prefixes. We're not building a full IPv6 parser; CF-Connecting-IP is well-
+// formed, and the {public_ip} body path is opt-in (publicdomain mode only,
+// rarely IPv6 at the boundary).
+function isPublicIPv6(ip) {
+  const lower = ip.toLowerCase();
+  if (lower === "::1") return false;                 // loopback
+  if (lower === "::") return false;                  // unspecified
+  if (lower.startsWith("fe80:")) return false;       // link-local
+  if (lower.startsWith("fc") || lower.startsWith("fd")) return false; // ULA
+  if (lower.startsWith("ff")) return false;          // multicast
+  return true;
+}
+
 export function dnsRecordTypeForIp(ip) {
   if (typeof ip !== "string" || ip.length === 0) return null;
-  if (IPV4_RE.test(ip)) return "A";
-  if (ip.includes(":")) return "AAAA";
+  if (IPV4_RE.test(ip)) return isPublicIPv4(ip) ? "A" : null;
+  if (ip.includes(":")) return isPublicIPv6(ip) ? "AAAA" : null;
   return null;
 }

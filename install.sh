@@ -68,9 +68,17 @@ set -euo pipefail
 # logs to stderr so SSH-driven deploy wizards can parse the result without
 # scraping a human banner that may change formatting.
 JSON_OUTPUT="${SYGEN_JSON_OUTPUT:-0}"
+# --self-hosted={localhost|tailscale|publicdomain} mirrors SELF_HOSTED_MODE
+# but is parseable by SSH-driven wizards that prefer flags over env vars.
+# CLI flag wins over env var (operator intent is more explicit).
 for arg in "$@"; do
     case "$arg" in
         --json-output) JSON_OUTPUT=1 ;;
+        --self-hosted=*) SELF_HOSTED_MODE="${arg#--self-hosted=}" ;;
+        --self-hosted)
+            printf '\033[0;31mXX\033[0m %s\n' "--self-hosted requires a value: --self-hosted=localhost|tailscale|publicdomain" >&2
+            exit 1
+            ;;
     esac
 done
 JSON_DONE=0
@@ -1076,7 +1084,23 @@ if [ "$JSON_OUTPUT" = "1" ]; then
     else
         IT_JSON="null"
     fi
-    printf '{"ok":true,"fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_image":%s,"admin_image":%s,"data_dir":%s,"compose_file":%s,"install_token":%s}\n' \
+    # mode: which install path was taken. Lets the iOS wizard branch on
+    # storage/UX without re-deriving from FQDN heuristics. Values match
+    # CONTRACT_ios_vps_deploy_wizard.md §16:
+    #   auto         — Linux + Worker-provisioned <random>.sygen.pro
+    #   custom       — Linux + operator-supplied SYGEN_SUBDOMAIN
+    #   localhost    — macOS, http://localhost (Mac-only access)
+    #   tailscale    — macOS, HTTPS via `tailscale serve` (tailnet access)
+    #   publicdomain — macOS, brew nginx + LE cert (NAT port forward needed)
+    if [ $LOCAL_MODE -eq 1 ]; then
+        MODE="$SELF_HOSTED_SUBMODE"
+    elif [ -n "$SYGEN_INSTALL_TOKEN" ]; then
+        MODE="auto"
+    else
+        MODE="custom"
+    fi
+    printf '{"ok":true,"mode":%s,"fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_image":%s,"admin_image":%s,"data_dir":%s,"compose_file":%s,"install_token":%s}\n' \
+        "$(json_escape "$MODE")" \
         "$(json_escape "$FQDN")" \
         "$(json_escape "$ADMIN_PASS")" \
         "$(json_escape "$ADMIN_URL")" \

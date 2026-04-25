@@ -27,14 +27,14 @@ function makeFailingKv(initial = {}) {
   return kv;
 }
 
-function provisionRequest(ip = "203.0.113.45") {
+function provisionRequest(ip = "203.0.113.45", body = "{}") {
   return new Request("https://install.sygen.pro/api/provision", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "CF-Connecting-IP": ip,
     },
-    body: "{}",
+    body,
   });
 }
 
@@ -210,6 +210,118 @@ test("H-2: rate limit honours PROVISION_RATE_LIMIT override", () => {
       }
       const blocked = await handleProvision(provisionRequest(ip), env);
       assert.equal(blocked.status, 429);
+    },
+  );
+});
+
+test("public_ip body overrides DNS target (macOS publicdomain mode)", () => {
+  return withMockFetch(
+    () => cfSuccess({ id: "rec-via-body" }),
+    async (calls) => {
+      const env = makeEnv();
+      // Caller is a LAN IP behind a NAT; install.sh discovered the WAN IP
+      // via STUN and submits it as {public_ip}. CF-Connecting-IP stays the
+      // perimeter IP (rate limit anchor).
+      const req = new Request("https://install.sygen.pro/api/provision", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "CF-Connecting-IP": "198.51.100.7",
+        },
+        body: JSON.stringify({ public_ip: "203.0.113.99" }),
+      });
+      const resp = await handleProvision(req, env);
+      assert.equal(resp.status, 200);
+      const post = calls.find((c) => c.method === "POST");
+      assert.ok(post, "should POST to CF");
+      const cfBody = JSON.parse(post.body);
+      assert.equal(cfBody.content, "203.0.113.99", "DNS target should be the body's public_ip, not CF-Connecting-IP");
+    },
+  );
+});
+
+test("public_ip body rejects RFC1918 / CGNAT / loopback overrides", () => {
+  return withMockFetch(
+    () => cfSuccess({ id: "rec" }),
+    async () => {
+      const env = makeEnv();
+      for (const bad of ["10.0.0.5", "192.168.1.1", "100.64.0.1", "127.0.0.1", "169.254.1.1"]) {
+        const req = new Request("https://install.sygen.pro/api/provision", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "198.51.100.7",
+          },
+          body: JSON.stringify({ public_ip: bad }),
+        });
+        const resp = await handleProvision(req, env);
+        assert.equal(resp.status, 400, `${bad} should be rejected`);
+        const body = await resp.json();
+        assert.equal(body.error, "invalid_public_ip");
+      }
+    },
+  );
+});
+
+test("public_ip body rejects malformed strings and non-string types", () => {
+  return withMockFetch(
+    () => cfSuccess({ id: "rec" }),
+    async () => {
+      const env = makeEnv();
+      for (const bad of ["not-an-ip", "999.999.999.999", ""]) {
+        const req = new Request("https://install.sygen.pro/api/provision", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "198.51.100.7",
+          },
+          body: JSON.stringify({ public_ip: bad }),
+        });
+        const resp = await handleProvision(req, env);
+        if (bad === "") {
+          // Empty string falls through to CF-Connecting-IP — that's fine.
+          assert.equal(resp.status, 200);
+        } else {
+          assert.equal(resp.status, 400, `${JSON.stringify(bad)} should be rejected`);
+        }
+      }
+    },
+  );
+});
+
+test("public_ip body absent uses CF-Connecting-IP", () => {
+  return withMockFetch(
+    () => cfSuccess({ id: "rec" }),
+    async (calls) => {
+      const env = makeEnv();
+      const resp = await handleProvision(provisionRequest("203.0.113.45"), env);
+      assert.equal(resp.status, 200);
+      const post = calls.find((c) => c.method === "POST");
+      const cfBody = JSON.parse(post.body);
+      assert.equal(cfBody.content, "203.0.113.45");
+    },
+  );
+});
+
+test("body that is JSON null/array/scalar is rejected as invalid_json", () => {
+  return withMockFetch(
+    () => cfSuccess({ id: "rec" }),
+    async () => {
+      const env = makeEnv();
+      for (const bad of ["null", "[]", '["a"]', '"hi"', "42", "true"]) {
+        const req = new Request("https://install.sygen.pro/api/provision", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "198.51.100.7",
+          },
+          body: bad,
+        });
+        const resp = await handleProvision(req, env);
+        assert.equal(resp.status, 400, `body ${bad} should be rejected`);
+        const body = await resp.json();
+        assert.equal(body.error, "invalid_json");
+      }
     },
   );
 });

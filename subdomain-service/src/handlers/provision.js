@@ -10,22 +10,43 @@ export async function handleProvision(request, env) {
   // Body must be valid JSON or empty. Reject anything else early so we
   // don't silently accept malformed callers.
   const ct = request.headers.get("Content-Type") || "";
+  let body = null;
   if (request.body) {
     if (!ct.toLowerCase().startsWith("application/json") && ct !== "") {
       return jsonResponse(415, { error: "unsupported_media_type" });
     }
     const text = await request.text();
     if (text.trim().length > 0) {
-      try { JSON.parse(text); } catch {
+      try { body = JSON.parse(text); } catch {
+        return jsonResponse(400, { error: "invalid_json" });
+      }
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
         return jsonResponse(400, { error: "invalid_json" });
       }
     }
   }
 
+  // CF-Connecting-IP is the rate-limit key (always the TCP peer). Body's
+  // optional {public_ip} overrides only the DNS record target — used by
+  // macOS publicdomain mode where the install.sh runs from inside the LAN
+  // but needs the A record to point at the WAN IP discovered via STUN.
+  // The override is restricted to public unicast IPs (RFC1918/CGNAT/etc
+  // would brick the subdomain — see dnsRecordTypeForIp).
   const callerIp = request.headers.get("CF-Connecting-IP");
-  const dnsType = dnsRecordTypeForIp(callerIp);
-  if (!dnsType) {
+  const callerDnsType = dnsRecordTypeForIp(callerIp);
+  if (!callerDnsType) {
     return jsonResponse(400, { error: "missing_or_invalid_caller_ip" });
+  }
+
+  let dnsTargetIp = callerIp;
+  let dnsType = callerDnsType;
+  if (body && typeof body.public_ip === "string" && body.public_ip.length > 0) {
+    const overrideType = dnsRecordTypeForIp(body.public_ip);
+    if (!overrideType) {
+      return jsonResponse(400, { error: "invalid_public_ip" });
+    }
+    dnsTargetIp = body.public_ip;
+    dnsType = overrideType;
   }
 
   // Defense-in-depth IP rate limit. Operator is also asked to configure a
@@ -65,7 +86,7 @@ export async function handleProvision(request, env) {
 
   let record;
   try {
-    record = await createDnsRecord(env, fqdn, callerIp, dnsType);
+    record = await createDnsRecord(env, fqdn, dnsTargetIp, dnsType);
   } catch (e) {
     console.error("provision: dns_create_failed", {
       subdomain,
@@ -85,7 +106,7 @@ export async function handleProvision(request, env) {
     created_at: now.toISOString(),
     last_heartbeat_at: now.toISOString(),
     expires_at: expiresAt.toISOString(),
-    allocated_to_ip: callerIp,
+    allocated_to_ip: dnsTargetIp,
     cf_record_id: record.id,
   };
 

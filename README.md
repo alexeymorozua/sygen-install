@@ -181,6 +181,13 @@ Clean removal of the entire stack — containers, data, secrets, systemd
 backup timer, nginx vhost, and cert renewal hook. Keeps the Let's Encrypt
 cert and system packages so re-installing is fast.
 
+If the install used a free `*.sygen.pro` subdomain, the script also calls
+`DELETE https://install.sygen.pro/api/release` (using the
+`SYGEN_INSTALL_TOKEN` saved in `.env` at install time) so the subdomain
+slot is freed for the next user. The release call is best-effort — a
+network/API failure won't block the local cleanup, and the slot will
+eventually be reaped by the nightly sweep.
+
 ```bash
 # Linux (VPS, run as root):
 curl -fsSL https://install.sygen.pro/uninstall.sh | sudo bash

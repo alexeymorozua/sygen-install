@@ -68,6 +68,7 @@ else
     log "  - Remove cert renewal hook (/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh)"
     log "  - Remove nginx vhost (sygen)"
 fi
+log "  - Release the install.sygen.pro subdomain slot (if .env has SYGEN_INSTALL_TOKEN)"
 log "  - Optionally release Cloudflare DNS A record (if CF_* env vars set)"
 log ""
 log "It will NOT touch:"
@@ -117,7 +118,34 @@ CF_DOMAIN_VAL="${SYGEN_DOMAIN:-}"
 [ -z "$CF_DOMAIN_VAL" ] && CF_DOMAIN_VAL="$(read_env_var SYGEN_DOMAIN)"
 [ -z "$CF_DOMAIN_VAL" ] && CF_DOMAIN_VAL="sygen.pro"
 
-# ---------- 1. Stop containers ----------
+INSTALL_TOKEN_VAL="$(read_env_var SYGEN_INSTALL_TOKEN)"
+# Strip surrounding double quotes if .env writer added them.
+INSTALL_TOKEN_VAL="${INSTALL_TOKEN_VAL%\"}"
+INSTALL_TOKEN_VAL="${INSTALL_TOKEN_VAL#\"}"
+
+# ---------- 1. Release subdomain reservation ----------
+# Tells the install.sygen.pro Worker to delete the DNS record + KV entries
+# so the subdomain slot is freed for the next user. The endpoint is
+# idempotent — unknown/expired tokens still return 200. Any failure here
+# must NEVER block the rest of the uninstall: KV is also reaped by the
+# nightly sweep, so the worst case is a delayed slot reclaim.
+if [ -n "$INSTALL_TOKEN_VAL" ]; then
+    log "Releasing subdomain reservation via install.sygen.pro/api/release"
+    if ! command -v curl >/dev/null 2>&1; then
+        warn "  curl not installed — slot will be reclaimed by sweep eventually"
+    elif release_response="$(curl -fsS -X DELETE \
+            -H 'Content-Type: application/json' \
+            -d "{\"install_token\":\"$INSTALL_TOKEN_VAL\"}" \
+            'https://install.sygen.pro/api/release' 2>&1)"; then
+        log "  release response: $release_response"
+    else
+        warn "  release request failed (continuing): $release_response"
+    fi
+else
+    log "No SYGEN_INSTALL_TOKEN in .env (custom domain or pre-Phase 3 install) — skipping subdomain release"
+fi
+
+# ---------- 2. Stop containers ----------
 if [ -f "$SYGEN_ROOT/docker-compose.yml" ] && command -v docker >/dev/null 2>&1; then
     log "Stopping Sygen containers"
     # Compose auto-sources $SYGEN_ROOT/.env from the project dir, so no --env-file.
@@ -139,7 +167,7 @@ if command -v docker >/dev/null 2>&1; then
     done
 fi
 
-# ---------- 2. Linux-only system cleanup ----------
+# ---------- 3. Linux-only system cleanup ----------
 if [ $LOCAL_MODE -eq 0 ]; then
     log "Removing systemd backup timer + service"
     if systemctl list-unit-files sygen-backup.timer >/dev/null 2>&1; then
@@ -174,7 +202,7 @@ if [ $LOCAL_MODE -eq 0 ]; then
     fi
 fi
 
-# ---------- 3. macOS-only ----------
+# ---------- 4. macOS-only ----------
 if [ $LOCAL_MODE -eq 1 ]; then
     if command -v colima >/dev/null 2>&1; then
         if colima status >/dev/null 2>&1; then
@@ -186,7 +214,10 @@ if [ $LOCAL_MODE -eq 1 ]; then
     fi
 fi
 
-# ---------- 4. Optional Cloudflare DNS cleanup ----------
+# ---------- 5. Optional Cloudflare DNS cleanup ----------
+# Only relevant for installs that reserved DNS directly with CF_* env vars
+# (custom domain or pre-Phase 3). For subdomain-service installs, /api/release
+# above already removed the record.
 if [ -n "$CF_TOKEN_VAL" ] && [ -n "$CF_ZONE_VAL" ] && [ -n "$CF_SUB_VAL" ]; then
     cf_fqdn="${CF_SUB_VAL}.${CF_DOMAIN_VAL}"
     log "Releasing Cloudflare DNS A record for $cf_fqdn"
@@ -215,7 +246,7 @@ else
     log "Cloudflare env vars not set — skipping DNS cleanup"
 fi
 
-# ---------- 5. Wipe SYGEN_ROOT ----------
+# ---------- 6. Wipe SYGEN_ROOT ----------
 # Re-assert the safety guard right before rm -rf. Defends against any later
 # code accidentally clearing $SYGEN_ROOT between the top-of-script check
 # and this line.
@@ -231,7 +262,7 @@ else
     log "$SYGEN_ROOT already absent"
 fi
 
-# ---------- 6. Final summary ----------
+# ---------- 7. Final summary ----------
 echo ""
 echo "====================================================================="
 echo " Sygen has been removed from this host."

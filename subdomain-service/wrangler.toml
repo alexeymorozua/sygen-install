@@ -1,13 +1,14 @@
 # Cloudflare Worker config — Sygen subdomain provisioning service.
+# Full deploy steps live in README.md "Pre-deploy checklist".
 #
-# Deploy:
-#   npm install -g wrangler
+# Quick reference:
 #   wrangler login
-#   wrangler kv:namespace create SUBDOMAIN_RESERVATIONS
-#   wrangler kv:namespace create TOKEN_INDEX
+#   wrangler kv namespace create SUBDOMAIN_RESERVATIONS
+#   wrangler kv namespace create TOKEN_INDEX
 #   # paste returned IDs into [[kv_namespaces]] below
 #   wrangler secret put CF_MASTER_API_TOKEN
 #   wrangler secret put ADMIN_TOKEN
+#   # also fill CF_DNS_WRITE_PERMISSION_GROUP_ID under [vars] (see README §1)
 #   wrangler deploy
 
 name = "sygen-subdomain-service"
@@ -37,6 +38,12 @@ SYGEN_CF_ZONE_ID = "6ae59801f8ac7b5dc33b6e32d844b0a6"
 TTL_DAYS = "30"
 SUBDOMAIN_LENGTH = "8"
 TLS_DNS_TOKEN_TTL_SECONDS = "3600"
+# Permission group ID for the "DNS Write" zone permission. Account-specific
+# — fetch yours via:
+#   curl -H "Authorization: Bearer <CF_MASTER_API_TOKEN>" \
+#        https://api.cloudflare.com/client/v4/user/tokens/permission_groups
+# and pick the entry named "DNS Write" with scope=zone.
+CF_DNS_WRITE_PERMISSION_GROUP_ID = "REPLACE_WITH_DNS_WRITE_PG_ID"
 
 # Daily sweep at 02:00 UTC — deletes expired reservations.
 [triggers]

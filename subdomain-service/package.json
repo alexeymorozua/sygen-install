@@ -5,5 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test 'src/__tests__/*.test.js'"
+  },
+  "devDependencies": {
+    "wrangler": "^4.85.0"
   }
 }

@@ -21,14 +21,14 @@ compatibility_date = "2026-04-01"
 pattern = "install.sygen.pro/api/*"
 zone_name = "sygen.pro"
 
-# KV namespaces — IDs are filled in after `wrangler kv:namespace create`.
+# KV namespaces — created via `wrangler kv namespace create` (2026-04-25).
 [[kv_namespaces]]
 binding = "SUBDOMAIN_RESERVATIONS"
-id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+id = "af12dbe5a8fc4afcadc597f95ac14098"
 
 [[kv_namespaces]]
 binding = "TOKEN_INDEX"
-id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+id = "a75bf627d88a4a1c830ea5bcf843560d"
 
 # Non-secret config.
 [vars]

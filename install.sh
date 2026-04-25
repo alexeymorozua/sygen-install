@@ -6,7 +6,7 @@
 # macOS  (Darwin): Homebrew-installed Colima as a headless Docker runtime.
 #        Binds to http://localhost:8080 — no DNS/TLS/nginx.
 #
-# Required env (Linux only):
+# Required env (Linux + custom-mode only — auto-mode needs nothing):
 #   SYGEN_SUBDOMAIN   e.g. "alice" → alice.sygen.pro
 #   CF_API_TOKEN      Cloudflare token with DNS:Edit on the zone
 #   CF_ZONE_ID        Cloudflare zone id for SYGEN_DOMAIN
@@ -141,9 +141,12 @@ ADMIN_TAG="${SYGEN_ADMIN_TAG:-latest}"
 CORE_IMAGE="${SYGEN_CORE_IMAGE:-ghcr.io/alexeymorozua/sygen-core:${CORE_TAG}}"
 ADMIN_IMAGE="${SYGEN_ADMIN_IMAGE:-ghcr.io/alexeymorozua/sygen-admin:${ADMIN_TAG}}"
 
-# AUTO_MODE=1 means "ask install.sygen.pro for a free <id>.sygen.pro and a
-# scoped DNS-01 token". AUTO_MODE=0 means the operator supplied their own
-# subdomain + Cloudflare token (legacy / admin-managed installs).
+# AUTO_MODE=1 means "ask install.sygen.pro for a free <id>.sygen.pro".
+# The Worker also creates the A record (using CF-Connecting-IP). install.sh
+# never holds a Cloudflare token in auto-mode — DNS-01 challenges are
+# answered through Worker-mediated /api/dns-challenge endpoints (see
+# subdomain-service/README.md). AUTO_MODE=0 means the operator supplied
+# their own subdomain + Cloudflare token (legacy / admin-managed installs).
 # AUTO_MODE_REUSE=1 means we're re-running install.sh on a host that already
 # went through provision once; we must NOT call /api/provision again (would
 # orphan the live record + waste a slot) — we re-read the saved token + fqdn
@@ -152,7 +155,7 @@ AUTO_MODE=0
 AUTO_MODE_REUSE=0
 SYGEN_INSTALL_TOKEN=""
 SYGEN_INSTALL_HEARTBEAT_URL=""
-CF_RECORD_ID=""
+SYGEN_DNS_CHALLENGE_URL=""
 PROVISION_URL="${SYGEN_PROVISION_URL:-https://install.${DOMAIN}/api/provision}"
 
 if [ $LOCAL_MODE -eq 1 ]; then
@@ -263,10 +266,10 @@ APT
 fi
 
 # ---------- 1c. Auto-provision subdomain (Linux + auto-mode only) ----------
-# Runs after deps install so jq + curl are guaranteed. The Worker has already
-# created an A record pointing at our CF-Connecting-IP — we still re-detect
-# the public IP below and PUT to the known cf_record_id, in case the source
-# IP visible to Cloudflare differs from what the host advertises.
+# Runs after deps install so jq + curl are guaranteed. The Worker creates the
+# A record pointing at the CF-Connecting-IP it sees on this request; install.sh
+# never holds a Cloudflare token. ACME DNS-01 challenges go through Worker-
+# mediated endpoints (see subdomain-service for the contract).
 if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 1 ]; then
     STAGE="provision"
 
@@ -279,6 +282,7 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 1 ]; then
         log "Auto-mode re-run: SYGEN_INSTALL_TOKEN already in $SYGEN_ROOT/.env — skipping provision"
         SYGEN_INSTALL_TOKEN=$(grep '^SYGEN_INSTALL_TOKEN=' "$SYGEN_ROOT/.env" | head -n1 | cut -d= -f2-)
         SYGEN_INSTALL_HEARTBEAT_URL=$(grep '^SYGEN_INSTALL_HEARTBEAT_URL=' "$SYGEN_ROOT/.env" 2>/dev/null | head -n1 | cut -d= -f2- || true)
+        SYGEN_DNS_CHALLENGE_URL=$(grep '^SYGEN_DNS_CHALLENGE_URL=' "$SYGEN_ROOT/.env" 2>/dev/null | head -n1 | cut -d= -f2- || true)
         if [ -f "$SYGEN_ROOT/data/config/config.json" ]; then
             SUB=$(jq -r '.instance_name // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)
         fi
@@ -286,12 +290,6 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 1 ]; then
         FQDN="${SUB}.${DOMAIN}"
         ADMIN_URL="https://$FQDN"
         CORS_ORIGIN="https://$FQDN"
-        # Sentinel values — never used because the DNS section is gated on
-        # AUTO_MODE_REUSE below. Kept defined so `set -u` doesn't trip if
-        # downstream code reads them defensively.
-        CF_API_TOKEN="reused"
-        CF_ZONE_ID="reused"
-        CF_RECORD_ID="reused"
         log "Auto-mode re-run: continuing with existing $FQDN"
     else
         log "Auto-mode: requesting subdomain from $PROVISION_URL"
@@ -301,13 +299,10 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 1 ]; then
 
         FQDN=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.fqdn // empty')
         SYGEN_INSTALL_TOKEN=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.install_token // empty')
-        CF_API_TOKEN=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.tls_dns_token // empty')
-        CF_ZONE_ID=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.cf_zone_id // empty')
-        CF_RECORD_ID=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.cf_record_id // empty')
         SYGEN_INSTALL_HEARTBEAT_URL=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.heartbeat_url // empty')
+        SYGEN_DNS_CHALLENGE_URL=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.dns_challenge_url // empty')
 
-        if [ -z "$FQDN" ] || [ -z "$SYGEN_INSTALL_TOKEN" ] || [ -z "$CF_API_TOKEN" ] \
-            || [ -z "$CF_ZONE_ID" ] || [ -z "$CF_RECORD_ID" ]; then
+        if [ -z "$FQDN" ] || [ -z "$SYGEN_INSTALL_TOKEN" ] || [ -z "$SYGEN_DNS_CHALLENGE_URL" ]; then
             die "provision response missing required fields (got: $PROVISION_RESPONSE)"
         fi
 
@@ -319,8 +314,12 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 1 ]; then
 fi
 
 # ---------- 2. Public IP + Cloudflare DNS (Linux only) ----------
-# Skipped on auto-mode re-runs: the original install already created the
-# record and the scoped tls_dns_token has long since expired (1h TTL).
+# Auto-mode: Worker created the A record from CF-Connecting-IP during
+#   /api/provision. install.sh holds no CF token, so we just verify the
+#   record points at the right IP and warn (don't fail) on mismatch — that
+#   would mean the host's egress IP differs from what CF saw, which the
+#   operator must reconcile manually.
+# Custom mode: operator owns the zone + token, install.sh upserts directly.
 if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE_REUSE" -eq 1 ]; then
     log "Auto-mode re-run: skipping DNS upsert — record was set by original install"
 fi
@@ -331,20 +330,31 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
     [ -n "$PUBLIC_IP" ] || die "Could not determine public IP"
     log "  public_ip=$PUBLIC_IP"
 
-    CF_AUTH="Authorization: Bearer $CF_API_TOKEN"
-    DNS_PAYLOAD=$(jq -nc --arg n "$FQDN" --arg c "$PUBLIC_IP" \
-        '{type:"A",name:$n,content:$c,ttl:120,proxied:false}')
-
     if [ "$AUTO_MODE" -eq 1 ]; then
-        # Scoped tls_dns_token has DNS:Edit on $CF_RECORD_ID only — it cannot
-        # list zone records. Always PUT to the known id; harmless if Worker's
-        # detected IP already matches our public IP.
-        log "Updating Cloudflare A record $FQDN -> $PUBLIC_IP (record $CF_RECORD_ID)"
-        curl -fsS -X PUT \
-            "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$CF_RECORD_ID" \
-            -H "$CF_AUTH" -H "Content-Type: application/json" --data "$DNS_PAYLOAD" \
-            >/dev/null || die "Cloudflare DNS PUT failed for record $CF_RECORD_ID"
+        log "Auto-mode: A record was created by Worker — waiting for DNS propagation"
+        DNS_GOT=""
+        for i in $(seq 1 30); do
+            DNS_GOT=$(dig +short A "$FQDN" @1.1.1.1 2>/dev/null || true)
+            if [ -n "$DNS_GOT" ]; then break; fi
+            sleep 4
+        done
+        if [ -z "$DNS_GOT" ]; then
+            die "Worker-created A record for $FQDN did not propagate within ~2 min"
+        fi
+        if [ "$DNS_GOT" != "$PUBLIC_IP" ]; then
+            warn "A record points at $DNS_GOT but VPS public IP is $PUBLIC_IP."
+            warn "  This usually means the host egresses through a different IP than"
+            warn "  Cloudflare saw on the /api/provision request (NAT, VPN, IPv6, ...)."
+            warn "  Sygen will continue using $DNS_GOT — fix the A record manually if"
+            warn "  it should point at $PUBLIC_IP (admin-managed flow, out-of-band)."
+        else
+            log "  DNS resolved: $DNS_GOT"
+        fi
     else
+        CF_AUTH="Authorization: Bearer $CF_API_TOKEN"
+        DNS_PAYLOAD=$(jq -nc --arg n "$FQDN" --arg c "$PUBLIC_IP" \
+            '{type:"A",name:$n,content:$c,ttl:120,proxied:false}')
+
         log "Upserting Cloudflare A record $FQDN -> $PUBLIC_IP"
         EXISTING=$(curl -fsS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$FQDN&type=A" \
             -H "$CF_AUTH" | jq -r '.result[0].id // empty')
@@ -361,28 +371,128 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
                 >/dev/null
             log "  created new record"
         fi
-    fi
 
-    log "Waiting for DNS propagation..."
-    for i in $(seq 1 30); do
-        got=$(dig +short A "$FQDN" @1.1.1.1 2>/dev/null || true)
-        if [ "$got" = "$PUBLIC_IP" ]; then
-            log "  DNS resolved: $got"
-            break
-        fi
-        sleep 4
-    done
+        log "Waiting for DNS propagation..."
+        for i in $(seq 1 30); do
+            got=$(dig +short A "$FQDN" @1.1.1.1 2>/dev/null || true)
+            if [ "$got" = "$PUBLIC_IP" ]; then
+                log "  DNS resolved: $got"
+                break
+            fi
+            sleep 4
+        done
+    fi
 fi
 
 # ---------- 3. TLS cert (Linux only) ----------
+# Auto-mode: certbot answers DNS-01 via Worker-mediated hooks at
+#   /usr/local/sbin/sygen-acme-{auth,cleanup}-hook.sh. The hooks read the
+#   install_token from $SYGEN_ROOT/.env and POST/DELETE the TXT through
+#   $SYGEN_DNS_CHALLENGE_URL — no CF credentials on the host.
+# Custom mode: operator's CF token directly via --dns-cloudflare.
 if [ $LOCAL_MODE -eq 0 ]; then
     STAGE="cert"
+
+    if [ "$AUTO_MODE" -eq 1 ]; then
+        # Hooks must exist before any cert renewal too — install once,
+        # certbot.timer reuses them on every renew.
+        log "Installing ACME DNS-01 manual hooks (Worker-mediated)"
+        cat > /usr/local/sbin/sygen-acme-auth-hook.sh <<HOOK
+#!/usr/bin/env bash
+# Sygen ACME DNS-01 auth hook — POSTs the TXT challenge to the Worker.
+# Invoked by certbot --manual-auth-hook with CERTBOT_DOMAIN + CERTBOT_VALIDATION
+# in the environment. Never touches a Cloudflare token.
+set -euo pipefail
+
+ENV_FILE="$SYGEN_ROOT/.env"
+DEFAULT_DNS_CHALLENGE_URL="$SYGEN_DNS_CHALLENGE_URL"
+
+if [ -z "\${SYGEN_INSTALL_TOKEN:-}" ] && [ -f "\$ENV_FILE" ]; then
+    SYGEN_INSTALL_TOKEN=\$(grep '^SYGEN_INSTALL_TOKEN=' "\$ENV_FILE" | head -n1 | cut -d= -f2-)
+fi
+if [ -z "\${SYGEN_INSTALL_TOKEN:-}" ]; then
+    echo "sygen-acme-auth-hook: SYGEN_INSTALL_TOKEN not set and \$ENV_FILE missing" >&2
+    exit 1
+fi
+if [ -z "\${SYGEN_DNS_CHALLENGE_URL:-}" ] && [ -f "\$ENV_FILE" ]; then
+    SYGEN_DNS_CHALLENGE_URL=\$(grep '^SYGEN_DNS_CHALLENGE_URL=' "\$ENV_FILE" | head -n1 | cut -d= -f2-)
+fi
+DNS_CHALLENGE_URL="\${SYGEN_DNS_CHALLENGE_URL:-\$DEFAULT_DNS_CHALLENGE_URL}"
+
+NAME="_acme-challenge.\${CERTBOT_DOMAIN}"
+PAYLOAD=\$(jq -nc \\
+    --arg t "\$SYGEN_INSTALL_TOKEN" \\
+    --arg n "\$NAME" \\
+    --arg v "\$CERTBOT_VALIDATION" \\
+    '{install_token:\$t,name:\$n,value:\$v}')
+
+curl -fsS -X POST -H "Content-Type: application/json" \\
+    -d "\$PAYLOAD" "\$DNS_CHALLENGE_URL" >/dev/null \\
+    || { echo "sygen-acme-auth-hook: POST failed" >&2; exit 1; }
+
+# Give CF DNS a moment to propagate before certbot polls Let's Encrypt.
+# CF is global within seconds; 20s is the same belt LE itself uses.
+sleep 20
+HOOK
+        chmod 0755 /usr/local/sbin/sygen-acme-auth-hook.sh
+
+        cat > /usr/local/sbin/sygen-acme-cleanup-hook.sh <<HOOK
+#!/usr/bin/env bash
+# Sygen ACME DNS-01 cleanup hook — DELETEs the challenge TXT via the Worker.
+# Best-effort: an error here doesn't fail the cert (record will be swept
+# eventually), so we exit 0 even on Worker errors.
+set -uo pipefail
+
+ENV_FILE="$SYGEN_ROOT/.env"
+DEFAULT_DNS_CHALLENGE_URL="$SYGEN_DNS_CHALLENGE_URL"
+
+if [ -z "\${SYGEN_INSTALL_TOKEN:-}" ] && [ -f "\$ENV_FILE" ]; then
+    SYGEN_INSTALL_TOKEN=\$(grep '^SYGEN_INSTALL_TOKEN=' "\$ENV_FILE" | head -n1 | cut -d= -f2-)
+fi
+if [ -z "\${SYGEN_INSTALL_TOKEN:-}" ]; then
+    echo "sygen-acme-cleanup-hook: SYGEN_INSTALL_TOKEN not set; skipping" >&2
+    exit 0
+fi
+if [ -z "\${SYGEN_DNS_CHALLENGE_URL:-}" ] && [ -f "\$ENV_FILE" ]; then
+    SYGEN_DNS_CHALLENGE_URL=\$(grep '^SYGEN_DNS_CHALLENGE_URL=' "\$ENV_FILE" | head -n1 | cut -d= -f2-)
+fi
+DNS_CHALLENGE_URL="\${SYGEN_DNS_CHALLENGE_URL:-\$DEFAULT_DNS_CHALLENGE_URL}"
+
+NAME="_acme-challenge.\${CERTBOT_DOMAIN}"
+PAYLOAD=\$(jq -nc \\
+    --arg t "\$SYGEN_INSTALL_TOKEN" \\
+    --arg n "\$NAME" \\
+    '{install_token:\$t,name:\$n}')
+
+curl -fsS -X DELETE -H "Content-Type: application/json" \\
+    -d "\$PAYLOAD" "\$DNS_CHALLENGE_URL" >/dev/null \\
+    || echo "sygen-acme-cleanup-hook: DELETE failed (non-fatal)" >&2
+
+exit 0
+HOOK
+        chmod 0755 /usr/local/sbin/sygen-acme-cleanup-hook.sh
+    fi
+
     if [ "$AUTO_MODE_REUSE" -eq 1 ]; then
         log "Auto-mode re-run: cert already present, skipping certbot"
     elif [ -f "/etc/letsencrypt/live/$FQDN/fullchain.pem" ]; then
         log "  cert already present, skipping"
+    elif [ "$AUTO_MODE" -eq 1 ]; then
+        log "Obtaining Let's Encrypt cert via Worker-mediated DNS-01"
+        # The hooks need SYGEN_INSTALL_TOKEN before .env is written below —
+        # export it for this single certbot invocation. Renewal reads from
+        # .env directly (.env is in place by then).
+        SYGEN_INSTALL_TOKEN="$SYGEN_INSTALL_TOKEN" \
+        SYGEN_DNS_CHALLENGE_URL="$SYGEN_DNS_CHALLENGE_URL" \
+        certbot certonly --non-interactive --agree-tos \
+            --email "admin@$DOMAIN" \
+            --preferred-challenges dns \
+            --manual --manual-public-ip-logging-ok \
+            --manual-auth-hook /usr/local/sbin/sygen-acme-auth-hook.sh \
+            --manual-cleanup-hook /usr/local/sbin/sygen-acme-cleanup-hook.sh \
+            -d "$FQDN" || die "certbot failed"
     else
-        log "Obtaining Let's Encrypt cert via Cloudflare DNS-01"
+        log "Obtaining Let's Encrypt cert via Cloudflare DNS-01 (custom mode)"
         mkdir -p /etc/letsencrypt/sygen
         umask 077
         cat > /etc/letsencrypt/sygen/cloudflare.ini <<CF_INI
@@ -479,6 +589,7 @@ EFFECTIVE_LOG_LEVEL=$(get_env LOG_LEVEL "INFO")
 # slot would get reclaimed after the 30-day TTL.
 EFFECTIVE_INSTALL_TOKEN=$(get_env SYGEN_INSTALL_TOKEN "${SYGEN_INSTALL_TOKEN:-}")
 EFFECTIVE_HEARTBEAT_URL=$(get_env SYGEN_INSTALL_HEARTBEAT_URL "${SYGEN_INSTALL_HEARTBEAT_URL:-}")
+EFFECTIVE_DNS_CHALLENGE_URL=$(get_env SYGEN_DNS_CHALLENGE_URL "${SYGEN_DNS_CHALLENGE_URL:-}")
 # NEXT_PUBLIC_SYGEN_API_URL: macOS forces localhost; on Linux preserve.
 if [ $LOCAL_MODE -eq 1 ]; then
     EFFECTIVE_PUBLIC_API_URL="http://localhost:8081"
@@ -507,6 +618,12 @@ umask 077
     fi
     if [ -n "$EFFECTIVE_HEARTBEAT_URL" ]; then
         echo "SYGEN_INSTALL_HEARTBEAT_URL=$EFFECTIVE_HEARTBEAT_URL"
+    fi
+    # Read by /usr/local/sbin/sygen-acme-{auth,cleanup}-hook.sh during cert
+    # renewal so the operator can override the endpoint without editing the
+    # baked-in default in the hook script itself.
+    if [ -n "$EFFECTIVE_DNS_CHALLENGE_URL" ]; then
+        echo "SYGEN_DNS_CHALLENGE_URL=$EFFECTIVE_DNS_CHALLENGE_URL"
     fi
 } > "$SYGEN_ROOT/.env"
 umask 022

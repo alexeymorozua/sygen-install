@@ -47,7 +47,23 @@ curl -fsSL https://install.sygen.pro/install.sh | \
     sudo bash
 ```
 
-## Usage — macOS (local dev)
+## Usage — macOS (self-hosted on your own Mac)
+
+The macOS branch has three sub-modes, selected via `SELF_HOSTED_MODE`. All
+share the same Colima + docker stack — the difference is only how the
+admin UI is exposed (and whether your iPhone can reach it).
+
+| Mode           | iPhone access     | TLS                  | Setup work             |
+|----------------|-------------------|----------------------|------------------------|
+| `localhost`    | no                | none (plain HTTP)    | none                   |
+| `tailscale`    | yes (on tailnet)  | Tailscale-issued     | install Tailscale      |
+| `publicdomain` | yes (public DNS)  | Let's Encrypt        | router NAT port forward |
+
+If `SELF_HOSTED_MODE` is unset and you run interactively, the installer
+prompts for a choice (defaulting to `tailscale` if it detects a logged-in
+tailnet, else `localhost`).
+
+### Sub-mode: `localhost` (Mac-only access)
 
 ```bash
 curl -fsSL https://install.sygen.pro/install.sh | bash
@@ -55,13 +71,77 @@ curl -fsSL https://install.sygen.pro/install.sh | bash
 
 Requires [Homebrew](https://brew.sh). The installer will `brew install`
 Colima + docker CLI, start a 4-CPU / 8 GB / 50 GB Colima VM, and run Sygen at
-`http://localhost:8080`. No root, no DNS, no TLS.
+`http://localhost:8080`. No root, no DNS, no TLS — and **no iPhone
+connectivity** (App Transport Security on iOS blocks plain HTTP).
+
+### Sub-mode: `tailscale` (recommended)
+
+Install [Tailscale](https://tailscale.com/kb/1017/install) on the Mac (`brew
+install --cask tailscale` or App Store), run `tailscale up`, and confirm
+`tailscale status` works in the terminal. Make sure HTTPS Certificates is
+enabled in your tailnet admin (https://login.tailscale.com/admin/dns →
+HTTPS Certificates). Also install Tailscale on your iPhone and join the
+same tailnet.
+
+```bash
+curl -fsSL https://install.sygen.pro/install.sh | \
+    SELF_HOSTED_MODE=tailscale bash
+```
+
+The installer reads the Mac's MagicDNS name (e.g.
+`mac-mini.tail-abc123.ts.net`), then runs `tailscale serve` to terminate
+TLS at port 443 and proxy `/`, `/api/`, `/ws/`, `/upload` to the right
+container. The cert is issued and renewed by Tailscale; nothing is
+exposed to the public internet.
+
+```bash
+sudo tailscale serve status   # show current routes
+sudo tailscale serve reset    # drop all routes (then re-run install.sh)
+```
+
+### Sub-mode: `publicdomain` (advanced — public *.sygen.pro)
+
+Same Worker DNS-01 + Let's Encrypt flow as the Linux auto-mode, but
+running on macOS. The installer will `brew install nginx certbot` and
+configure nginx as the TLS terminator on ports 80/443. **It uses `sudo`
+for cert acquisition and to bind 80/443.**
+
+You must set up NAT port forwarding on your router *before or shortly
+after* running the installer:
+
+- external port 80  → this Mac's port 80  (cert renewal via HTTP-01 fallback)
+- external port 443 → this Mac's port 443 (iPhone HTTPS access)
+
+```bash
+curl -fsSL https://install.sygen.pro/install.sh | \
+    SELF_HOSTED_MODE=publicdomain bash
+```
+
+Limitations vs. the Linux auto-mode:
+
+- **No auto-renewal.** Certbot's launchd timer is not configured; renew
+  manually every ~80 days:
+
+  ```bash
+  sudo $(brew --prefix)/bin/certbot renew \
+      --manual-auth-hook /usr/local/sbin/sygen-acme-auth-hook.sh \
+      --manual-cleanup-hook /usr/local/sbin/sygen-acme-cleanup-hook.sh && \
+  sudo nginx -s reload
+  ```
+
+- **No auto-start on reboot.** nginx is started with plain `sudo nginx`;
+  after a reboot run it again or wire up your own launchd plist.
+
+For most self-hosted Mac users, **prefer `tailscale` mode** — it sidesteps
+the port-forwarding, cert-renewal, and reboot-recovery work above.
+
+### Lifecycle (all macOS sub-modes)
 
 ```
 Stop:       colima stop
 Start:      colima start && cd ~/.sygen-local && docker compose up -d
 Upgrade:    cd ~/.sygen-local && docker compose pull && docker compose up -d
-Uninstall:  colima delete && rm -rf ~/.sygen-local
+Uninstall:  curl -fsSL https://install.sygen.pro/uninstall.sh | bash
 ```
 
 Backups and auto-start on login are not configured on macOS yet — back up

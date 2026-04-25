@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# Sygen install script — Docker + (Linux: nginx + Let's Encrypt / macOS: Colima + localhost).
+# Sygen install script — Docker + (Linux: nginx + Let's Encrypt / macOS: Colima + localhost/Tailscale/public domain).
 #
 # Linux  (Debian 12+/Ubuntu 22+ VPS): apt, systemd, public DNS via Cloudflare,
 #        nginx vhost + cert via certbot DNS-01.
 # macOS  (Darwin): Homebrew-installed Colima as a headless Docker runtime.
-#        Binds to http://localhost:8080 — no DNS/TLS/nginx.
+#        Three sub-modes (selected via SELF_HOSTED_MODE):
+#          - localhost     (default w/o Tailscale) — http://localhost only,
+#                          iPhone cannot reach it (App Transport Security).
+#          - tailscale     (recommended)           — HTTPS on the tailnet via
+#                          `tailscale serve`, valid cert from Tailscale.
+#                          iPhone must also be on this tailnet.
+#          - publicdomain  (advanced)              — same Worker DNS-01 flow as
+#                          Linux auto-mode, brew nginx terminates TLS on 443.
+#                          Requires NAT port forwarding 80/443 → Mac on router.
 #
 # Required env (Linux + custom-mode only — auto-mode needs nothing):
 #   SYGEN_SUBDOMAIN   e.g. "alice" → alice.sygen.pro
@@ -21,6 +29,9 @@
 #   SYGEN_CORE_TAG            default: latest (used when *_IMAGE unset)
 #   SYGEN_ADMIN_TAG           default: latest
 #   SYGEN_ADMIN_PORT          (macOS) host port for admin, default 8080
+#   SELF_HOSTED_MODE          (macOS) localhost | tailscale | publicdomain.
+#                             If unset: auto-detect Tailscale and prompt
+#                             (interactive) or fall back to localhost.
 #   SYGEN_JSON_OUTPUT=1       emit a single JSON line on stdout instead of the
 #                             human banner (progress logs still go to stderr).
 #                             Equivalent to passing `--json-output` as a flag.
@@ -39,8 +50,16 @@
 #     CF_ZONE_ID=6ae59801f8ac7b5dc33b6e32d844b0a6 \
 #     bash
 #
-#   # macOS (local dev, regular user):
+#   # macOS (local dev, regular user — localhost only, Mac-only access):
 #   curl -fsSL https://install.sygen.pro/install.sh | bash
+#
+#   # macOS self-hosted with iPhone access via Tailscale (recommended):
+#   curl -fsSL https://install.sygen.pro/install.sh | \
+#     SELF_HOSTED_MODE=tailscale bash
+#
+#   # macOS self-hosted on a public *.sygen.pro (advanced — needs router port forward):
+#   curl -fsSL https://install.sygen.pro/install.sh | \
+#     SELF_HOSTED_MODE=publicdomain bash
 set -euo pipefail
 
 # ---------- Output mode (human banner vs. machine-parseable JSON) ----------
@@ -111,11 +130,19 @@ trap on_exit EXIT
 # ---------- Platform detection ----------
 OS="$(uname -s)"
 LOCAL_MODE=0
+# Sub-mode for the macOS branch only. One of:
+#   localhost     — Colima + http://localhost (iPhone can't reach it)
+#   tailscale     — HTTPS via tailscale serve on the tailnet
+#   publicdomain  — Worker DNS-01 + brew nginx + LE cert + router port forward
+SELF_HOSTED_SUBMODE=""
 case "$OS" in
     Darwin)
         LOCAL_MODE=1
+        SELF_HOSTED_SUBMODE="${SELF_HOSTED_MODE:-}"
         ;;
     Linux)
+        # SELF_HOSTED_MODE is macOS-only — silently ignore on Linux to avoid
+        # surprising operators who set it as a global env var on their laptop.
         ;;
     *)
         die "Unsupported OS: $OS. Supported: Linux (Debian/Ubuntu), macOS."
@@ -127,6 +154,70 @@ case "$ARCH" in
     x86_64|amd64|aarch64|arm64) ;;
     *) die "Unsupported architecture: $ARCH. Supported: x86_64/amd64, aarch64/arm64." ;;
 esac
+
+# Resolve macOS sub-mode (auto-detect / prompt / default) before we touch any
+# env-dependent state. We keep this block self-contained so the rest of the
+# script can branch on $SELF_HOSTED_SUBMODE without re-checking $SELF_HOSTED_MODE.
+if [ $LOCAL_MODE -eq 1 ]; then
+    case "${SELF_HOSTED_SUBMODE:-}" in
+        ""|localhost|tailscale|publicdomain) ;;
+        *)
+            die "Invalid SELF_HOSTED_MODE='${SELF_HOSTED_SUBMODE}' (expected: localhost, tailscale, publicdomain, or unset)"
+            ;;
+    esac
+
+    if [ -z "$SELF_HOSTED_SUBMODE" ]; then
+        # Auto-detect: a logged-in Tailscale tailnet means the operator
+        # almost certainly wants Tailscale mode (iPhone reachability).
+        # Otherwise default to legacy localhost behaviour.
+        ts_available=0
+        if command -v tailscale >/dev/null 2>&1 \
+                && tailscale status >/dev/null 2>&1; then
+            ts_available=1
+        fi
+
+        # Try interactive prompt for human installs (never via curl|bash JSON).
+        # /dev/tty is set even when stdin is the curl pipe, so we explicitly
+        # try it before giving up and falling back to a default.
+        prompt_choice=""
+        if [ "$JSON_OUTPUT" != "1" ] && [ -e /dev/tty ]; then
+            {
+                echo ""
+                echo "macOS self-hosted mode — choose how iPhone will reach this Mac:"
+                if [ "$ts_available" = "1" ]; then
+                    echo "  [1] tailscale     (recommended — Tailscale tailnet detected)"
+                else
+                    echo "  [1] tailscale     (Tailscale not installed — pick this only after"
+                    echo "                     installing it from https://tailscale.com/kb/1017/install)"
+                fi
+                echo "  [2] publicdomain  (advanced — needs NAT port forwarding 80/443 on your router)"
+                echo "  [3] localhost     (Mac-only access, no iPhone connectivity)"
+                if [ "$ts_available" = "1" ]; then
+                    printf "Choice [1]: "
+                else
+                    printf "Choice [3]: "
+                fi
+            } > /dev/tty 2>&1 || true
+            read -r prompt_choice < /dev/tty 2>/dev/null || prompt_choice=""
+        fi
+
+        case "${prompt_choice:-}" in
+            1|tailscale)    SELF_HOSTED_SUBMODE="tailscale" ;;
+            2|publicdomain) SELF_HOSTED_SUBMODE="publicdomain" ;;
+            3|localhost)    SELF_HOSTED_SUBMODE="localhost" ;;
+            "")
+                if [ "$ts_available" = "1" ]; then
+                    SELF_HOSTED_SUBMODE="tailscale"
+                else
+                    SELF_HOSTED_SUBMODE="localhost"
+                fi
+                ;;
+            *)
+                die "Invalid choice '$prompt_choice' (expected 1/2/3 or tailscale/publicdomain/localhost)"
+                ;;
+        esac
+    fi
+fi
 
 # ---------- Env parsing (conditional) ----------
 DOMAIN="${SYGEN_DOMAIN:-sygen.pro}"
@@ -159,13 +250,70 @@ SYGEN_DNS_CHALLENGE_URL=""
 PROVISION_URL="${SYGEN_PROVISION_URL:-https://install.${DOMAIN}/api/provision}"
 
 if [ $LOCAL_MODE -eq 1 ]; then
-    SUB="${SYGEN_SUBDOMAIN:-local}"
-    FQDN="localhost"
     SYGEN_ROOT="$HOME/.sygen-local"
     SYGEN_ADMIN_PORT="${SYGEN_ADMIN_PORT:-8080}"
-    ADMIN_URL="http://localhost:${SYGEN_ADMIN_PORT}"
-    CORS_ORIGIN="http://localhost:${SYGEN_ADMIN_PORT}"
-    log "macOS detected — local install mode (Colima + localhost, no TLS)"
+
+    case "$SELF_HOSTED_SUBMODE" in
+        localhost)
+            SUB="${SYGEN_SUBDOMAIN:-local}"
+            FQDN="localhost"
+            ADMIN_URL="http://localhost:${SYGEN_ADMIN_PORT}"
+            CORS_ORIGIN="http://localhost:${SYGEN_ADMIN_PORT}"
+            log "macOS detected — localhost mode (Colima + http://localhost, no TLS)"
+            warn "  iPhone cannot reach http://localhost (App Transport Security blocks plain HTTP)."
+            warn "  For iPhone access, re-run with SELF_HOSTED_MODE=tailscale or =publicdomain."
+            ;;
+        tailscale)
+            # Pre-flight: CLI must be installed AND the daemon authenticated.
+            # We don't try to log the user in — Tailscale auth flows are
+            # interactive (browser/SSO) and beyond install.sh's mandate.
+            if ! command -v tailscale >/dev/null 2>&1; then
+                if [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+                    die "Tailscale.app is installed but the 'tailscale' CLI isn't in PATH. Run '/Applications/Tailscale.app/Contents/MacOS/Tailscale install-cli' (sudo) and retry."
+                fi
+                die "SELF_HOSTED_MODE=tailscale but 'tailscale' CLI not found. Install Tailscale (https://tailscale.com/kb/1017/install), run 'tailscale up', then retry."
+            fi
+            ts_status_json="$(tailscale status --json 2>/dev/null)" \
+                || die "Tailscale daemon not running or device not logged in. Run 'tailscale up' and retry."
+
+            # jq isn't guaranteed yet on a fresh Mac (we install it below) —
+            # use python3 (always present on modern macOS) to extract DNSName
+            # so the pre-flight error fires before we run brew install.
+            ts_fqdn="$(printf '%s' "$ts_status_json" \
+                | python3 -c 'import json,sys; d=json.load(sys.stdin); print(((d.get("Self") or {}).get("DNSName") or "").rstrip("."))' \
+                2>/dev/null)"
+            if [ -z "$ts_fqdn" ]; then
+                die "Could not determine Tailscale FQDN (empty Self.DNSName). Enable MagicDNS + HTTPS Certificates in your tailnet admin: https://login.tailscale.com/admin/dns"
+            fi
+
+            FQDN="$ts_fqdn"
+            SUB="${FQDN%%.*}"
+            ADMIN_URL="https://$FQDN"
+            CORS_ORIGIN="https://$FQDN"
+            log "macOS detected — Tailscale mode (HTTPS via tailnet)"
+            log "  fqdn=$FQDN"
+            log "  iPhone must also be on this tailnet (install Tailscale from the App Store)"
+            ;;
+        publicdomain)
+            # Mirrors Linux auto-mode: Worker mints a free <id>.sygen.pro and
+            # creates the A record from the request's CF-Connecting-IP. No
+            # Cloudflare token on the host. Differs from Linux only in
+            # platform glue (brew nginx + brew certbot + Colima).
+            AUTO_MODE=1
+            SUB=""        # populated by /api/provision below
+            FQDN=""       # populated by /api/provision below
+            ADMIN_URL=""  # populated by /api/provision below
+            CORS_ORIGIN=""
+            log "macOS detected — public-domain mode (Worker /api/provision + brew nginx)"
+            warn "  iPhone access requires NAT port forwarding on your router:"
+            warn "    external 80  -> this Mac, port 80"
+            warn "    external 443 -> this Mac, port 443"
+            warn "  Without those, the cert is still issued (DNS-01) but the iPhone can't reach the Mac."
+            ;;
+        *)
+            die "internal: SELF_HOSTED_SUBMODE='$SELF_HOSTED_SUBMODE' not handled"
+            ;;
+    esac
 elif [ -z "${SYGEN_SUBDOMAIN:-}" ] && [ -z "${CF_API_TOKEN:-}" ]; then
     # Auto-mode — provision a free <id>.sygen.pro from install.sygen.pro.
     # FQDN/SUB/CF_API_TOKEN/CF_ZONE_ID/CF_RECORD_ID are filled in by the
@@ -196,6 +344,8 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 0 ]; then
 elif [ $LOCAL_MODE -eq 0 ]; then
     . /etc/os-release 2>/dev/null || true
     log "Host: ${PRETTY_NAME:-unknown} — fqdn will be assigned by provisioning service"
+elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
+    log "Host: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown) — fqdn will be assigned by provisioning service"
 else
     log "Host: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown) — deploying $ADMIN_URL"
 fi
@@ -228,8 +378,16 @@ else
         die "Homebrew required on macOS. Install from https://brew.sh then re-run."
     fi
 
-    log "macOS: installing Colima + docker CLI (if missing)"
-    for pkg in colima docker docker-compose; do
+    log "macOS: installing Colima + docker CLI + jq (if missing)"
+    # jq is needed by the same code paths as on Linux (provision response
+    # parsing, .env edits) — install once up front so later sections can
+    # rely on it. nginx+certbot are publicdomain-only — adding them to a
+    # plain localhost install would be wasteful churn.
+    macos_pkgs=(colima docker docker-compose jq)
+    if [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
+        macos_pkgs+=(nginx certbot)
+    fi
+    for pkg in "${macos_pkgs[@]}"; do
         if ! brew list "$pkg" >/dev/null 2>&1; then
             brew install "$pkg"
         fi
@@ -265,12 +423,12 @@ APT
     fi
 fi
 
-# ---------- 1c. Auto-provision subdomain (Linux + auto-mode only) ----------
+# ---------- 1c. Auto-provision subdomain (auto-mode: Linux or macOS publicdomain) ----------
 # Runs after deps install so jq + curl are guaranteed. The Worker creates the
 # A record pointing at the CF-Connecting-IP it sees on this request; install.sh
 # never holds a Cloudflare token. ACME DNS-01 challenges go through Worker-
 # mediated endpoints (see subdomain-service for the contract).
-if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 1 ]; then
+if [ "$AUTO_MODE" -eq 1 ]; then
     STAGE="provision"
 
     # Re-run detection: a previous successful auto-mode install left
@@ -313,17 +471,26 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 1 ]; then
     fi
 fi
 
-# ---------- 2. Public IP + Cloudflare DNS (Linux only) ----------
+# ---------- 2. Public IP + Cloudflare DNS (Linux + macOS publicdomain) ----------
 # Auto-mode: Worker created the A record from CF-Connecting-IP during
 #   /api/provision. install.sh holds no CF token, so we just verify the
 #   record points at the right IP and warn (don't fail) on mismatch — that
 #   would mean the host's egress IP differs from what CF saw, which the
-#   operator must reconcile manually.
-# Custom mode: operator owns the zone + token, install.sh upserts directly.
-if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE_REUSE" -eq 1 ]; then
+#   operator must reconcile manually. On a Mac behind NAT this matches the
+#   router's WAN IP, which is what we want for port-forwarded reachability.
+# Custom mode: operator owns the zone + token, install.sh upserts directly
+#   (Linux only; macOS doesn't expose this path).
+needs_dns=0
+if [ $LOCAL_MODE -eq 0 ]; then
+    needs_dns=1
+elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
+    needs_dns=1
+fi
+
+if [ "$needs_dns" -eq 1 ] && [ "$AUTO_MODE_REUSE" -eq 1 ]; then
     log "Auto-mode re-run: skipping DNS upsert — record was set by original install"
 fi
-if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
+if [ "$needs_dns" -eq 1 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
     STAGE="dns"
     log "Detecting public IP"
     PUBLIC_IP=$(curl -fsS https://api.ipify.org || curl -fsS https://ifconfig.me)
@@ -384,20 +551,42 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
     fi
 fi
 
-# ---------- 3. TLS cert (Linux only) ----------
+# ---------- 3. TLS cert (Linux + macOS publicdomain) ----------
 # Auto-mode: certbot answers DNS-01 via Worker-mediated hooks at
 #   /usr/local/sbin/sygen-acme-{auth,cleanup}-hook.sh. The hooks read the
 #   install_token from $SYGEN_ROOT/.env and POST/DELETE the TXT through
 #   $SYGEN_DNS_CHALLENGE_URL — no CF credentials on the host.
 # Custom mode: operator's CF token directly via --dns-cloudflare.
+# macOS publicdomain re-uses the auto-mode hook flow; the only platform
+# differences are sudo for /etc/letsencrypt + the certbot binary path
+# (Homebrew puts it in $(brew --prefix)/bin instead of /usr/bin).
+needs_cert=0
 if [ $LOCAL_MODE -eq 0 ]; then
+    needs_cert=1
+elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
+    needs_cert=1
+fi
+
+# Pick a sudo wrapper + certbot binary path that works on both Linux and
+# brew-on-macOS. Both default to no-op + plain "certbot" on Linux/root.
+SUDO=""
+CERTBOT_BIN="certbot"
+if [ "$needs_cert" -eq 1 ] && [ $LOCAL_MODE -eq 1 ]; then
+    SUDO="sudo"
+    if [ -x "$(brew --prefix 2>/dev/null)/bin/certbot" ]; then
+        CERTBOT_BIN="$(brew --prefix)/bin/certbot"
+    fi
+fi
+
+if [ "$needs_cert" -eq 1 ]; then
     STAGE="cert"
 
     if [ "$AUTO_MODE" -eq 1 ]; then
         # Hooks must exist before any cert renewal too — install once,
         # certbot.timer reuses them on every renew.
         log "Installing ACME DNS-01 manual hooks (Worker-mediated)"
-        cat > /usr/local/sbin/sygen-acme-auth-hook.sh <<HOOK
+        $SUDO mkdir -p /usr/local/sbin
+        $SUDO tee /usr/local/sbin/sygen-acme-auth-hook.sh >/dev/null <<HOOK
 #!/usr/bin/env bash
 # Sygen ACME DNS-01 auth hook — POSTs the TXT challenge to the Worker.
 # Invoked by certbot --manual-auth-hook with CERTBOT_DOMAIN + CERTBOT_VALIDATION
@@ -434,9 +623,9 @@ curl -fsS -X POST -H "Content-Type: application/json" \\
 # CF is global within seconds; 20s is the same belt LE itself uses.
 sleep 20
 HOOK
-        chmod 0755 /usr/local/sbin/sygen-acme-auth-hook.sh
+        $SUDO chmod 0755 /usr/local/sbin/sygen-acme-auth-hook.sh
 
-        cat > /usr/local/sbin/sygen-acme-cleanup-hook.sh <<HOOK
+        $SUDO tee /usr/local/sbin/sygen-acme-cleanup-hook.sh >/dev/null <<HOOK
 #!/usr/bin/env bash
 # Sygen ACME DNS-01 cleanup hook — DELETEs the challenge TXT via the Worker.
 # Best-effort: an error here doesn't fail the cert (record will be swept
@@ -470,21 +659,24 @@ curl -fsS -X DELETE -H "Content-Type: application/json" \\
 
 exit 0
 HOOK
-        chmod 0755 /usr/local/sbin/sygen-acme-cleanup-hook.sh
+        $SUDO chmod 0755 /usr/local/sbin/sygen-acme-cleanup-hook.sh
     fi
 
     if [ "$AUTO_MODE_REUSE" -eq 1 ]; then
         log "Auto-mode re-run: cert already present, skipping certbot"
-    elif [ -f "/etc/letsencrypt/live/$FQDN/fullchain.pem" ]; then
+    elif $SUDO test -f "/etc/letsencrypt/live/$FQDN/fullchain.pem"; then
         log "  cert already present, skipping"
     elif [ "$AUTO_MODE" -eq 1 ]; then
         log "Obtaining Let's Encrypt cert via Worker-mediated DNS-01"
         # The hooks need SYGEN_INSTALL_TOKEN before .env is written below —
         # export it for this single certbot invocation. Renewal reads from
-        # .env directly (.env is in place by then).
-        SYGEN_INSTALL_TOKEN="$SYGEN_INSTALL_TOKEN" \
-        SYGEN_DNS_CHALLENGE_URL="$SYGEN_DNS_CHALLENGE_URL" \
-        certbot certonly --non-interactive --agree-tos \
+        # .env directly (.env is in place by then). On macOS we go through
+        # sudo so /etc/letsencrypt is writable; sudo -E preserves the env
+        # we just set.
+        $SUDO env \
+            SYGEN_INSTALL_TOKEN="$SYGEN_INSTALL_TOKEN" \
+            SYGEN_DNS_CHALLENGE_URL="$SYGEN_DNS_CHALLENGE_URL" \
+            "$CERTBOT_BIN" certonly --non-interactive --agree-tos \
             --email "admin@$DOMAIN" \
             --preferred-challenges dns \
             --manual --manual-public-ip-logging-ok \
@@ -590,8 +782,12 @@ EFFECTIVE_LOG_LEVEL=$(get_env LOG_LEVEL "INFO")
 EFFECTIVE_INSTALL_TOKEN=$(get_env SYGEN_INSTALL_TOKEN "${SYGEN_INSTALL_TOKEN:-}")
 EFFECTIVE_HEARTBEAT_URL=$(get_env SYGEN_INSTALL_HEARTBEAT_URL "${SYGEN_INSTALL_HEARTBEAT_URL:-}")
 EFFECTIVE_DNS_CHALLENGE_URL=$(get_env SYGEN_DNS_CHALLENGE_URL "${SYGEN_DNS_CHALLENGE_URL:-}")
-# NEXT_PUBLIC_SYGEN_API_URL: macOS forces localhost; on Linux preserve.
-if [ $LOCAL_MODE -eq 1 ]; then
+# NEXT_PUBLIC_SYGEN_API_URL: macOS localhost mode forces localhost (no proxy
+# layer in front of admin), but tailscale/publicdomain submodes terminate
+# TLS in front of both admin (8080) and core (8081) — so admin should hit
+# the API same-origin via the proxy, exactly like Linux. Empty string =
+# same-origin in the admin runtime.
+if [ $LOCAL_MODE -eq 1 ] && [ "$SELF_HOSTED_SUBMODE" = "localhost" ]; then
     EFFECTIVE_PUBLIC_API_URL="http://localhost:8081"
 else
     EFFECTIVE_PUBLIC_API_URL=$(get_env NEXT_PUBLIC_SYGEN_API_URL "")
@@ -686,7 +882,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
     fi
 fi
 
-# ---------- 7. nginx vhost (Linux only) ----------
+# ---------- 7. nginx vhost (Linux + macOS publicdomain) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
     STAGE="nginx"
     log "Configuring nginx vhost for $FQDN"
@@ -697,6 +893,70 @@ if [ $LOCAL_MODE -eq 0 ]; then
     rm -f /etc/nginx/sites-enabled/default
     nginx -t
     systemctl reload nginx
+elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
+    STAGE="nginx"
+    # brew nginx serves vhosts from $(brew --prefix)/etc/nginx/servers/*.conf
+    # (loaded by the default nginx.conf via `include servers/*`). The admin
+    # container binds to localhost:$SYGEN_ADMIN_PORT (instead of :3000) on
+    # macOS, so the proxy_pass needs to reflect that.
+    BREW_NGINX_PREFIX="$(brew --prefix nginx 2>/dev/null || brew --prefix)"
+    NGINX_CONF_DIR="$BREW_NGINX_PREFIX/etc/nginx/servers"
+    if [ ! -d "$NGINX_CONF_DIR" ]; then
+        # Older brew layouts put the conf dir under the toplevel brew prefix.
+        NGINX_CONF_DIR="$(brew --prefix)/etc/nginx/servers"
+    fi
+    $SUDO mkdir -p "$NGINX_CONF_DIR"
+
+    log "Configuring brew nginx vhost for $FQDN at $NGINX_CONF_DIR/sygen.conf"
+    curl -fsSL -o /tmp/sygen.nginx.tmpl "$BASE_URL/nginx.conf.tmpl" \
+        || die "could not fetch nginx.conf.tmpl"
+    # Substitute __FQDN__ AND remap the admin upstream from :3000 to the
+    # mac-side host port chosen earlier (default 8080). Core stays on :8081.
+    sed \
+        -e "s/__FQDN__/$FQDN/g" \
+        -e "s|http://127.0.0.1:3000|http://127.0.0.1:${SYGEN_ADMIN_PORT}|g" \
+        /tmp/sygen.nginx.tmpl \
+        | $SUDO tee "$NGINX_CONF_DIR/sygen.conf" >/dev/null
+
+    # Validate before (re)starting; sudo nginx -t reads the same conf set
+    # as the running service so a syntax error gets caught here, not at boot.
+    $SUDO nginx -t || die "nginx -t failed — see error above"
+
+    # Binding 80/443 requires root on macOS. nginx daemonizes by default,
+    # so a plain 'sudo nginx' is enough for the install run. We deliberately
+    # don't wire up launchd auto-start here — surviving reboots on a self-
+    # hosted Mac is an operator concern (and brew-services-as-root has its
+    # own warts on Apple Silicon). Document manual restart in the summary.
+    if pgrep -x nginx >/dev/null 2>&1; then
+        log "Reloading running nginx"
+        $SUDO nginx -s reload || die "nginx reload failed"
+    else
+        log "Starting nginx (sudo nginx)"
+        $SUDO nginx || die "could not start nginx"
+    fi
+elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
+    STAGE="nginx"
+    # Tailscale terminates TLS itself via `tailscale serve`; no nginx needed.
+    # `tailscale serve` requires HTTPS Certificates to be enabled in the
+    # tailnet admin (DNS settings). If it isn't, the first --bg call returns
+    # a clear error and we surface it.
+    log "Configuring 'tailscale serve' for $FQDN (tailnet HTTPS termination)"
+
+    # Wipe any prior config so re-runs end up with the same routes we want.
+    # 'reset' is a no-op when no serve config exists.
+    sudo tailscale serve reset >/dev/null 2>&1 || true
+
+    # Mountpoints share port 443; subsequent --bg calls add path handlers
+    # to the existing serve config. Order matters: more-specific paths first
+    # so they don't get shadowed by the catch-all "/" → admin route.
+    sudo tailscale serve --bg --set-path=/api/ "http://127.0.0.1:8081" \
+        || die "tailscale serve /api/ failed — is HTTPS enabled in your tailnet (admin > DNS)?"
+    sudo tailscale serve --bg --set-path=/ws/ "http://127.0.0.1:8081" \
+        || die "tailscale serve /ws/ failed"
+    sudo tailscale serve --bg --set-path=/upload "http://127.0.0.1:8081" \
+        || warn "tailscale serve /upload failed (uploads disabled — non-fatal)"
+    sudo tailscale serve --bg "http://127.0.0.1:${SYGEN_ADMIN_PORT}" \
+        || die "tailscale serve / failed"
 fi
 
 # ---------- 8. Wait for admin bootstrap ----------
@@ -862,13 +1122,41 @@ if [ $LOCAL_MODE -eq 0 ]; then
 DONE
 else
     cat <<DONE
+  Mode:        macOS / $SELF_HOSTED_SUBMODE
   Backups:     not configured on macOS (manual tar of $SYGEN_ROOT)
 
   Stop:        colima stop
   Start:       colima start && cd $SYGEN_ROOT && docker compose up -d
   Upgrade:     cd $SYGEN_ROOT && docker compose pull && docker compose up -d
   Logs:        docker compose -f $SYGEN_ROOT/docker-compose.yml logs -f core
-  Uninstall:   colima delete && rm -rf $SYGEN_ROOT
+DONE
+    case "$SELF_HOSTED_SUBMODE" in
+        tailscale)
+            cat <<DONE
+  Routes:      sudo tailscale serve status         (show current /api,/ws,/ routes)
+               sudo tailscale serve reset          (drop all routes, then re-run install.sh)
+  iPhone:      install Tailscale (App Store) and join the same tailnet,
+               then open $ADMIN_URL in Safari.
+DONE
+            ;;
+        publicdomain)
+            cat <<DONE
+  Cert:        /etc/letsencrypt/live/$FQDN/  (renew manually:
+               sudo $CERTBOT_BIN renew --manual-auth-hook /usr/local/sbin/sygen-acme-auth-hook.sh \\
+                                          --manual-cleanup-hook /usr/local/sbin/sygen-acme-cleanup-hook.sh)
+  Nginx:       sudo brew services restart nginx    (after cert renewal)
+  IMPORTANT:   iPhone access requires NAT port forwarding 80/443 -> this Mac on your router.
+DONE
+            ;;
+        localhost)
+            cat <<DONE
+  iPhone:      not reachable from iPhone in this mode (App Transport Security blocks plain HTTP).
+               Re-run with SELF_HOSTED_MODE=tailscale or =publicdomain for iPhone access.
+DONE
+            ;;
+    esac
+    cat <<DONE
+  Uninstall:   curl -fsSL https://install.sygen.pro/uninstall.sh | bash
 DONE
 fi
 

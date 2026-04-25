@@ -239,6 +239,15 @@ mkdir -p "$SYGEN_ROOT/data/_secrets"
 # to any local user on the VPS even though file contents need their own read perm.
 chmod 0700 "$SYGEN_ROOT/data/_secrets"
 
+# Container runs as uid 1000 (sygen) — see core Dockerfile. Bind-mounted
+# host directories don't inherit the chown done inside the image, so without
+# this the container can't create /data/logs etc and crashes on first start
+# with PermissionError. Linux only — macOS Colima maps host user uid into
+# the VM transparently.
+if [ $LOCAL_MODE -eq 0 ]; then
+    chown -R 1000:1000 "$SYGEN_ROOT/data" "$SYGEN_ROOT/claude-auth"
+fi
+
 if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
     log "Bootstrapping config.json (api on, host 0.0.0.0, port 8081)"
     # `openssl rand -hex 32` outputs 64 hex chars on one line — no SIGPIPE

@@ -1,0 +1,49 @@
+# Cloudflare Worker config — Sygen subdomain provisioning service.
+#
+# Deploy:
+#   npm install -g wrangler
+#   wrangler login
+#   wrangler kv:namespace create SUBDOMAIN_RESERVATIONS
+#   wrangler kv:namespace create TOKEN_INDEX
+#   # paste returned IDs into [[kv_namespaces]] below
+#   wrangler secret put CF_MASTER_API_TOKEN
+#   wrangler secret put ADMIN_TOKEN
+#   wrangler deploy
+
+name = "sygen-subdomain-service"
+main = "src/worker.js"
+compatibility_date = "2026-04-01"
+
+# Bound to install.sygen.pro/api/*. The static install.sh + docker-compose.yml
+# continue to be served by Pages on the same hostname; only /api/* routes hit
+# this Worker.
+[[routes]]
+pattern = "install.sygen.pro/api/*"
+zone_name = "sygen.pro"
+
+# KV namespaces — IDs are filled in after `wrangler kv:namespace create`.
+[[kv_namespaces]]
+binding = "SUBDOMAIN_RESERVATIONS"
+id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+
+[[kv_namespaces]]
+binding = "TOKEN_INDEX"
+id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+
+# Non-secret config.
+[vars]
+SYGEN_DOMAIN = "sygen.pro"
+SYGEN_CF_ZONE_ID = "6ae59801f8ac7b5dc33b6e32d844b0a6"
+TTL_DAYS = "30"
+SUBDOMAIN_LENGTH = "8"
+TLS_DNS_TOKEN_TTL_SECONDS = "3600"
+
+# Daily sweep at 02:00 UTC — deletes expired reservations.
+[triggers]
+crons = ["0 2 * * *"]
+
+# Secrets (set via `wrangler secret put`):
+#   CF_MASTER_API_TOKEN — has Zone.DNS:Edit on sygen.pro; used to create
+#                         records and to mint scoped per-install tokens via
+#                         CF Account API.
+#   ADMIN_TOKEN         — required for /api/admin/* routes.

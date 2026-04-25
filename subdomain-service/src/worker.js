@@ -1,10 +1,12 @@
 // Sygen subdomain provisioning Worker.
 //
 // Endpoints (see PHASE3_subdomain_provisioning_design.md in sygen-clean):
-//   POST   /api/provision  — allocate a fresh <id>.sygen.pro
-//   POST   /api/heartbeat  — extend reservation TTL
-//   DELETE /api/release    — free reservation on uninstall
-//   GET    /api/health     — admin health check
+//   POST   /api/provision      — allocate a fresh <id>.sygen.pro
+//   POST   /api/heartbeat      — extend reservation TTL
+//   DELETE /api/release        — free reservation on uninstall
+//   POST   /api/dns-challenge  — add ACME DNS-01 TXT for owned subdomain
+//   DELETE /api/dns-challenge  — remove ACME DNS-01 TXT for owned subdomain
+//   GET    /api/health         — admin health check
 //
 // Scheduled:
 //   Daily cron — sweep expired reservations (cf_record_id + KV).
@@ -17,6 +19,10 @@ import { handleProvision } from "./handlers/provision.js";
 import { handleHeartbeat } from "./handlers/heartbeat.js";
 import { handleRelease } from "./handlers/release.js";
 import { handleHealth } from "./handlers/health.js";
+import {
+  handleDnsChallengePost,
+  handleDnsChallengeDelete,
+} from "./handlers/dns_challenge.js";
 import { sweepExpired } from "./sweep.js";
 
 async function route(request, env) {
@@ -32,6 +38,12 @@ async function route(request, env) {
   }
   if (method === "DELETE" && path === "/api/release") {
     return handleRelease(request, env);
+  }
+  if (method === "POST" && path === "/api/dns-challenge") {
+    return handleDnsChallengePost(request, env);
+  }
+  if (method === "DELETE" && path === "/api/dns-challenge") {
+    return handleDnsChallengeDelete(request, env);
   }
   if (method === "GET" && path === "/api/health") {
     return handleHealth(request, env);

@@ -68,6 +68,15 @@ async function deleteOne(env, reservation) {
       if (!(e instanceof CfApiError) || e.status !== 404) throw e;
     }
   }
+  // Belt-and-braces: a leaked ACME challenge TXT (cleanup hook never ran)
+  // would otherwise linger in the zone. 404 = already gone; ignore.
+  if (reservation.dns_challenge_record_id) {
+    try {
+      await deleteDnsRecord(env, reservation.dns_challenge_record_id);
+    } catch (e) {
+      if (!(e instanceof CfApiError) || e.status !== 404) throw e;
+    }
+  }
   await Promise.all([
     env.SUBDOMAIN_RESERVATIONS.delete(reservation.subdomain),
     reservation.install_token_hash

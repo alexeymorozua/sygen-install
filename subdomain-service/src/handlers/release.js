@@ -46,6 +46,20 @@ export async function handleRelease(request, env) {
       });
     }
   }
+  // Same best-effort pass for any leaked ACME TXT (auth-hook ran but
+  // cleanup-hook didn't, or the install died mid-renewal).
+  if (reservation.dns_challenge_record_id) {
+    try {
+      await deleteDnsRecord(env, reservation.dns_challenge_record_id);
+    } catch (e) {
+      console.error("release: challenge_delete_failed", {
+        subdomain,
+        record_id: reservation.dns_challenge_record_id,
+        status: e instanceof CfApiError ? e.status : null,
+        message: e.message,
+      });
+    }
+  }
 
   await Promise.all([
     env.SUBDOMAIN_RESERVATIONS.delete(subdomain),

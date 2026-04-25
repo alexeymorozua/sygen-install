@@ -1,7 +1,7 @@
 import { jsonResponse } from "../lib/response.js";
 import { generateInstallToken, sha256Hex } from "../lib/crypto.js";
 import { generateSubdomain, isReserved, dnsRecordTypeForIp } from "../lib/subdomain.js";
-import { createDnsRecord, deleteDnsRecord, mintScopedDnsToken, CfApiError } from "../lib/cf.js";
+import { createDnsRecord, CfApiError } from "../lib/cf.js";
 
 const MAX_CLAIM_ATTEMPTS = 4;
 
@@ -60,30 +60,6 @@ export async function handleProvision(request, env) {
     return jsonResponse(503, { error: "dns_create_failed" });
   }
 
-  let scoped;
-  try {
-    const ttlSec = parseInt(env.TLS_DNS_TOKEN_TTL_SECONDS || "3600", 10);
-    scoped = await mintScopedDnsToken(env, subdomain, ttlSec);
-  } catch (e) {
-    console.error("provision: scoped_token_failed", {
-      subdomain,
-      status: e instanceof CfApiError ? e.status : null,
-      message: e.message,
-    });
-    // Roll back the DNS record on token mint failure — otherwise we leak
-    // unused records into the zone.
-    try {
-      await deleteDnsRecord(env, record.id);
-    } catch (rollbackErr) {
-      console.error("provision: rollback_failed", {
-        subdomain,
-        record_id: record.id,
-        message: rollbackErr.message,
-      });
-    }
-    return jsonResponse(503, { error: "scoped_token_failed" });
-  }
-
   const now = new Date();
   const ttlDays = parseInt(env.TTL_DAYS || "30", 10);
   const expiresAt = new Date(now.getTime() + ttlDays * 86400 * 1000);
@@ -115,9 +91,6 @@ export async function handleProvision(request, env) {
     ttl_days: ttlDays,
     heartbeat_url: `https://install.${env.SYGEN_DOMAIN}/api/heartbeat`,
     release_url: `https://install.${env.SYGEN_DOMAIN}/api/release`,
-    tls_dns_token: scoped.token,
-    tls_dns_token_expires_at: scoped.expires_at,
-    cf_zone_id: env.SYGEN_CF_ZONE_ID,
-    cf_record_id: record.id,
+    dns_challenge_url: `https://install.${env.SYGEN_DOMAIN}/api/dns-challenge`,
   });
 }

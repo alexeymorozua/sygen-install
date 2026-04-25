@@ -90,12 +90,12 @@
       "tagline": "Akamai-backed, mature, strong support",
       "description_long": "Linode is now part of Akamai with global edge network. Reliable performance, predictable pricing, mature platform. Good for production workloads.",
       "min_plan": {
-        "name": "Linode 2GB",
-        "vcpu": 1,
-        "ram_gb": 2,
-        "disk_gb": 50,
-        "price_usd_month": 12.0,
-        "price_local": "$12"
+        "name": "Linode 4GB",
+        "vcpu": 2,
+        "ram_gb": 4,
+        "disk_gb": 80,
+        "price_usd_month": 24.0,
+        "price_local": "$24"
       },
       "regions": ["US", "CA", "UK", "DE", "FR", "SE", "IT", "JP", "SG", "IN", "AU", "ID", "BR"],
       "country_tags": ["United States", "Canada", "United Kingdom", "Germany", "France", "Sweden", "Italy", "Japan", "Singapore", "India", "Australia", "Indonesia", "Brazil"],

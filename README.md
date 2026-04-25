@@ -11,12 +11,40 @@ runs everything inside Colima bound to `localhost` — no DNS/TLS/nginx.
 
 ## Usage — Linux (VPS)
 
+### Auto-mode (default)
+
+No env vars needed. The installer requests a free `<id>.sygen.pro` subdomain
+from `install.sygen.pro/api/provision` (which creates the Cloudflare DNS
+record and mints a one-hour DNS-01 token for Let's Encrypt). The final fqdn
+is shown at the end of the run and emitted in `--json-output`.
+
+```bash
+curl -fsSL https://install.sygen.pro/install.sh | sudo bash
+```
+
+The reservation is kept alive by a weekly heartbeat from core to
+`install.sygen.pro/api/heartbeat`, using the `SYGEN_INSTALL_TOKEN` saved
+in `/srv/sygen/.env`. If heartbeats stop for 30+ days the subdomain is
+reclaimed and the DNS record deleted; the next install on the same host
+gets a fresh `<id>.sygen.pro`. `uninstall.sh` releases the slot
+explicitly via `DELETE /api/release` (see [Uninstall](#uninstall) below).
+
+If the provision endpoint is unreachable, the installer fails fast — set
+the custom-mode env vars below to fall back to a self-managed subdomain.
+
+### Custom mode (bring your own subdomain)
+
+For admin-managed installs on a Cloudflare zone you control. Set all three
+env vars; the auto-provision call is skipped, DNS is upserted with the
+operator-supplied token, and no `SYGEN_INSTALL_TOKEN` is written (no
+heartbeat or auto-reclaim).
+
 ```bash
 curl -fsSL https://install.sygen.pro/install.sh | \
     SYGEN_SUBDOMAIN=alice \
     CF_API_TOKEN=cfat_xxx \
     CF_ZONE_ID=6ae59801f8ac7b5dc33b6e32d844b0a6 \
-    bash
+    sudo bash
 ```
 
 ## Usage — macOS (local dev)
@@ -52,15 +80,16 @@ machine-parseable JSON line on stdout instead. Progress logs still go to
 stderr so the operator can watch the install in real time.
 
 ```bash
-# success: one JSON line on stdout, ok=true
+# success: one JSON line on stdout, ok=true (auto-mode shown — no env vars)
 curl -fsSL https://install.sygen.pro/install.sh | \
-    SYGEN_SUBDOMAIN=alice \
-    CF_API_TOKEN=cfat_xxx \
-    CF_ZONE_ID=6ae59801f8ac7b5dc33b6e32d844b0a6 \
-    SYGEN_JSON_OUTPUT=1 \
-    bash
-# {"ok":true,"fqdn":"alice.sygen.pro","admin_user":"admin","admin_password":"...","admin_url":"https://alice.sygen.pro/","core_image":"...","admin_image":"...","data_dir":"/srv/sygen/data","compose_file":"/srv/sygen/docker-compose.yml"}
+    SYGEN_JSON_OUTPUT=1 sudo bash
+# {"ok":true,"fqdn":"s3xk7f2p.sygen.pro","admin_user":"admin","admin_password":"...","admin_url":"https://s3xk7f2p.sygen.pro","core_image":"...","admin_image":"...","data_dir":"/srv/sygen/data","compose_file":"/srv/sygen/docker-compose.yml","install_token":"sit_..."}
 ```
+
+`install_token` is `null` in custom mode and a `sit_...` string in auto-mode;
+deploy wizards (e.g. iOS) can persist it alongside provider creds for later
+reference. Day-to-day heartbeat traffic is handled by core itself — wizards
+do not need to call `/api/heartbeat` themselves.
 
 On failure the script still emits a single JSON line and exits non-zero:
 

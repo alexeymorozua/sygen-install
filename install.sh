@@ -141,6 +141,20 @@ ADMIN_TAG="${SYGEN_ADMIN_TAG:-latest}"
 CORE_IMAGE="${SYGEN_CORE_IMAGE:-ghcr.io/alexeymorozua/sygen-core:${CORE_TAG}}"
 ADMIN_IMAGE="${SYGEN_ADMIN_IMAGE:-ghcr.io/alexeymorozua/sygen-admin:${ADMIN_TAG}}"
 
+# AUTO_MODE=1 means "ask install.sygen.pro for a free <id>.sygen.pro and a
+# scoped DNS-01 token". AUTO_MODE=0 means the operator supplied their own
+# subdomain + Cloudflare token (legacy / admin-managed installs).
+# AUTO_MODE_REUSE=1 means we're re-running install.sh on a host that already
+# went through provision once; we must NOT call /api/provision again (would
+# orphan the live record + waste a slot) — we re-read the saved token + fqdn
+# from the existing .env / config.json instead.
+AUTO_MODE=0
+AUTO_MODE_REUSE=0
+SYGEN_INSTALL_TOKEN=""
+SYGEN_INSTALL_HEARTBEAT_URL=""
+CF_RECORD_ID=""
+PROVISION_URL="${SYGEN_PROVISION_URL:-https://install.${DOMAIN}/api/provision}"
+
 if [ $LOCAL_MODE -eq 1 ]; then
     SUB="${SYGEN_SUBDOMAIN:-local}"
     FQDN="localhost"
@@ -149,23 +163,36 @@ if [ $LOCAL_MODE -eq 1 ]; then
     ADMIN_URL="http://localhost:${SYGEN_ADMIN_PORT}"
     CORS_ORIGIN="http://localhost:${SYGEN_ADMIN_PORT}"
     log "macOS detected — local install mode (Colima + localhost, no TLS)"
+elif [ -z "${SYGEN_SUBDOMAIN:-}" ] && [ -z "${CF_API_TOKEN:-}" ]; then
+    # Auto-mode — provision a free <id>.sygen.pro from install.sygen.pro.
+    # FQDN/SUB/CF_API_TOKEN/CF_ZONE_ID/CF_RECORD_ID are filled in by the
+    # provision step below, after deps (jq) are installed.
+    AUTO_MODE=1
+    SYGEN_ROOT="/srv/sygen"
+    log "Linux detected — auto-mode (will provision <id>.${DOMAIN} from $PROVISION_URL)"
+    if [ "$EUID" -ne 0 ]; then
+        die "Run as root on Linux (sudo bash or ssh root@...)"
+    fi
 else
-    SUB="${SYGEN_SUBDOMAIN:?SYGEN_SUBDOMAIN required}"
+    SUB="${SYGEN_SUBDOMAIN:?SYGEN_SUBDOMAIN required (or unset both SYGEN_SUBDOMAIN and CF_API_TOKEN for auto-mode)}"
     FQDN="${SUB}.${DOMAIN}"
-    CF_API_TOKEN="${CF_API_TOKEN:?CF_API_TOKEN required}"
-    CF_ZONE_ID="${CF_ZONE_ID:?CF_ZONE_ID required}"
+    CF_API_TOKEN="${CF_API_TOKEN:?CF_API_TOKEN required for custom-mode install}"
+    CF_ZONE_ID="${CF_ZONE_ID:?CF_ZONE_ID required for custom-mode install}"
     SYGEN_ROOT="/srv/sygen"
     ADMIN_URL="https://$FQDN"
     CORS_ORIGIN="https://$FQDN"
-    log "Linux detected — VPS install mode (systemd + nginx + Let's Encrypt)"
+    log "Linux detected — custom mode (subdomain $FQDN supplied by operator)"
     if [ "$EUID" -ne 0 ]; then
         die "Run as root on Linux (sudo bash or ssh root@...)"
     fi
 fi
 
-if [ $LOCAL_MODE -eq 0 ]; then
+if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 0 ]; then
     . /etc/os-release 2>/dev/null || true
     log "Host: ${PRETTY_NAME:-unknown} — deploying $FQDN"
+elif [ $LOCAL_MODE -eq 0 ]; then
+    . /etc/os-release 2>/dev/null || true
+    log "Host: ${PRETTY_NAME:-unknown} — fqdn will be assigned by provisioning service"
 else
     log "Host: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown) — deploying $ADMIN_URL"
 fi
@@ -235,32 +262,105 @@ APT
     fi
 fi
 
+# ---------- 1c. Auto-provision subdomain (Linux + auto-mode only) ----------
+# Runs after deps install so jq + curl are guaranteed. The Worker has already
+# created an A record pointing at our CF-Connecting-IP — we still re-detect
+# the public IP below and PUT to the known cf_record_id, in case the source
+# IP visible to Cloudflare differs from what the host advertises.
+if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE" -eq 1 ]; then
+    STAGE="provision"
+
+    # Re-run detection: a previous successful auto-mode install left
+    # SYGEN_INSTALL_TOKEN in /srv/sygen/.env. Calling /api/provision again
+    # would burn a fresh slot AND drop the existing live DNS/TLS into limbo,
+    # so we reuse what's already on disk instead.
+    if [ -f "$SYGEN_ROOT/.env" ] && grep -q '^SYGEN_INSTALL_TOKEN=' "$SYGEN_ROOT/.env"; then
+        AUTO_MODE_REUSE=1
+        log "Auto-mode re-run: SYGEN_INSTALL_TOKEN already in $SYGEN_ROOT/.env — skipping provision"
+        SYGEN_INSTALL_TOKEN=$(grep '^SYGEN_INSTALL_TOKEN=' "$SYGEN_ROOT/.env" | head -n1 | cut -d= -f2-)
+        SYGEN_INSTALL_HEARTBEAT_URL=$(grep '^SYGEN_INSTALL_HEARTBEAT_URL=' "$SYGEN_ROOT/.env" 2>/dev/null | head -n1 | cut -d= -f2- || true)
+        if [ -f "$SYGEN_ROOT/data/config/config.json" ]; then
+            SUB=$(jq -r '.instance_name // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)
+        fi
+        [ -n "${SUB:-}" ] || die "auto-mode re-run: cannot recover subdomain — config.json missing or has no instance_name. Wipe $SYGEN_ROOT and rerun for a fresh provision."
+        FQDN="${SUB}.${DOMAIN}"
+        ADMIN_URL="https://$FQDN"
+        CORS_ORIGIN="https://$FQDN"
+        # Sentinel values — never used because the DNS section is gated on
+        # AUTO_MODE_REUSE below. Kept defined so `set -u` doesn't trip if
+        # downstream code reads them defensively.
+        CF_API_TOKEN="reused"
+        CF_ZONE_ID="reused"
+        CF_RECORD_ID="reused"
+        log "Auto-mode re-run: continuing with existing $FQDN"
+    else
+        log "Auto-mode: requesting subdomain from $PROVISION_URL"
+        PROVISION_RESPONSE=$(curl -fsS -X POST -H "Content-Type: application/json" \
+            -d '{}' "$PROVISION_URL") \
+            || die "provision request failed (network or 5xx) — set SYGEN_SUBDOMAIN/CF_API_TOKEN/CF_ZONE_ID to use a custom subdomain"
+
+        FQDN=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.fqdn // empty')
+        SYGEN_INSTALL_TOKEN=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.install_token // empty')
+        CF_API_TOKEN=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.tls_dns_token // empty')
+        CF_ZONE_ID=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.cf_zone_id // empty')
+        CF_RECORD_ID=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.cf_record_id // empty')
+        SYGEN_INSTALL_HEARTBEAT_URL=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.heartbeat_url // empty')
+
+        if [ -z "$FQDN" ] || [ -z "$SYGEN_INSTALL_TOKEN" ] || [ -z "$CF_API_TOKEN" ] \
+            || [ -z "$CF_ZONE_ID" ] || [ -z "$CF_RECORD_ID" ]; then
+            die "provision response missing required fields (got: $PROVISION_RESPONSE)"
+        fi
+
+        SUB="${FQDN%%.*}"
+        ADMIN_URL="https://$FQDN"
+        CORS_ORIGIN="https://$FQDN"
+        log "Auto-mode: assigned $FQDN (install_token will be saved for weekly heartbeats)"
+    fi
+fi
+
 # ---------- 2. Public IP + Cloudflare DNS (Linux only) ----------
-if [ $LOCAL_MODE -eq 0 ]; then
+# Skipped on auto-mode re-runs: the original install already created the
+# record and the scoped tls_dns_token has long since expired (1h TTL).
+if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE_REUSE" -eq 1 ]; then
+    log "Auto-mode re-run: skipping DNS upsert — record was set by original install"
+fi
+if [ $LOCAL_MODE -eq 0 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
     STAGE="dns"
     log "Detecting public IP"
     PUBLIC_IP=$(curl -fsS https://api.ipify.org || curl -fsS https://ifconfig.me)
     [ -n "$PUBLIC_IP" ] || die "Could not determine public IP"
     log "  public_ip=$PUBLIC_IP"
 
-    log "Upserting Cloudflare A record $FQDN -> $PUBLIC_IP"
     CF_AUTH="Authorization: Bearer $CF_API_TOKEN"
-    EXISTING=$(curl -fsS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$FQDN&type=A" \
-        -H "$CF_AUTH" | jq -r '.result[0].id // empty')
     DNS_PAYLOAD=$(jq -nc --arg n "$FQDN" --arg c "$PUBLIC_IP" \
         '{type:"A",name:$n,content:$c,ttl:120,proxied:false}')
-    if [ -n "$EXISTING" ]; then
+
+    if [ "$AUTO_MODE" -eq 1 ]; then
+        # Scoped tls_dns_token has DNS:Edit on $CF_RECORD_ID only — it cannot
+        # list zone records. Always PUT to the known id; harmless if Worker's
+        # detected IP already matches our public IP.
+        log "Updating Cloudflare A record $FQDN -> $PUBLIC_IP (record $CF_RECORD_ID)"
         curl -fsS -X PUT \
-            "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$EXISTING" \
+            "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$CF_RECORD_ID" \
             -H "$CF_AUTH" -H "Content-Type: application/json" --data "$DNS_PAYLOAD" \
-            >/dev/null
-        log "  updated existing record"
+            >/dev/null || die "Cloudflare DNS PUT failed for record $CF_RECORD_ID"
     else
-        curl -fsS -X POST \
-            "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
-            -H "$CF_AUTH" -H "Content-Type: application/json" --data "$DNS_PAYLOAD" \
-            >/dev/null
-        log "  created new record"
+        log "Upserting Cloudflare A record $FQDN -> $PUBLIC_IP"
+        EXISTING=$(curl -fsS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$FQDN&type=A" \
+            -H "$CF_AUTH" | jq -r '.result[0].id // empty')
+        if [ -n "$EXISTING" ]; then
+            curl -fsS -X PUT \
+                "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$EXISTING" \
+                -H "$CF_AUTH" -H "Content-Type: application/json" --data "$DNS_PAYLOAD" \
+                >/dev/null
+            log "  updated existing record"
+        else
+            curl -fsS -X POST \
+                "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+                -H "$CF_AUTH" -H "Content-Type: application/json" --data "$DNS_PAYLOAD" \
+                >/dev/null
+            log "  created new record"
+        fi
     fi
 
     log "Waiting for DNS propagation..."
@@ -277,23 +377,24 @@ fi
 # ---------- 3. TLS cert (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
     STAGE="cert"
-    log "Obtaining Let's Encrypt cert via Cloudflare DNS-01"
-    mkdir -p /etc/letsencrypt/sygen
-    umask 077
-    cat > /etc/letsencrypt/sygen/cloudflare.ini <<CF_INI
+    if [ "$AUTO_MODE_REUSE" -eq 1 ]; then
+        log "Auto-mode re-run: cert already present, skipping certbot"
+    elif [ -f "/etc/letsencrypt/live/$FQDN/fullchain.pem" ]; then
+        log "  cert already present, skipping"
+    else
+        log "Obtaining Let's Encrypt cert via Cloudflare DNS-01"
+        mkdir -p /etc/letsencrypt/sygen
+        umask 077
+        cat > /etc/letsencrypt/sygen/cloudflare.ini <<CF_INI
 dns_cloudflare_api_token = $CF_API_TOKEN
 CF_INI
-    umask 022
-
-    if [ ! -f "/etc/letsencrypt/live/$FQDN/fullchain.pem" ]; then
+        umask 022
         certbot certonly --non-interactive --agree-tos \
             --email "admin@$DOMAIN" \
             --dns-cloudflare \
             --dns-cloudflare-credentials /etc/letsencrypt/sygen/cloudflare.ini \
             --dns-cloudflare-propagation-seconds 20 \
             -d "$FQDN" || die "certbot failed"
-    else
-        log "  cert already present, skipping"
     fi
 fi
 
@@ -373,6 +474,11 @@ EFFECTIVE_UPDATER_TOKEN=$(get_env SYGEN_UPDATER_TOKEN "$(openssl rand -hex 32)")
 EFFECTIVE_ANTHROPIC_KEY=$(get_env ANTHROPIC_API_KEY "${ANTHROPIC_API_KEY:-}")
 EFFECTIVE_OAUTH_TOKEN=$(get_env CLAUDE_CODE_OAUTH_TOKEN "${CLAUDE_CODE_OAUTH_TOKEN:-}")
 EFFECTIVE_LOG_LEVEL=$(get_env LOG_LEVEL "INFO")
+# Phase 3: subdomain provisioning. Preserve token + heartbeat URL across
+# re-runs of install.sh — losing them would orphan the reservation and the
+# slot would get reclaimed after the 30-day TTL.
+EFFECTIVE_INSTALL_TOKEN=$(get_env SYGEN_INSTALL_TOKEN "${SYGEN_INSTALL_TOKEN:-}")
+EFFECTIVE_HEARTBEAT_URL=$(get_env SYGEN_INSTALL_HEARTBEAT_URL "${SYGEN_INSTALL_HEARTBEAT_URL:-}")
 # NEXT_PUBLIC_SYGEN_API_URL: macOS forces localhost; on Linux preserve.
 if [ $LOCAL_MODE -eq 1 ]; then
     EFFECTIVE_PUBLIC_API_URL="http://localhost:8081"
@@ -393,6 +499,14 @@ umask 077
     echo "SYGEN_UPDATER_TOKEN=$EFFECTIVE_UPDATER_TOKEN"
     if [ -n "$EFFECTIVE_PUBLIC_API_URL" ]; then
         echo "NEXT_PUBLIC_SYGEN_API_URL=$EFFECTIVE_PUBLIC_API_URL"
+    fi
+    # Phase 3: only present on auto-provisioned installs. Core reads these
+    # at boot and runs a weekly POST to heartbeat_url to keep the slot alive.
+    if [ -n "$EFFECTIVE_INSTALL_TOKEN" ]; then
+        echo "SYGEN_INSTALL_TOKEN=$EFFECTIVE_INSTALL_TOKEN"
+    fi
+    if [ -n "$EFFECTIVE_HEARTBEAT_URL" ]; then
+        echo "SYGEN_INSTALL_HEARTBEAT_URL=$EFFECTIVE_HEARTBEAT_URL"
     fi
 } > "$SYGEN_ROOT/.env"
 umask 022
@@ -576,14 +690,24 @@ if [ "$JSON_OUTPUT" = "1" ]; then
         exit 1
     fi
     JSON_DONE=1
-    printf '{"ok":true,"fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_image":%s,"admin_image":%s,"data_dir":%s,"compose_file":%s}\n' \
+    # install_token is only populated in auto-mode; it's emitted as a JSON
+    # null otherwise so the field is always present and parseable. Wizards
+    # that need it for follow-up (e.g. iOS storing it alongside provider
+    # creds) can rely on the field's presence; otherwise it's harmless.
+    if [ -n "$SYGEN_INSTALL_TOKEN" ]; then
+        IT_JSON="$(json_escape "$SYGEN_INSTALL_TOKEN")"
+    else
+        IT_JSON="null"
+    fi
+    printf '{"ok":true,"fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_image":%s,"admin_image":%s,"data_dir":%s,"compose_file":%s,"install_token":%s}\n' \
         "$(json_escape "$FQDN")" \
         "$(json_escape "$ADMIN_PASS")" \
         "$(json_escape "$ADMIN_URL")" \
         "$(json_escape "$CORE_IMAGE")" \
         "$(json_escape "$ADMIN_IMAGE")" \
         "$(json_escape "$SYGEN_ROOT/data")" \
-        "$(json_escape "$SYGEN_ROOT/docker-compose.yml")"
+        "$(json_escape "$SYGEN_ROOT/docker-compose.yml")" \
+        "$IT_JSON"
     exit 0
 fi
 

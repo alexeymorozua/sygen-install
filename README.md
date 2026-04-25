@@ -146,6 +146,40 @@ rsync -az /var/backups/sygen/ user@backup-host:/backups/sygen-$(hostname)/
 systemctl disable --now sygen-backup.timer
 ```
 
+## Uninstall
+
+Clean removal of the entire stack — containers, data, secrets, systemd
+backup timer, nginx vhost, and cert renewal hook. Keeps the Let's Encrypt
+cert and system packages so re-installing is fast.
+
+```bash
+# Linux (VPS, run as root):
+curl -fsSL https://install.sygen.pro/uninstall.sh | sudo bash
+
+# macOS (local dev):
+curl -fsSL https://install.sygen.pro/uninstall.sh | bash
+```
+
+The script prompts for confirmation. Set `SYGEN_UNINSTALL_CONFIRM=1` to
+skip the prompt (CI / automation).
+
+To also release the Cloudflare DNS A record, pass the same env vars used
+at install time:
+
+```bash
+curl -fsSL https://install.sygen.pro/uninstall.sh | \
+    SYGEN_SUBDOMAIN=alice \
+    CF_API_TOKEN=cfat_xxx \
+    CF_ZONE_ID=6ae59801f8ac7b5dc33b6e32d844b0a6 \
+    sudo bash
+```
+
+On macOS the script stops Colima but does not delete the VM — Colima may
+be shared with other Docker projects. Run `colima delete` manually if
+nothing else is using it. The Let's Encrypt cert in `/etc/letsencrypt/`
+is left in place; remove it with `certbot delete --cert-name <fqdn>` if
+you don't plan to re-install.
+
 ## Image sources
 
 - Core:  `ghcr.io/alexeymorozua/sygen-core:latest`

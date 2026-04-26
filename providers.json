@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "updated_at": "2026-04-26",
   "schema_version": "2.0",
   "minimum_specs": {
@@ -14,7 +14,7 @@
       "id": "hetzner",
       "name": "Hetzner Cloud",
       "url": "https://www.hetzner.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hetzner.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hetzner.png",
       "tagline": "Cheapest in EU, very reliable",
       "description_long": "European cloud provider known for ridiculously low prices and rock-solid uptime. Great default pick for budget-conscious users in EU and US.",
       "min_plan": {
@@ -38,7 +38,7 @@
       "id": "digitalocean",
       "name": "DigitalOcean",
       "url": "https://www.digitalocean.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/digitalocean.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/digitalocean.png",
       "tagline": "Popular global VPS with simple UI",
       "description_long": "Developer-friendly cloud with droplets in 14+ regions worldwide, transparent pricing and great docs. Good middle-ground between budget and managed clouds.",
       "min_plan": {
@@ -62,7 +62,7 @@
       "id": "vultr",
       "name": "Vultr",
       "url": "https://www.vultr.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/vultr.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/vultr.png",
       "tagline": "Global low-cost VPS in 30+ locations",
       "description_long": "Hourly billing, 30+ data centers worldwide including Tokyo, Sydney, São Paulo, Johannesburg. Layer 3/4/7 DDoS protection included. Strong picks for niche regions.",
       "min_plan": {
@@ -86,7 +86,7 @@
       "id": "linode",
       "name": "Linode (Akamai)",
       "url": "https://www.linode.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/linode.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/linode.png",
       "tagline": "Akamai-backed, mature, strong support",
       "description_long": "Linode is now part of Akamai with global edge network. Reliable performance, predictable pricing, mature platform. Good for production workloads.",
       "min_plan": {
@@ -110,7 +110,7 @@
       "id": "ovh",
       "name": "OVHcloud",
       "url": "https://www.ovhcloud.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/ovh.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/ovh.png",
       "tagline": "EU-focused, GDPR-compliant, anti-DDoS included",
       "description_long": "Europe's largest cloud provider with strong DDoS protection (industry-leading) and data centers across France, Germany, UK, Poland, Canada, US, Singapore, Australia.",
       "min_plan": {
@@ -134,7 +134,7 @@
       "id": "contabo",
       "name": "Contabo",
       "url": "https://contabo.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/contabo.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/contabo.png",
       "tagline": "Highest specs per dollar",
       "description_long": "German budget cloud with extremely generous resources for the price. EU + US + Asia data centers. Free DDoS protection. Slower setup than Hetzner but cheaper for higher tiers.",
       "min_plan": {
@@ -158,7 +158,7 @@
       "id": "scaleway",
       "name": "Scaleway",
       "url": "https://www.scaleway.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/scaleway.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/scaleway.png",
       "tagline": "EU-based, ARM + AMD options",
       "description_long": "French cloud provider with strong EU sovereignty story. Hourly billing, ARM and AMD instance types, fast NVMe storage. Good for EU developers who care about data residency.",
       "min_plan": {
@@ -182,7 +182,7 @@
       "id": "upcloud",
       "name": "UpCloud",
       "url": "https://upcloud.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/upcloud.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/upcloud.png",
       "tagline": "Premium MaxIOPS storage, 100% uptime SLA",
       "description_long": "Finnish premium cloud known for fastest disk IO in benchmarks (MaxIOPS storage). 100% uptime SLA. Pricier than Hetzner but rock-solid.",
       "min_plan": {
@@ -206,7 +206,7 @@
       "id": "ionos",
       "name": "IONOS Cloud",
       "url": "https://www.ionos.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/ionos.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/ionos.png",
       "tagline": "German cloud (1&1), GDPR-compliant",
       "description_long": "Established German hosting brand (formerly 1&1). GDPR-compliant data centers across Germany, France, UK, Spain, US. Promo intro pricing, then €5+/mo.",
       "min_plan": {
@@ -230,7 +230,7 @@
       "id": "netcup",
       "name": "netcup",
       "url": "https://www.netcup.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/netcup.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/netcup.png",
       "tagline": "German hosting veteran, strong value",
       "description_long": "Long-established German provider (since 2003) with Nuremberg data center. Excellent price-to-performance, often used for self-hosting and dev.",
       "min_plan": {
@@ -254,7 +254,7 @@
       "id": "aruba-cloud",
       "name": "Aruba Cloud",
       "url": "https://www.arubacloud.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/aruba-cloud.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/aruba-cloud.png",
       "tagline": "Italian cloud, GDPR-focused",
       "description_long": "Italy's largest hosting provider with data centers in Italy, Czech Republic, France, Germany, UK. Strong choice for Southern Europe.",
       "min_plan": {
@@ -278,7 +278,7 @@
       "id": "aws-lightsail",
       "name": "AWS Lightsail",
       "url": "https://aws.amazon.com/lightsail/",
-      "logo_url": "https://install.sygen.pro/providers/logos/aws-lightsail.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/aws-lightsail.png",
       "tagline": "Simplified AWS for VPS use cases",
       "description_long": "Amazon's simplified VPS offering. Flat pricing, AWS Shield Standard included, available in all major AWS regions worldwide. Use 2GB+ plan for Sygen.",
       "min_plan": {
@@ -302,7 +302,7 @@
       "id": "hostinger-vps",
       "name": "Hostinger VPS",
       "url": "https://www.hostinger.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hostinger-vps.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hostinger-vps.png",
       "tagline": "Budget VPS with annual contract discounts",
       "description_long": "Lithuania-based mass-market hosting brand. KVM VPS in 7+ regions including India, Brazil, Singapore. Cheapest with annual contract; renewal price ~2x intro.",
       "min_plan": {
@@ -326,7 +326,7 @@
       "id": "kamatera",
       "name": "Kamatera",
       "url": "https://www.kamatera.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/kamatera.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/kamatera.png",
       "tagline": "Enterprise-grade, 30-day free trial",
       "description_long": "Israel-headquartered cloud provider with data centers across US, EU, Israel, Hong Kong, Canada. Pay-per-hour, fully customizable specs.",
       "min_plan": {
@@ -350,7 +350,7 @@
       "id": "racknerd",
       "name": "RackNerd",
       "url": "https://www.racknerd.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/racknerd.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/racknerd.png",
       "tagline": "US budget VPS, KVM annual deals",
       "description_long": "US budget VPS provider with recurring annual KVM deals. Mixed support reviews on Reddit, but many long-running customers. Good for hobby projects.",
       "min_plan": {
@@ -374,7 +374,7 @@
       "id": "interserver",
       "name": "InterServer",
       "url": "https://www.interserver.net/",
-      "logo_url": "https://install.sygen.pro/providers/logos/interserver.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/interserver.png",
       "tagline": "Price-lock guarantee, US-based",
       "description_long": "Long-running US provider with price-lock guarantee (your renewal price never goes up). Multiple data centers in NJ, TX, CA. Solid for US workloads.",
       "min_plan": {
@@ -398,7 +398,7 @@
       "id": "namecheap-vps",
       "name": "Namecheap VPS",
       "url": "https://www.namecheap.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/namecheap-vps.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/namecheap-vps.png",
       "tagline": "Domain-friendly, includes free WHOIS privacy",
       "description_long": "Mostly known for domain registration; their VPS line is acceptable for basic workloads. Mixed reviews on support.",
       "min_plan": {
@@ -422,7 +422,7 @@
       "id": "time4vps",
       "name": "Time4VPS",
       "url": "https://www.time4vps.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/time4vps.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/time4vps.png",
       "tagline": "Cheap EU VPS (Lithuania)",
       "description_long": "Lithuanian provider with very competitive pricing. Single data center in Vilnius. Good for EU-East users on a budget.",
       "min_plan": {
@@ -446,7 +446,7 @@
       "id": "atman",
       "name": "Atman",
       "url": "https://www.atman.pl/",
-      "logo_url": "https://install.sygen.pro/providers/logos/atman.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/atman.png",
       "tagline": "Polish enterprise cloud",
       "description_long": "Established Polish data center operator (Atman). Tier III+ infrastructure, strong reputation in CEE enterprise market.",
       "min_plan": {
@@ -470,7 +470,7 @@
       "id": "hostiq",
       "name": "HostiQ",
       "url": "https://hostiq.ua/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hostiq.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hostiq.png",
       "tagline": "Ukrainian VPS leader, KVM",
       "description_long": "One of Ukraine's largest hosters. Data centers in Kyiv plus EU mirror. Russian-language support and UAH pricing.",
       "min_plan": {
@@ -494,7 +494,7 @@
       "id": "hyperhost",
       "name": "HyperHost",
       "url": "https://hyperhost.ua/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hyperhost.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hyperhost.png",
       "tagline": "Ukrainian hoster, multi-region",
       "description_long": "Ukrainian provider with data centers in Kyiv and Odessa plus EU mirrors. Good local choice for UA users; English UI available.",
       "min_plan": {
@@ -518,7 +518,7 @@
       "id": "cityhost-ua",
       "name": "Cityhost",
       "url": "https://cityhost.ua/",
-      "logo_url": "https://install.sygen.pro/providers/logos/cityhost-ua.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/cityhost-ua.png",
       "tagline": "Kyiv data center, NVMe",
       "description_long": "Ukrainian hoster with own DC in Kyiv. NVMe storage, 24/7 support in UA/RU/EN. Solid for users who want a local Ukrainian provider.",
       "min_plan": {
@@ -542,7 +542,7 @@
       "id": "itl-ua",
       "name": "ITL",
       "url": "https://itl.ua/",
-      "logo_url": "https://install.sygen.pro/providers/logos/itl-ua.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/itl-ua.png",
       "tagline": "Ukrainian, multi-region (UA + EU)",
       "description_long": "Ukrainian hoster with own infrastructure plus presence in 9 EU data centers. Migration assistance, 24/7 support.",
       "min_plan": {
@@ -566,7 +566,7 @@
       "id": "selectel",
       "name": "Selectel",
       "url": "https://selectel.ru/",
-      "logo_url": "https://install.sygen.pro/providers/logos/selectel.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/selectel.png",
       "tagline": "Russian cloud, multi-region",
       "description_long": "Major Russian cloud provider with data centers in Moscow, St. Petersburg, Novosibirsk. Crypto payments accepted. Tier III+ DCs.",
       "min_plan": {
@@ -590,7 +590,7 @@
       "id": "yandex-cloud",
       "name": "Yandex Cloud",
       "url": "https://yandex.cloud/",
-      "logo_url": "https://install.sygen.pro/providers/logos/yandex-cloud.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/yandex-cloud.png",
       "tagline": "Yandex's enterprise cloud",
       "description_long": "Russia's largest internet company cloud platform. Three availability zones in Russia. Strong for low-latency RU/BY/CIS workloads.",
       "min_plan": {
@@ -614,7 +614,7 @@
       "id": "timeweb",
       "name": "Timeweb",
       "url": "https://timeweb.cloud/",
-      "logo_url": "https://install.sygen.pro/providers/logos/timeweb.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/timeweb.png",
       "tagline": "Popular Russian VDS, NVMe",
       "description_long": "Russian provider with St. Petersburg, Moscow, Almaty (KZ), Amsterdam DCs. NVMe SSD, 24/7 RU support, top-rated on hostings.info.",
       "min_plan": {
@@ -638,7 +638,7 @@
       "id": "regru",
       "name": "Reg.ru",
       "url": "https://www.reg.ru/",
-      "logo_url": "https://install.sygen.pro/providers/logos/regru.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/regru.png",
       "tagline": "Russian registrar + VPS",
       "description_long": "Russia's largest domain registrar. VPS line with Moscow + St. Petersburg DCs. Russian-language UI and support.",
       "min_plan": {
@@ -662,7 +662,7 @@
       "id": "ruvds",
       "name": "RuVDS",
       "url": "https://ruvds.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/ruvds.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/ruvds.png",
       "tagline": "Russian + EU VDS",
       "description_long": "Russian provider with multi-region presence (Moscow, Switzerland, Netherlands, UK, Germany). Crypto payments. 99.999% uptime SLA claim.",
       "min_plan": {
@@ -686,7 +686,7 @@
       "id": "beget",
       "name": "Beget",
       "url": "https://beget.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/beget.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/beget.png",
       "tagline": "Russian budget VPS",
       "description_long": "Long-running Russian hoster with strong shared hosting heritage. Moscow data center. Friendly UI with Russian-language docs.",
       "min_plan": {
@@ -710,7 +710,7 @@
       "id": "firstvds",
       "name": "FirstVDS",
       "url": "https://firstvds.ru/",
-      "logo_url": "https://install.sygen.pro/providers/logos/firstvds.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/firstvds.png",
       "tagline": "Long-running Russian VDS",
       "description_long": "Russian provider operating since 2002. Moscow + St. Petersburg DCs, transparent pricing, no overselling. Russian-language UI.",
       "min_plan": {
@@ -734,7 +734,7 @@
       "id": "vdsina",
       "name": "VDSina",
       "url": "https://vdsina.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/vdsina.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/vdsina.png",
       "tagline": "Modern Russian VDS, hourly",
       "description_long": "Russian VDS with hourly billing, NVMe SSD, modern control panel. Moscow + Amsterdam + Frankfurt + USA DCs. Crypto + RUB payments.",
       "min_plan": {
@@ -758,7 +758,7 @@
       "id": "conoha",
       "name": "ConoHa VPS",
       "url": "https://www.conoha.jp/",
-      "logo_url": "https://install.sygen.pro/providers/logos/conoha.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/conoha.png",
       "tagline": "Japanese VPS by GMO Internet",
       "description_long": "Japan's popular VPS service operated by GMO Internet. Tokyo + Osaka + Singapore DCs. Hourly billing, fast NVMe.",
       "min_plan": {
@@ -782,7 +782,7 @@
       "id": "sakura-internet",
       "name": "Sakura Internet",
       "url": "https://vps.sakura.ad.jp/",
-      "logo_url": "https://install.sygen.pro/providers/logos/sakura-internet.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/sakura-internet.png",
       "tagline": "Veteran Japanese hoster",
       "description_long": "Long-running Japanese cloud (since 1996). Tokyo + Osaka + Ishikari (Hokkaido) DCs. Strong reputation, Japanese-language UI primary.",
       "min_plan": {
@@ -806,7 +806,7 @@
       "id": "alibaba-cloud",
       "name": "Alibaba Cloud (ECS)",
       "url": "https://www.alibabacloud.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/alibaba-cloud.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/alibaba-cloud.png",
       "tagline": "Asia-Pacific cloud heavyweight",
       "description_long": "China's largest cloud. Strong APAC + Middle East presence (Singapore, Hong Kong, Tokyo, Mumbai, Dubai, Jakarta). Free trial credits available.",
       "min_plan": {
@@ -830,7 +830,7 @@
       "id": "tencent-cloud",
       "name": "Tencent Cloud",
       "url": "https://www.tencentcloud.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/tencent-cloud.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/tencent-cloud.png",
       "tagline": "Tencent's APAC cloud",
       "description_long": "Tencent's international cloud with strong East Asia presence. Hong Kong, Singapore, Tokyo, Seoul, Mumbai, Bangkok. Aggressive intro pricing.",
       "min_plan": {
@@ -854,7 +854,7 @@
       "id": "binarylane",
       "name": "BinaryLane",
       "url": "https://www.binarylane.com.au/",
-      "logo_url": "https://install.sygen.pro/providers/logos/binarylane.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/binarylane.png",
       "tagline": "Australian VPS, low ping for AU",
       "description_long": "Australian-owned provider with Sydney + Melbourne + Brisbane + Perth + Adelaide DCs. Best low-latency option for AU/NZ users.",
       "min_plan": {
@@ -878,7 +878,7 @@
       "id": "ventraip",
       "name": "VentraIP",
       "url": "https://ventraip.com.au/",
-      "logo_url": "https://install.sygen.pro/providers/logos/ventraip.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/ventraip.png",
       "tagline": "Aussie-owned hoster",
       "description_long": "100% Australian-owned with Sydney + Melbourne DCs. Strong Trustpilot reviews from AU users. Local 24/7 support.",
       "min_plan": {
@@ -902,7 +902,7 @@
       "id": "sitehost-nz",
       "name": "SiteHost",
       "url": "https://sitehost.nz/",
-      "logo_url": "https://install.sygen.pro/providers/logos/sitehost-nz.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/sitehost-nz.png",
       "tagline": "New Zealand cloud, Auckland DC",
       "description_long": "Auckland-based provider, NZ's most established cloud host. Local NZ support and pricing in NZD. Good for low-latency NZ users.",
       "min_plan": {
@@ -926,7 +926,7 @@
       "id": "locaweb",
       "name": "Locaweb",
       "url": "https://www.locaweb.com.br/",
-      "logo_url": "https://install.sygen.pro/providers/logos/locaweb.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/locaweb.png",
       "tagline": "Brazil's largest hoster",
       "description_long": "Brazil's biggest hosting company. São Paulo DCs, Portuguese support. Solid for LATAM users wanting local payment options (boleto, PIX).",
       "min_plan": {
@@ -950,7 +950,7 @@
       "id": "kinghost",
       "name": "KingHost",
       "url": "https://king.host/",
-      "logo_url": "https://install.sygen.pro/providers/logos/kinghost.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/kinghost.png",
       "tagline": "Brazilian cloud, mid-tier",
       "description_long": "Brazilian provider with Porto Alegre + São Paulo presence. Portuguese-language UI and PIX/boleto payments.",
       "min_plan": {
@@ -974,7 +974,7 @@
       "id": "milesweb",
       "name": "MilesWeb",
       "url": "https://www.milesweb.in/",
-      "logo_url": "https://install.sygen.pro/providers/logos/milesweb.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/milesweb.png",
       "tagline": "Indian hoster, multi-region",
       "description_long": "Pune-based Indian provider with 32 global DC partner locations. INR pricing, Indian-language support. Good entry point for Indian users.",
       "min_plan": {
@@ -998,7 +998,7 @@
       "id": "hostmycode",
       "name": "HostMyCode",
       "url": "https://www.hostmycode.in/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hostmycode.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hostmycode.png",
       "tagline": "Indian managed VPS, NVMe",
       "description_long": "Indian provider with Noida DC plus EU mirror. AMD Ryzen + NVMe, LiteSpeed-optimized. INR pricing.",
       "min_plan": {
@@ -1022,7 +1022,7 @@
       "id": "lightnode",
       "name": "LightNode",
       "url": "https://www.lightnode.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/lightnode.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/lightnode.png",
       "tagline": "Edge VPS, niche regions",
       "description_long": "Edge VPS provider with rare locations: Dubai, Bahrain, Oman, Saudi Arabia, Cairo, Lagos, Tehran adjacents. Hourly billing.",
       "min_plan": {
@@ -1046,7 +1046,7 @@
       "id": "natro",
       "name": "Natro",
       "url": "https://www.natro.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/natro.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/natro.png",
       "tagline": "Turkey's largest hoster",
       "description_long": "Largest Turkish hosting brand. Istanbul DC, Turkish-language UI, TL/USD pricing. Best low-latency for Turkey users.",
       "min_plan": {
@@ -1070,7 +1070,7 @@
       "id": "xneelo",
       "name": "Xneelo",
       "url": "https://xneelo.co.za/",
-      "logo_url": "https://install.sygen.pro/providers/logos/xneelo.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/xneelo.png",
       "tagline": "South Africa's veteran (was Hetzner ZA)",
       "description_long": "Formerly Hetzner South Africa, rebranded to Xneelo in 2023. Cape Town + Johannesburg DCs, ZAR pricing, local 24/7 support.",
       "min_plan": {
@@ -1094,7 +1094,7 @@
       "id": "afrihost",
       "name": "Afrihost",
       "url": "https://www.afrihost.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/afrihost.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/afrihost.png",
       "tagline": "South Africa's mainstream hoster",
       "description_long": "Major South African ISP/host. Johannesburg + Cape Town DCs, ZAR pricing, local support hours align with SA timezone.",
       "min_plan": {
@@ -1118,7 +1118,7 @@
       "id": "hostafrica",
       "name": "HostAfrica",
       "url": "https://www.hostafrica.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hostafrica.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hostafrica.png",
       "tagline": "Pan-African hoster",
       "description_long": "South African hoster with multiple African regions: SA, Kenya, Ghana, Nigeria. KVM virt, 1 Gbps unmetered, 99.9% SLA.",
       "min_plan": {
@@ -1142,7 +1142,7 @@
       "id": "wedos",
       "name": "WEDOS",
       "url": "https://www.wedos.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/wedos.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/wedos.png",
       "tagline": "Largest Czech hoster, own DC",
       "description_long": "Czech Republic's largest hosting brand (since 2009). Own data centers in Hluboká nad Vltavou with renewable energy. Strong choice for Czech and CEE users wanting local data residency.",
       "min_plan": {
@@ -1166,7 +1166,7 @@
       "id": "forpsi",
       "name": "Forpsi",
       "url": "https://www.forpsi.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/forpsi.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/forpsi.png",
       "tagline": "Czech & Italian VPS, since 2002",
       "description_long": "Long-running Czech provider (now part of Italian INTERNET CZ group) with data centers in Prague and Lugano. Solid for CEE/IT users. CZK and EUR pricing.",
       "min_plan": {
@@ -1190,7 +1190,7 @@
       "id": "m247",
       "name": "M247",
       "url": "https://m247.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/m247.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/m247.png",
       "tagline": "Romanian-rooted, 60+ global DCs",
       "description_long": "UK-headquartered network with deep Romanian operations and 60+ global PoPs. Solid backbone, good ME/SEE latency. Pricier than budget tier but bigger reach.",
       "min_plan": {
@@ -1214,7 +1214,7 @@
       "id": "superhosting-bg",
       "name": "SuperHosting.BG",
       "url": "https://www.superhosting.bg/",
-      "logo_url": "https://install.sygen.pro/providers/logos/superhosting-bg.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/superhosting-bg.png",
       "tagline": "Bulgaria's largest hoster",
       "description_long": "Bulgaria's biggest hosting brand. Own DCs in Sofia, Bulgarian-language UI, BGN pricing. Top pick for low-latency BG users.",
       "min_plan": {
@@ -1238,7 +1238,7 @@
       "id": "rackforest",
       "name": "RackForest",
       "url": "https://rackforest.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/rackforest.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/rackforest.png",
       "tagline": "Hungarian cloud, Tier III DC",
       "description_long": "Hungarian provider with own Tier III DC in Budapest. Good local choice for HU users; English UI available, HUF + EUR pricing.",
       "min_plan": {
@@ -1262,7 +1262,7 @@
       "id": "nazwa-pl",
       "name": "nazwa.pl",
       "url": "https://www.nazwa.pl/",
-      "logo_url": "https://install.sygen.pro/providers/logos/nazwa-pl.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/nazwa-pl.png",
       "tagline": "Polish hosting heavyweight",
       "description_long": "One of Poland's largest hosting brands. Krakow + Warsaw DCs, Polish-language UI, PLN pricing. Mass-market reliability for PL users.",
       "min_plan": {
@@ -1286,7 +1286,7 @@
       "id": "hostings-ge",
       "name": "Hostings.ge",
       "url": "https://hostings.ge/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hostings-ge.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hostings-ge.png",
       "tagline": "Georgia's leading VPS host",
       "description_long": "Tbilisi-based provider — the most established Georgian hoster. Local DC in Georgia plus EU mirror. GEL/USD pricing, EN/KA/RU support.",
       "min_plan": {
@@ -1310,7 +1310,7 @@
       "id": "ps-kz",
       "name": "PS.kz",
       "url": "https://www.ps.kz/",
-      "logo_url": "https://install.sygen.pro/providers/logos/ps-kz.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/ps-kz.png",
       "tagline": "Kazakhstan's flagship registrar+host",
       "description_long": "Largest Kazakh registrar/host operating since 2003. Own DC in Almaty, KZT/USD pricing, RU/KZ/EN support. Best low-latency option for KZ users.",
       "min_plan": {
@@ -1334,7 +1334,7 @@
       "id": "turhost",
       "name": "Turhost",
       "url": "https://www.turhost.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/turhost.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/turhost.png",
       "tagline": "Established Turkish hoster",
       "description_long": "Long-running Turkish provider (since 2001) with Istanbul DC. Turkish UI, TL/USD pricing. Good alternative to Natro for TR users.",
       "min_plan": {
@@ -1358,7 +1358,7 @@
       "id": "uol-host",
       "name": "UOL Host",
       "url": "https://www.uolhost.uol.com.br/",
-      "logo_url": "https://install.sygen.pro/providers/logos/uol-host.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/uol-host.png",
       "tagline": "Brazilian portal-backed cloud",
       "description_long": "Cloud arm of UOL (Brazil's biggest internet portal). São Paulo DC, Portuguese UI, PIX/boleto payments. Solid mainstream LATAM option.",
       "min_plan": {
@@ -1382,7 +1382,7 @@
       "id": "donweb",
       "name": "Donweb",
       "url": "https://donweb.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/donweb.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/donweb.png",
       "tagline": "Argentina's leading hoster",
       "description_long": "Argentine provider with own DC in Rosario and Buenos Aires presence. Spanish UI, ARS/USD pricing, local payment methods. Best low-latency for AR users.",
       "min_plan": {
@@ -1406,7 +1406,7 @@
       "id": "hostdime",
       "name": "HostDime",
       "url": "https://www.hostdime.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hostdime.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hostdime.png",
       "tagline": "LATAM-focused cloud, multi-DC",
       "description_long": "US-rooted provider with strong LATAM expansion: own DCs in Mexico, Brazil, Colombia plus India and US. Decent pick for cross-border LATAM workloads.",
       "min_plan": {
@@ -1430,7 +1430,7 @@
       "id": "truehost",
       "name": "Truehost",
       "url": "https://truehost.cloud/",
-      "logo_url": "https://install.sygen.pro/providers/logos/truehost.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/truehost.png",
       "tagline": "Pan-African cloud, Kenya-rooted",
       "description_long": "Kenya-headquartered hoster with offices in Kenya, Nigeria, Uganda, Ghana, Rwanda. KSH/NGN/USD pricing, English/Swahili support.",
       "min_plan": {
@@ -1454,7 +1454,7 @@
       "id": "webafrica",
       "name": "Web Africa",
       "url": "https://www.webafrica.co.za/",
-      "logo_url": "https://install.sygen.pro/providers/logos/webafrica.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/webafrica.png",
       "tagline": "South African ISP + cloud",
       "description_long": "Major South African ISP/host with Johannesburg + Cape Town DCs. ZAR pricing, local 24/7 support. Good Afrihost alternative.",
       "min_plan": {
@@ -1478,7 +1478,7 @@
       "id": "vodien",
       "name": "Vodien",
       "url": "https://www.vodien.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/vodien.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/vodien.png",
       "tagline": "Singapore-rooted ASEAN cloud",
       "description_long": "Singapore-headquartered provider with SG and AU DCs. SGD pricing, English support, popular with SE Asia SMBs and Australian users.",
       "min_plan": {
@@ -1502,7 +1502,7 @@
       "id": "exabytes",
       "name": "Exabytes",
       "url": "https://www.exabytes.my/",
-      "logo_url": "https://install.sygen.pro/providers/logos/exabytes.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/exabytes.png",
       "tagline": "Malaysian-Singapore hoster",
       "description_long": "Largest Malaysian hosting brand with offices in MY, SG, ID, TH. Local-currency billing, EN/Bahasa support. Solid for ASEAN SMBs.",
       "min_plan": {
@@ -1526,7 +1526,7 @@
       "id": "cafe24",
       "name": "Cafe24",
       "url": "https://www.cafe24.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/cafe24.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/cafe24.png",
       "tagline": "Korea's biggest hoster",
       "description_long": "South Korea's largest hosting brand. Own DCs in Seoul, KRW pricing, Korean-first UI (limited English). Top pick for low-latency KR.",
       "min_plan": {
@@ -1550,7 +1550,7 @@
       "id": "gabia",
       "name": "Gabia",
       "url": "https://www.gabia.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/gabia.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/gabia.png",
       "tagline": "Korean hosting, since 1999",
       "description_long": "Long-running Korean provider (KRX-listed). Seoul DC, KRW pricing, Korean-language UI. Solid Cafe24 alternative for KR users wanting different vendor.",
       "min_plan": {
@@ -1574,7 +1574,7 @@
       "id": "vinahost",
       "name": "Vinahost",
       "url": "https://vinahost.vn/",
-      "logo_url": "https://install.sygen.pro/providers/logos/vinahost.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/vinahost.png",
       "tagline": "Vietnam's leading VPS host",
       "description_long": "Vietnamese provider with HCMC + Hanoi DCs. NVMe SSD, VND pricing, Vietnamese/English support. Best low-latency choice for VN users.",
       "min_plan": {
@@ -1598,7 +1598,7 @@
       "id": "hostingraja",
       "name": "HostingRaja",
       "url": "https://hostingraja.in/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hostingraja.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hostingraja.png",
       "tagline": "Indian VPS, INR pricing",
       "description_long": "Bengaluru-based Indian hoster. DCs in India + multiple global mirrors. INR pricing, English/Hindi/regional language support.",
       "min_plan": {
@@ -1622,7 +1622,7 @@
       "id": "infomaniak",
       "name": "Infomaniak",
       "url": "https://www.infomaniak.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/infomaniak.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/infomaniak.png",
       "tagline": "Swiss cloud, full data sovereignty",
       "description_long": "Geneva-based Swiss provider operating own DCs in Switzerland exclusively. ISO 27001/14001 certified, 100% renewable energy, strong privacy stance. Premium choice for users who want Swiss jurisdiction.",
       "min_plan": {
@@ -1646,7 +1646,7 @@
       "id": "glesys",
       "name": "GleSYS",
       "url": "https://glesys.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/glesys.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/glesys.png",
       "tagline": "Swedish cloud, since 1999",
       "description_long": "Swedish provider with own DCs in Stockholm, Falkenberg, Helsinki, Amsterdam. SEK/EUR pricing, English/Swedish support. Strong choice for Nordic users.",
       "min_plan": {
@@ -1670,7 +1670,7 @@
       "id": "buyvm",
       "name": "BuyVM",
       "url": "https://buyvm.net/",
-      "logo_url": "https://install.sygen.pro/providers/logos/buyvm.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/buyvm.png",
       "tagline": "Frantech budget KVM, free DDoS",
       "description_long": "Run by Frantech (BC, Canada) since 2010. KVM slices in Las Vegas, NYC, Miami, Luxembourg. Free DDoS filtering for $3/mo, network-attached block storage. Cult favorite on LowEndTalk.",
       "min_plan": {
@@ -1694,7 +1694,7 @@
       "id": "hosthatch",
       "name": "HostHatch",
       "url": "https://hosthatch.com/",
-      "logo_url": "https://install.sygen.pro/providers/logos/hosthatch.svg",
+      "logo_url": "https://install.sygen.pro/providers/logos/hosthatch.png",
       "tagline": "30+ DCs, aggressive annual deals",
       "description_long": "Sweden-rooted provider with 30+ global locations including Tokyo, Hong Kong, Mumbai, São Paulo, Johannesburg. Famous for huge annual discounts on LowEndTalk. Mixed support reviews.",
       "min_plan": {

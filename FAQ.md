@@ -58,11 +58,18 @@ This runs the auto-mode flow: a free `<random>.sygen.pro` subdomain is allocated
 ### How do I install Sygen on my Mac/PC (via Tailscale)?
 
 Prerequisites:
-1. Install Tailscale on your Mac and on your iPhone (App Store).
+1. Install Tailscale on your Mac/PC and on your iPhone (App Store).
 2. Sign both into the same Tailscale account.
 3. Make sure MagicDNS + HTTPS Certificates are enabled at https://login.tailscale.com/admin/dns
 
-Then in the iOS app, "Add server" → "Set up on my own Mac/PC" → "Tailscale". The wizard SSH's into your Mac and installs Sygen. Your access URL will be like `https://<mac-name>.<tailnet>.ts.net`.
+Then in the iOS app, "Add server" → "Set up on my own Mac/PC" → "Tailscale". The wizard SSH's into your Mac and installs Sygen. Your access URL will be like `https://<host-name>.<tailnet>.ts.net`.
+
+**Tailscale-mode also works on Linux** (home server, NAT'd VPS, anything with a tailnet) — same flow. The installer detects Linux automatically; pass `SELF_HOSTED_MODE=tailscale` (or `--self-hosted=tailscale`) to enable it:
+```bash
+ssh root@your-linux-box
+curl -fsSL https://install.sygen.pro/install.sh | SELF_HOSTED_MODE=tailscale bash
+```
+No public IP, no port forwarding, no Cloudflare needed. `tailscale serve` terminates TLS using the cert Tailscale auto-issues + auto-renews.
 
 ### Can I use my own domain instead of `<random>.sygen.pro`?
 

@@ -30,8 +30,10 @@
 #   SYGEN_ADMIN_TAG           default: latest
 #   SYGEN_ADMIN_PORT          (macOS) host port for admin, default 8080
 #   SELF_HOSTED_MODE          (macOS) localhost | tailscale | publicdomain.
-#                             If unset: auto-detect Tailscale and prompt
-#                             (interactive) or fall back to localhost.
+#                             (Linux) tailscale only.
+#                             If unset on macOS: auto-detect Tailscale and
+#                             prompt (interactive) or fall back to localhost.
+#                             If unset on Linux: auto-mode (Worker subdomain).
 #   SYGEN_JSON_OUTPUT=1       emit a single JSON line on stdout instead of the
 #                             human banner (progress logs still go to stderr).
 #                             Equivalent to passing `--json-output` as a flag.
@@ -173,10 +175,15 @@ trap on_exit EXIT
 # ---------- Platform detection ----------
 OS="$(uname -s)"
 LOCAL_MODE=0
-# Sub-mode for the macOS branch only. One of:
-#   localhost     — Colima + http://localhost (iPhone can't reach it)
-#   tailscale     — HTTPS via tailscale serve on the tailnet
-#   publicdomain  — Worker DNS-01 + brew nginx + LE cert + router port forward
+# Sub-mode (cross-platform meaning):
+#   localhost     — macOS only: Colima + http://localhost (iPhone can't reach)
+#   tailscale     — macOS or Linux: HTTPS via `tailscale serve` on the tailnet.
+#                   Use case: home server / NAT'd box reachable only by tailnet
+#                   peers. No public IP needed, no Worker subdomain, no LE cert
+#                   (Tailscale issues + renews the cert via MagicDNS+ACME).
+#   publicdomain  — macOS only: Worker DNS-01 + brew nginx + LE cert + router PF
+#                   (Linux equivalent IS auto-mode — same Worker provisioning,
+#                    no separate "publicdomain" submode needed.)
 SELF_HOSTED_SUBMODE=""
 case "$OS" in
     Darwin)
@@ -184,8 +191,19 @@ case "$OS" in
         SELF_HOSTED_SUBMODE="${SELF_HOSTED_MODE:-}"
         ;;
     Linux)
-        # SELF_HOSTED_MODE is macOS-only — silently ignore on Linux to avoid
-        # surprising operators who set it as a global env var on their laptop.
+        # Linux supports SELF_HOSTED_MODE=tailscale only. localhost makes no
+        # sense for a headless server; publicdomain is just the existing
+        # auto-mode by another name. Reject other submode values explicitly.
+        SELF_HOSTED_SUBMODE="${SELF_HOSTED_MODE:-}"
+        case "$SELF_HOSTED_SUBMODE" in
+            ""|tailscale) ;;
+            localhost|publicdomain)
+                die "SELF_HOSTED_MODE='${SELF_HOSTED_SUBMODE}' is macOS-only. On Linux use auto-mode (unset env) or SELF_HOSTED_MODE=tailscale."
+                ;;
+            *)
+                die "Invalid SELF_HOSTED_MODE='${SELF_HOSTED_SUBMODE}' on Linux (expected: tailscale or unset)"
+                ;;
+        esac
         ;;
     *)
         die "Unsupported OS: $OS. Supported: Linux (Debian/Ubuntu), macOS."
@@ -357,6 +375,61 @@ if [ $LOCAL_MODE -eq 1 ]; then
             die "internal: SELF_HOSTED_SUBMODE='$SELF_HOSTED_SUBMODE' not handled"
             ;;
     esac
+elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
+    # Linux + Tailscale-mode: server lives in a tailnet, accessible by
+    # MagicDNS hostname only. No Worker subdomain, no public IP needed,
+    # no LE cert dance — `tailscale serve` terminates TLS using the cert
+    # Tailscale auto-issues + auto-renews. iPhone must also be on the
+    # same tailnet to reach the box.
+    SYGEN_ROOT="/srv/sygen"
+    SYGEN_ADMIN_PORT="${SYGEN_ADMIN_PORT:-8080}"
+    if [ "$EUID" -ne 0 ]; then
+        die "Run as root on Linux (sudo bash or ssh root@...)"
+    fi
+
+    # Pre-flight: tailscale CLI installed AND daemon up. If CLI is missing
+    # we install it via Tailscale's official apt repo (idempotent), but we
+    # do NOT auto-`tailscale up` because that's an interactive browser auth.
+    if ! command -v tailscale >/dev/null 2>&1; then
+        log "Installing Tailscale via official apt repo"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq curl gnupg
+        # Detect distro codename for the Tailscale repo URL (bookworm/bullseye/
+        # noble/jammy/etc). Falls back to bookworm — works for current Debian
+        # stable + Ubuntu LTS; Tailscale ships universal packages.
+        . /etc/os-release 2>/dev/null || true
+        TS_CODENAME="${VERSION_CODENAME:-bookworm}"
+        TS_DISTRO="${ID:-debian}"
+        curl -fsSL "https://pkgs.tailscale.com/stable/${TS_DISTRO}/${TS_CODENAME}.noarmor.gpg" \
+            -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+            || die "Failed to fetch Tailscale apt key (codename=${TS_CODENAME}, distro=${TS_DISTRO})"
+        curl -fsSL "https://pkgs.tailscale.com/stable/${TS_DISTRO}/${TS_CODENAME}.tailscale-keyring.list" \
+            -o /etc/apt/sources.list.d/tailscale.list \
+            || die "Failed to fetch Tailscale apt sources list"
+        apt-get update -qq
+        apt-get install -y -qq tailscale
+        die "Tailscale installed. Run 'sudo tailscale up' to log in to your tailnet, then re-run this installer."
+    fi
+
+    ts_status_json="$(tailscale status --json 2>/dev/null)" \
+        || die "Tailscale daemon not running or device not logged in. Run 'sudo tailscale up' and retry."
+
+    # python3 is preinstalled on every modern Debian/Ubuntu. Same parser
+    # as the macOS branch — keep them in sync.
+    ts_fqdn="$(printf '%s' "$ts_status_json" \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(((d.get("Self") or {}).get("DNSName") or "").rstrip("."))' \
+        2>/dev/null)"
+    if [ -z "$ts_fqdn" ]; then
+        die "Could not determine Tailscale FQDN (empty Self.DNSName). Enable MagicDNS + HTTPS Certificates in your tailnet admin: https://login.tailscale.com/admin/dns"
+    fi
+
+    FQDN="$ts_fqdn"
+    SUB="${FQDN%%.*}"
+    ADMIN_URL="https://$FQDN"
+    CORS_ORIGIN="https://$FQDN"
+    log "Linux + Tailscale mode (HTTPS via tailnet $FQDN)"
+    log "  iPhone must also be on this tailnet to reach the box"
 elif [ -z "${SYGEN_SUBDOMAIN:-}" ] && [ -z "${CF_API_TOKEN:-}" ]; then
     # Auto-mode — provision a free <id>.sygen.pro from install.sygen.pro.
     # FQDN/SUB/CF_API_TOKEN/CF_ZONE_ID/CF_RECORD_ID are filled in by the
@@ -399,9 +472,16 @@ if [ $LOCAL_MODE -eq 0 ]; then
     log "Installing system packages"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq \
-        ca-certificates curl jq gnupg nginx \
-        certbot python3-certbot-dns-cloudflare
+    # Base packages always needed. nginx + certbot ONLY for paths that
+    # terminate TLS themselves (auto-mode + custom-mode). Tailscale-mode
+    # delegates TLS to `tailscale serve` so nginx + certbot are skipped.
+    if [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
+        apt-get install -y -qq ca-certificates curl jq gnupg
+    else
+        apt-get install -y -qq \
+            ca-certificates curl jq gnupg nginx \
+            certbot python3-certbot-dns-cloudflare
+    fi
 
     # Docker (official convenience script, idempotent).
     if ! command -v docker >/dev/null 2>&1; then
@@ -591,7 +671,9 @@ fi
 # Custom mode: operator owns the zone + token, install.sh upserts directly
 #   (Linux only; macOS doesn't expose this path).
 needs_dns=0
-if [ $LOCAL_MODE -eq 0 ]; then
+if [ $LOCAL_MODE -eq 0 ] && [ "$SELF_HOSTED_SUBMODE" != "tailscale" ]; then
+    # Linux auto-mode + custom-mode need DNS verify (Worker created A record).
+    # Linux+tailscale uses MagicDNS (no public A record), skip.
     needs_dns=1
 elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     needs_dns=1
@@ -671,7 +753,7 @@ fi
 # differences are sudo for /etc/letsencrypt + the certbot binary path
 # (Homebrew puts it in $(brew --prefix)/bin instead of /usr/bin).
 needs_cert=0
-if [ $LOCAL_MODE -eq 0 ]; then
+if [ $LOCAL_MODE -eq 0 ] && [ "$SELF_HOSTED_SUBMODE" != "tailscale" ]; then
     needs_cert=1
 elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     needs_cert=1
@@ -1005,6 +1087,14 @@ if [ $LOCAL_MODE -eq 1 ]; then
         -e "s|127.0.0.1:3000:3000|127.0.0.1:${SYGEN_ADMIN_PORT}:3000|g" \
         "$SYGEN_ROOT/docker-compose.yml"
     rm -f "$SYGEN_ROOT/docker-compose.yml.bak"
+elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
+    # Linux+tailscale: no nginx, admin reached via `tailscale serve` →
+    # localhost:$SYGEN_ADMIN_PORT. Same port remap as macOS so the
+    # tailscale serve mountpoint matches.
+    sed -i.bak \
+        -e "s|127.0.0.1:3000:3000|127.0.0.1:${SYGEN_ADMIN_PORT}:3000|g" \
+        "$SYGEN_ROOT/docker-compose.yml"
+    rm -f "$SYGEN_ROOT/docker-compose.yml.bak"
 fi
 
 # ---------- 6. Start stack ----------
@@ -1047,7 +1137,10 @@ if [ $LOCAL_MODE -eq 1 ]; then
 fi
 
 # ---------- 7. nginx vhost (Linux + macOS publicdomain) ----------
-if [ $LOCAL_MODE -eq 0 ]; then
+if [ $LOCAL_MODE -eq 0 ] && [ "$SELF_HOSTED_SUBMODE" != "tailscale" ]; then
+    # Linux auto-mode + custom-mode: standard apt nginx + Let's Encrypt cert.
+    # Linux+tailscale skips this — `tailscale serve` handles TLS termination
+    # in the dedicated block below.
     STAGE="nginx"
     log "Configuring nginx vhost for $FQDN"
     curl -fsSL -o /tmp/sygen.nginx.tmpl "$BASE_URL/nginx.conf.tmpl" \
@@ -1246,9 +1339,11 @@ if [ "$JSON_OUTPUT" = "1" ]; then
     #   auto         — Linux + Worker-provisioned <random>.sygen.pro
     #   custom       — Linux + operator-supplied SYGEN_SUBDOMAIN
     #   localhost    — macOS, http://localhost (Mac-only access)
-    #   tailscale    — macOS, HTTPS via `tailscale serve` (tailnet access)
+    #   tailscale    — macOS or Linux, HTTPS via `tailscale serve` (tailnet)
     #   publicdomain — macOS, brew nginx + LE cert (NAT port forward needed)
-    if [ $LOCAL_MODE -eq 1 ]; then
+    if [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
+        MODE="tailscale"
+    elif [ $LOCAL_MODE -eq 1 ]; then
         MODE="$SELF_HOSTED_SUBMODE"
     elif [ -n "$SYGEN_INSTALL_TOKEN" ]; then
         MODE="auto"

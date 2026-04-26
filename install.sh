@@ -125,6 +125,41 @@ emit_json_error() {
         "$(json_escape "$details")"
 }
 
+# _release_and_die — used in the cert-issuance cascade to fail cleanly.
+#   1. Best-effort release of the Worker subdomain reservation, so a
+#      cert-fail doesn't leak a 30-day KV slot. Worker is the source of
+#      truth for the FQDN's lifecycle.
+#   2. Best-effort cleanup of any half-written LE/ZeroSSL state on disk
+#      so a re-run from the iOS wizard starts clean.
+#   3. Structured JSON error in $JSON_OUTPUT mode (so the iOS / web wizard
+#      can distinguish "rate-limited, retry later" from "config wrong").
+#   4. die() with the same message — non-JSON callers see it on stderr.
+_release_and_die() {
+    local err_code="${1:-cert_failed}"
+    local details="${2:-}"
+    if [ -n "${SYGEN_INSTALL_TOKEN:-}" ]; then
+        warn "Releasing subdomain reservation back to the pool (cert failure)"
+        curl -fsS -X DELETE \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg t "$SYGEN_INSTALL_TOKEN" '{install_token:$t}')" \
+            "https://install.${DOMAIN}/api/release" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${FQDN:-}" ]; then
+        rm -rf "/etc/letsencrypt/live/$FQDN" \
+               "/etc/letsencrypt/archive/$FQDN" \
+               "/etc/letsencrypt/renewal/$FQDN.conf" 2>/dev/null || true
+    fi
+    if [ "$JSON_OUTPUT" = "1" ] && [ "$JSON_DONE" = "0" ]; then
+        JSON_DONE=1
+        printf '{"ok":false,"error":%s,"stage":%s,"details":%s,"retry_after_hours":1}\n' \
+            "$(json_escape "$err_code")" \
+            "$(json_escape "$STAGE")" \
+            "$(json_escape "$details")"
+        exit 1
+    fi
+    die "$err_code: $details"
+}
+
 # Catch unexpected non-zero exits (set -e failures from commands that
 # don't go through die()) so JSON consumers always get one final line.
 on_exit() {
@@ -742,22 +777,67 @@ HOOK
     elif $SUDO test -f "/etc/letsencrypt/live/$FQDN/fullchain.pem"; then
         log "  cert already present, skipping"
     elif [ "$AUTO_MODE" -eq 1 ]; then
-        log "Obtaining Let's Encrypt cert via Worker-mediated DNS-01"
-        # The hooks need SYGEN_INSTALL_TOKEN before .env is written below —
-        # export it for this single certbot invocation. Renewal reads from
-        # .env directly (.env is in place by then). On macOS we go through
-        # sudo so /etc/letsencrypt is writable; sudo -E preserves the env
-        # we just set.
-        $SUDO env \
-            SYGEN_INSTALL_TOKEN="$SYGEN_INSTALL_TOKEN" \
-            SYGEN_DNS_CHALLENGE_URL="$SYGEN_DNS_CHALLENGE_URL" \
-            "$CERTBOT_BIN" certonly --non-interactive --agree-tos \
-            --email "admin@$DOMAIN" \
-            --preferred-challenges dns \
-            --manual --manual-public-ip-logging-ok \
-            --manual-auth-hook /usr/local/sbin/sygen-acme-auth-hook.sh \
-            --manual-cleanup-hook /usr/local/sbin/sygen-acme-cleanup-hook.sh \
-            -d "$FQDN" || die "certbot failed"
+        # Cert issuance cascade (auto-mode only):
+        #   1. Let's Encrypt (primary) — 50 cert/week per registered domain,
+        #      override-able to 1000+. Worker-mediated DNS-01 hooks.
+        #   2. ZeroSSL (fallback) — independent rate-limit budget. EAB
+        #      credentials fetched from Worker on demand. Same DNS-01
+        #      hooks (Worker doesn't care which CA generated the
+        #      validation token).
+        # If both fail we release the subdomain (so it doesn't leak a KV
+        # slot on cert-fail) and emit a structured JSON error with
+        # `tls_rate_limited` code so iOS/web wizards can show a
+        # meaningful retry message.
+        cert_try() {
+            # Args: <ca-name> [extra certbot args...]
+            local ca_name="$1"; shift
+            log "  attempt: $ca_name"
+            $SUDO env \
+                SYGEN_INSTALL_TOKEN="$SYGEN_INSTALL_TOKEN" \
+                SYGEN_DNS_CHALLENGE_URL="$SYGEN_DNS_CHALLENGE_URL" \
+                "$CERTBOT_BIN" certonly --non-interactive --agree-tos \
+                --preferred-challenges dns \
+                --manual --manual-public-ip-logging-ok \
+                --manual-auth-hook /usr/local/sbin/sygen-acme-auth-hook.sh \
+                --manual-cleanup-hook /usr/local/sbin/sygen-acme-cleanup-hook.sh \
+                -d "$FQDN" \
+                "$@"
+        }
+
+        log "Obtaining TLS cert via Worker-mediated DNS-01"
+        if cert_try "letsencrypt" --email "admin@$DOMAIN"; then
+            log "  ok: letsencrypt"
+        else
+            warn "  letsencrypt failed (likely rate-limit) — falling back to ZeroSSL"
+            STAGE="cert-fallback"
+
+            # Fetch EAB lazily — install.sh needs ZeroSSL only on LE
+            # fail, so we don't bake EAB into /api/provision response.
+            EAB_URL="https://install.${DOMAIN}/api/eab"
+            EAB_RESP=$(curl -fsS -X POST -H "Content-Type: application/json" \
+                -d "$(jq -nc --arg t "$SYGEN_INSTALL_TOKEN" '{install_token:$t,ca:"zerossl"}')" \
+                "$EAB_URL" 2>/dev/null) || EAB_RESP=""
+            if [ -z "$EAB_RESP" ]; then
+                _release_and_die "tls_rate_limited" "Let's Encrypt rate-limited and Worker /api/eab unreachable"
+            fi
+            ZS_KID=$(printf '%s' "$EAB_RESP" | jq -r '.eab_kid // empty')
+            ZS_HMAC=$(printf '%s' "$EAB_RESP" | jq -r '.eab_hmac_key // empty')
+            ZS_DIR=$(printf '%s' "$EAB_RESP" | jq -r '.acme_directory_url // empty')
+            ZS_EMAIL=$(printf '%s' "$EAB_RESP" | jq -r '.acme_account_email // empty')
+            if [ -z "$ZS_KID" ] || [ -z "$ZS_HMAC" ] || [ -z "$ZS_DIR" ]; then
+                _release_and_die "tls_rate_limited" "Worker /api/eab returned malformed credentials"
+            fi
+
+            if cert_try "zerossl" \
+                --server "$ZS_DIR" \
+                --eab-kid "$ZS_KID" \
+                --eab-hmac-key "$ZS_HMAC" \
+                --email "$ZS_EMAIL"; then
+                log "  ok: zerossl (fallback)"
+            else
+                _release_and_die "tls_rate_limited" "Both Let's Encrypt and ZeroSSL refused to issue cert (both rate-limited or DNS-01 misconfigured)"
+            fi
+        fi
     else
         log "Obtaining Let's Encrypt cert via Cloudflare DNS-01 (custom mode)"
         mkdir -p /etc/letsencrypt/sygen

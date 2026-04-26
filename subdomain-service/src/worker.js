@@ -6,6 +6,7 @@
 //   DELETE /api/release        — free reservation on uninstall
 //   POST   /api/dns-challenge  — add ACME DNS-01 TXT for owned subdomain
 //   DELETE /api/dns-challenge  — remove ACME DNS-01 TXT for owned subdomain
+//   POST   /api/eab            — return EAB creds for fallback CA (ZeroSSL)
 //   GET    /api/health         — admin health check
 //
 // Scheduled:
@@ -23,6 +24,7 @@ import {
   handleDnsChallengePost,
   handleDnsChallengeDelete,
 } from "./handlers/dns_challenge.js";
+import { handleEab } from "./handlers/eab.js";
 import { sweepExpired } from "./sweep.js";
 
 async function route(request, env) {
@@ -44,6 +46,9 @@ async function route(request, env) {
   }
   if (method === "DELETE" && path === "/api/dns-challenge") {
     return handleDnsChallengeDelete(request, env);
+  }
+  if (method === "POST" && path === "/api/eab") {
+    return handleEab(request, env);
   }
   if (method === "GET" && path === "/api/health") {
     return handleHealth(request, env);

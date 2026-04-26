@@ -96,7 +96,9 @@ Slower on smaller VPS plans or in regions with slow apt mirrors.
 
 ### How does HTTPS work?
 
-Each Sygen install gets its own dedicated Let's Encrypt certificate, issued automatically during install and renewed by certbot every 60 days. Wildcard certificates are intentionally *not* used — compromising one VPS doesn't affect any other Sygen install.
+Each Sygen install gets its own dedicated certificate, issued automatically during install and renewed every 60 days. Wildcard certificates are intentionally *not* used — compromising one VPS doesn't affect any other Sygen install.
+
+The installer tries three independent free CAs in order: **Let's Encrypt** (primary), **ZeroSSL** (fallback), **Google Trust Services** (last resort). If the primary is rate-limited, the installer transparently falls back to the next one — your install just works without you noticing. Renewals continue with whichever CA issued the original cert.
 
 ### What is `install.sygen.pro` and do I need a Cloudflare account?
 

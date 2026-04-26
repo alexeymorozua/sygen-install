@@ -209,6 +209,25 @@ Check in this order:
 3. publicdomain users: are router ports 80/443 forwarded to the Mac?
 4. Custom domain users: does `dig <yourdomain>` show your VPS IP?
 
+### Install fails immediately, "CommandFailed exitCode 1" with no real error
+
+Most common cause: your VPS provider gives the server with an **expired root password** (security policy), and the installer can't run commands until you change it. Symptoms:
+- iOS app's "Test Connection" succeeds
+- "Install" immediately fails with generic error (no logs)
+- SSH from terminal shows `Your password has expired. Password change required but no TTY available.`
+
+**Fix (one minute):** SSH from any Mac/PC terminal once:
+```bash
+ssh root@<your-vps-ip>
+# Provider-given password
+# System will prompt for new password — enter twice
+exit
+```
+
+Then return to the iOS wizard and re-enter the **new** password. Install will proceed normally.
+
+Providers known to ship with expired passwords: Hostiko, sometimes Hostinger, some Hetzner Cloud setups. Cloud providers like DigitalOcean, Vultr, Linode normally don't (root password is preset, not expired).
+
 ### Install script fails on "waiting for DNS propagation"
 
 Cloudflare's DNS update usually takes 30-60 seconds. If it times out (>2 min):

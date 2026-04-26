@@ -64,6 +64,25 @@
 #     SELF_HOSTED_MODE=publicdomain bash
 set -euo pipefail
 
+# ---------- Line-buffer stdout/stderr ----------
+# Without this, bash's default 4 KB block buffer on stdout (and 1 KB on
+# stderr when not a TTY) can hide progress for minutes during long-silent
+# phases — `apt-get install -y docker-ce` (~2-3 min of downloads),
+# `docker compose pull` (~1-3 min per image), and the DNS-propagation
+# poll loop (~30-90 s of `dig` retries). The iOS / Android wizards tail
+# /tmp/sygen-install.log live; without flushing, the log file stays empty
+# until the buffer fills, the wizard's progress UI never advances past
+# the initial "downloading installer" phase, and users assume the install
+# hung. Re-exec under `stdbuf -oL -eL` (GNU coreutils, ships with every
+# Debian/Ubuntu/RHEL by default; macOS gets it via `brew install
+# coreutils` → `gstdbuf`, but our macOS branch always runs in a TTY so
+# the buffer is already line-buffered there → the re-exec is a no-op).
+# SYGEN_INSTALL_NO_STDBUF=1 prevents an infinite re-exec loop.
+if [ -z "${SYGEN_INSTALL_NO_STDBUF:-}" ] && command -v stdbuf >/dev/null 2>&1; then
+    export SYGEN_INSTALL_NO_STDBUF=1
+    exec stdbuf -oL -eL "$0" "$@"
+fi
+
 # ---------- Output mode (human banner vs. machine-parseable JSON) ----------
 # --json-output (or SYGEN_JSON_OUTPUT=1) makes the installer emit a single
 # JSON line on stdout at the end (success or failure) and route progress
@@ -697,9 +716,15 @@ if [ "$needs_dns" -eq 1 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
     if [ "$AUTO_MODE" -eq 1 ]; then
         log "Auto-mode: A record was created by Worker — waiting for DNS propagation"
         DNS_GOT=""
+        # Periodic progress output so iOS/Android wizards tailing the log
+        # see the install is still alive during the up-to-2-min DNS wait
+        # (otherwise the UI looks frozen and users assume crash).
         for i in $(seq 1 30); do
             DNS_GOT=$(dig +short A "$FQDN" @1.1.1.1 2>/dev/null || true)
             if [ -n "$DNS_GOT" ]; then break; fi
+            if [ $((i % 5)) -eq 0 ]; then
+                log "  waiting for DNS… (${i}/30, ~$((i * 4))s elapsed)"
+            fi
             sleep 4
         done
         if [ -z "$DNS_GOT" ]; then

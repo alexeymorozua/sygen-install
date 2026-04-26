@@ -9,9 +9,12 @@ server {
 }
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    # http2 as inline `listen` parameter is the universally supported form.
+    # The newer standalone `http2 on;` directive was added in nginx 1.25.1
+    # (May 2023) — Debian 12 ships 1.22, Ubuntu 24.04 ships 1.24, both
+    # too old. The inline form works on every nginx >= 1.9.5 (2015).
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
 
     server_name __FQDN__;
 

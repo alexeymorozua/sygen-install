@@ -804,38 +804,47 @@ HOOK
                 "$@"
         }
 
+        # Try a fallback CA via Worker /api/eab. Returns 0 on success,
+        # 1 if the Worker call or the cert issuance failed. Doesn't die —
+        # caller decides whether to fall through to the next CA.
+        try_eab_ca() {
+            local ca_name="$1"
+            local eab_url="https://install.${DOMAIN}/api/eab"
+            local resp
+            resp=$(curl -fsS -X POST -H "Content-Type: application/json" \
+                -d "$(jq -nc --arg t "$SYGEN_INSTALL_TOKEN" --arg c "$ca_name" '{install_token:$t,ca:$c}')" \
+                "$eab_url" 2>/dev/null) || return 1
+            local kid hmac dir email
+            kid=$(printf  '%s' "$resp" | jq -r '.eab_kid // empty')
+            hmac=$(printf '%s' "$resp" | jq -r '.eab_hmac_key // empty')
+            dir=$(printf  '%s' "$resp" | jq -r '.acme_directory_url // empty')
+            email=$(printf '%s' "$resp" | jq -r '.acme_account_email // empty')
+            if [ -z "$kid" ] || [ -z "$hmac" ] || [ -z "$dir" ]; then
+                warn "  $ca_name: /api/eab returned malformed credentials"
+                return 1
+            fi
+            cert_try "$ca_name" \
+                --server "$dir" \
+                --eab-kid "$kid" \
+                --eab-hmac-key "$hmac" \
+                --email "$email"
+        }
+
         log "Obtaining TLS cert via Worker-mediated DNS-01"
         if cert_try "letsencrypt" --email "admin@$DOMAIN"; then
             log "  ok: letsencrypt"
         else
-            warn "  letsencrypt failed (likely rate-limit) — falling back to ZeroSSL"
+            warn "  letsencrypt failed — trying ZeroSSL"
             STAGE="cert-fallback"
-
-            # Fetch EAB lazily — install.sh needs ZeroSSL only on LE
-            # fail, so we don't bake EAB into /api/provision response.
-            EAB_URL="https://install.${DOMAIN}/api/eab"
-            EAB_RESP=$(curl -fsS -X POST -H "Content-Type: application/json" \
-                -d "$(jq -nc --arg t "$SYGEN_INSTALL_TOKEN" '{install_token:$t,ca:"zerossl"}')" \
-                "$EAB_URL" 2>/dev/null) || EAB_RESP=""
-            if [ -z "$EAB_RESP" ]; then
-                _release_and_die "tls_rate_limited" "Let's Encrypt rate-limited and Worker /api/eab unreachable"
-            fi
-            ZS_KID=$(printf '%s' "$EAB_RESP" | jq -r '.eab_kid // empty')
-            ZS_HMAC=$(printf '%s' "$EAB_RESP" | jq -r '.eab_hmac_key // empty')
-            ZS_DIR=$(printf '%s' "$EAB_RESP" | jq -r '.acme_directory_url // empty')
-            ZS_EMAIL=$(printf '%s' "$EAB_RESP" | jq -r '.acme_account_email // empty')
-            if [ -z "$ZS_KID" ] || [ -z "$ZS_HMAC" ] || [ -z "$ZS_DIR" ]; then
-                _release_and_die "tls_rate_limited" "Worker /api/eab returned malformed credentials"
-            fi
-
-            if cert_try "zerossl" \
-                --server "$ZS_DIR" \
-                --eab-kid "$ZS_KID" \
-                --eab-hmac-key "$ZS_HMAC" \
-                --email "$ZS_EMAIL"; then
-                log "  ok: zerossl (fallback)"
+            if try_eab_ca "zerossl"; then
+                log "  ok: zerossl (fallback #1)"
             else
-                _release_and_die "tls_rate_limited" "Both Let's Encrypt and ZeroSSL refused to issue cert (both rate-limited or DNS-01 misconfigured)"
+                warn "  zerossl failed — trying Google Trust Services"
+                if try_eab_ca "gts"; then
+                    log "  ok: gts (fallback #2)"
+                else
+                    _release_and_die "tls_rate_limited" "All three CAs (Let's Encrypt, ZeroSSL, Google Trust Services) refused to issue cert. Most likely rate-limited everywhere; less likely a DNS-01 misconfiguration on our side. Try again in 1 hour."
+                fi
             fi
         fi
     else

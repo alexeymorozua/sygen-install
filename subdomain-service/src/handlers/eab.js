@@ -6,23 +6,42 @@
 // heartbeat / dns-challenge — token binds to a single FQDN).
 //
 // Currently supports:
-//   ca = "zerossl"  → returns Worker's master ZeroSSL EAB pair. Multiple
-//                     ACME accounts can be registered against the same
-//                     EAB; each install gets its own ACME account keypair
-//                     locally so rate-limit accounting is independent
-//                     per-install on ZeroSSL's side.
+//   ca = "zerossl"  → Worker's master ZeroSSL EAB pair. Free, ~unlimited
+//                     for verified accounts.
+//   ca = "gts"      → Google Trust Services EAB pair. Independent
+//                     rate-limit budget; free Public CA tier (no GCP
+//                     billing charges, project must have billing
+//                     account attached for API enable).
+//
+// Multiple ACME accounts can be registered against the same EAB; each
+// install gets its own ACME account keypair locally, so rate-limit
+// accounting is independent per-install on the CA's side.
 //
 // Why we don't bake EAB into the /api/provision response:
 //   - EAB is sensitive (whoever holds it can register fake ACME accounts
-//     under our ZeroSSL umbrella). install.sh only needs it on cert-issue
+//     under our umbrella). install.sh only needs it on cert-issue
 //     fallback, which is rare. Lazy-load minimizes exposure.
-//   - Future per-CA expansion (GTS, etc.) — separate endpoint keeps the
+//   - Per-CA expansion stays simple — separate endpoint keeps the
 //     provision response stable.
 
 import { jsonResponse } from "../lib/response.js";
 import { sha256Hex } from "../lib/crypto.js";
 
-const SUPPORTED_CAS = new Set(["zerossl"]);
+const SUPPORTED_CAS = new Set(["zerossl", "gts"]);
+
+const CA_DESCRIPTORS = {
+  zerossl: {
+    directory: "https://acme.zerossl.com/v2/DV90",
+    kidEnv: "ZEROSSL_EAB_KID",
+    hmacEnv: "ZEROSSL_EAB_HMAC",
+  },
+  gts: {
+    // Google Trust Services Public CA (production endpoint).
+    directory: "https://dv.acme-v02.api.pki.goog/directory",
+    kidEnv: "GTS_EAB_KID",
+    hmacEnv: "GTS_EAB_HMAC",
+  },
+};
 
 async function readBody(request) {
   let body;
@@ -62,26 +81,22 @@ export async function handleEab(request, env) {
     return jsonResponse(404, { error: "unknown_token" });
   }
 
-  if (parsed.ca === "zerossl") {
-    const kid = env.ZEROSSL_EAB_KID;
-    const hmac = env.ZEROSSL_EAB_HMAC;
-    if (!kid || !hmac) {
-      console.error("eab: zerossl_secrets_missing", { subdomain });
-      return jsonResponse(503, { error: "ca_not_configured", ca: "zerossl" });
-    }
-    console.log("eab: issued", { subdomain, ca: "zerossl", token_hash_prefix: hash.slice(0, 8) });
-    return jsonResponse(200, {
-      ca: "zerossl",
-      acme_directory_url: "https://acme.zerossl.com/v2/DV90",
-      eab_kid: kid,
-      eab_hmac_key: hmac,
-      // ZeroSSL requires a registration email on ACME account creation.
-      // Use the install's FQDN-derived address — ZeroSSL only sends cert-
-      // expiry notices there, and we control sygen.pro.
-      acme_account_email: `${subdomain}@${env.SYGEN_DOMAIN}`,
-    });
+  const desc = CA_DESCRIPTORS[parsed.ca];
+  const kid = env[desc.kidEnv];
+  const hmac = env[desc.hmacEnv];
+  if (!kid || !hmac) {
+    console.error("eab: secrets_missing", { subdomain, ca: parsed.ca });
+    return jsonResponse(503, { error: "ca_not_configured", ca: parsed.ca });
   }
-
-  // Should be unreachable thanks to SUPPORTED_CAS check above.
-  return jsonResponse(400, { error: "unsupported_ca" });
+  console.log("eab: issued", { subdomain, ca: parsed.ca, token_hash_prefix: hash.slice(0, 8) });
+  return jsonResponse(200, {
+    ca: parsed.ca,
+    acme_directory_url: desc.directory,
+    eab_kid: kid,
+    eab_hmac_key: hmac,
+    // CAs require a registration email on ACME account creation. The
+    // install's FQDN-derived address is fine — only used for cert-
+    // expiry notices, and we control sygen.pro.
+    acme_account_email: `${subdomain}@${env.SYGEN_DOMAIN}`,
+  });
 }

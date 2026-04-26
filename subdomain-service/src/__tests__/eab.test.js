@@ -35,6 +35,8 @@ async function makeEnvWithReservation({ withSecrets = true } = {}) {
   if (withSecrets) {
     env.ZEROSSL_EAB_KID = "test-kid-DzBKsOIo";
     env.ZEROSSL_EAB_HMAC = "test-hmac-fdWlPwxdEScrtcHuE8eWgtq";
+    env.GTS_EAB_KID = "test-kid-d4a54bdc";
+    env.GTS_EAB_HMAC = "test-hmac-HLTWM97KHrrfuIGOjdQ";
   }
   return { env, token, subdomain };
 }
@@ -73,7 +75,28 @@ test("eab: rejects unknown CA", async () => {
   assert.equal(resp.status, 400);
   const body = await resp.json();
   assert.equal(body.error, "unsupported_ca");
-  assert.deepEqual(body.supported, ["zerossl"]);
+  assert.deepEqual(body.supported.sort(), ["gts", "zerossl"]);
+});
+
+test("eab: GTS happy path returns Google Trust Services credentials", async () => {
+  const { env, token, subdomain } = await makeEnvWithReservation();
+  const resp = await handleEab(eabRequest({ install_token: token, ca: "gts" }), env);
+  assert.equal(resp.status, 200);
+  const body = await resp.json();
+  assert.equal(body.ca, "gts");
+  assert.equal(body.eab_kid, "test-kid-d4a54bdc");
+  assert.equal(body.eab_hmac_key, "test-hmac-HLTWM97KHrrfuIGOjdQ");
+  assert.equal(body.acme_directory_url, "https://dv.acme-v02.api.pki.goog/directory");
+  assert.equal(body.acme_account_email, `${subdomain}@sygen.pro`);
+});
+
+test("eab: GTS 503 when secrets missing", async () => {
+  const { env, token } = await makeEnvWithReservation({ withSecrets: false });
+  const resp = await handleEab(eabRequest({ install_token: token, ca: "gts" }), env);
+  assert.equal(resp.status, 503);
+  const body = await resp.json();
+  assert.equal(body.error, "ca_not_configured");
+  assert.equal(body.ca, "gts");
 });
 
 test("eab: 404 for unknown install_token (not in TOKEN_INDEX)", async () => {

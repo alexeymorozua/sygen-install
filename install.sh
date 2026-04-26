@@ -135,6 +135,43 @@ json_escape() {
     printf '"%s"' "$s"
 }
 
+# Strict allowlist validators for the two values that come back from the
+# Cloudflare provisioning Worker. Both are interpolated into shell
+# scripts, nginx config, JSON config, and `rm -rf` paths — a Worker
+# compromise OR an MITM during the provision request would otherwise
+# pivot to root code execution on every fresh install. Validate ONCE
+# right after the jq -r parse so all downstream paths are clean.
+#
+# FQDN: lowercase DNS-safe label[.label]+, RFC 1035 length caps. Rejects
+# any whitespace, shell metacharacter, '/', '..', '#', quotes — i.e.
+# everything that could break out of a `server_name`/`rm -rf <path>`/
+# JSON-string context.
+validate_fqdn() {
+    local fqdn=${1-}
+    local label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+    local re="^${label}(\.${label})+$"
+    if [ "${#fqdn}" -lt 1 ] || [ "${#fqdn}" -gt 253 ]; then return 1; fi
+    [[ "$fqdn" =~ $re ]] || return 1
+    return 0
+}
+
+# DNS-challenge URL: must be HTTPS to a known-safe host expression. Rejects
+# anything containing shell metacharacters or quotes — the value lands
+# inside double-quoted bash assignments in /usr/local/sbin/sygen-acme-*.sh
+# generated below. Regex stored in a variable so bash doesn't word-split
+# the metacharacters inside [[ =~ ]].
+validate_https_url() {
+    local url=${1-}
+    local re='^https://[A-Za-z0-9._/?:&=%~+-]+$'
+    if [ "${#url}" -lt 8 ] || [ "${#url}" -gt 2048 ]; then return 1; fi
+    case "$url" in
+        https://*) ;;
+        *) return 1 ;;
+    esac
+    [[ "$url" =~ $re ]] || return 1
+    return 0
+}
+
 emit_json_error() {
     if [ "$JSON_OUTPUT" != "1" ] || [ "$JSON_DONE" = "1" ]; then return 0; fi
     JSON_DONE=1
@@ -462,6 +499,10 @@ elif [ -z "${SYGEN_SUBDOMAIN:-}" ] && [ -z "${CF_API_TOKEN:-}" ]; then
 else
     SUB="${SYGEN_SUBDOMAIN:?SYGEN_SUBDOMAIN required (or unset both SYGEN_SUBDOMAIN and CF_API_TOKEN for auto-mode)}"
     FQDN="${SUB}.${DOMAIN}"
+    # Validate operator-supplied subdomain — same allowlist as auto-mode
+    # so a typo / shell metachar / path-traversal can't slip through.
+    validate_fqdn "$FQDN" \
+        || die "SYGEN_SUBDOMAIN '$SUB' is not a valid DNS label (allowed [a-z0-9-], 1-63 chars)"
     CF_API_TOKEN="${CF_API_TOKEN:?CF_API_TOKEN required for custom-mode install}"
     CF_ZONE_ID="${CF_ZONE_ID:?CF_ZONE_ID required for custom-mode install}"
     SYGEN_ROOT="/srv/sygen"
@@ -627,7 +668,12 @@ if [ "$AUTO_MODE" -eq 1 ]; then
             # request a fresh one for the new FQDN below.
             if [ -f "$SYGEN_ROOT/data/config/config.json" ]; then
                 OLD_SUB=$(jq -r '.instance_name // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)
-                if [ -n "$OLD_SUB" ] && [ -d "/etc/letsencrypt/live/${OLD_SUB}.${DOMAIN}" ]; then
+                # Validate before letting it anywhere near `rm -rf`. A
+                # tampered config.json with instance_name="../../../etc"
+                # would otherwise let the cert-cleanup step wipe arbitrary
+                # paths as root.
+                if [ -n "$OLD_SUB" ] && validate_fqdn "${OLD_SUB}.${DOMAIN}" \
+                    && [ -d "/etc/letsencrypt/live/${OLD_SUB}.${DOMAIN}" ]; then
                     log "Removing stale LE cert for old FQDN ${OLD_SUB}.${DOMAIN}"
                     rm -rf "/etc/letsencrypt/live/${OLD_SUB}.${DOMAIN}" \
                            "/etc/letsencrypt/archive/${OLD_SUB}.${DOMAIN}" \
@@ -650,6 +696,11 @@ if [ "$AUTO_MODE" -eq 1 ]; then
             fi
             [ -n "${SUB:-}" ] || die "auto-mode re-run: cannot recover subdomain — config.json missing or has no instance_name. Wipe $SYGEN_ROOT/data/config and rerun for a fresh provision."
             FQDN="${SUB}.${DOMAIN}"
+            # Defence in depth: if config.json was tampered with offline,
+            # the recovered SUB could carry shell metachars or path traversal
+            # into nginx, rm -rf, etc. Reject before any downstream use.
+            validate_fqdn "$FQDN" \
+                || die "auto-mode re-run: instance_name '$SUB' from config.json is not a valid DNS label"
             ADMIN_URL="https://$FQDN"
             CORS_ORIGIN="https://$FQDN"
             log "Auto-mode re-run: continuing with existing $FQDN"
@@ -676,6 +727,19 @@ if [ "$AUTO_MODE" -eq 1 ]; then
 
         if [ -z "$FQDN" ] || [ -z "$SYGEN_INSTALL_TOKEN" ] || [ -z "$SYGEN_DNS_CHALLENGE_URL" ]; then
             die "provision response missing required fields (got: $PROVISION_RESPONSE)"
+        fi
+
+        # Hard validation: a compromised / spoofed Worker must NOT be able
+        # to inject shell, nginx, JSON, or path-traversal payloads via
+        # these values. They flow into rm -rf paths, nginx server_name,
+        # and a generated /usr/local/sbin/sygen-acme-*.sh hook script.
+        validate_fqdn "$FQDN" \
+            || die "provision response: invalid fqdn '$FQDN' (allowed chars [a-z0-9.-], DNS labels only)"
+        validate_https_url "$SYGEN_DNS_CHALLENGE_URL" \
+            || die "provision response: invalid dns_challenge_url (must be plain https URL with safe chars)"
+        if [ -n "$SYGEN_INSTALL_HEARTBEAT_URL" ]; then
+            validate_https_url "$SYGEN_INSTALL_HEARTBEAT_URL" \
+                || die "provision response: invalid heartbeat_url"
         fi
 
         SUB="${FQDN%%.*}"
@@ -981,19 +1045,24 @@ STAGE="data"
 log "Preparing $SYGEN_ROOT"
 mkdir -p "$SYGEN_ROOT"/{data,claude-auth}
 mkdir -p "$SYGEN_ROOT/data/config"
-mkdir -p "$SYGEN_ROOT/data/_secrets"
 # Secrets dir holds .initial_admin_password + future per-install secrets.
-# 0700 so only root/sygen-uid can read; 0755 default leaks directory listing
-# to any local user on the VPS even though file contents need their own read perm.
-chmod 0700 "$SYGEN_ROOT/data/_secrets"
+# `install -d` is atomic and refuses to follow a pre-existing symlink, so a
+# local non-root attacker cannot pre-create _secrets as a symlink to e.g.
+# /root/.ssh and ride the later chown -R into a privesc. Mode 0700 set in
+# the same syscall — no TOCTOU window where the dir is briefly 0755.
+install -d -m 0700 "$SYGEN_ROOT/data/_secrets"
 
 # Container runs as uid 1000 (sygen) — see core Dockerfile. Bind-mounted
 # host directories don't inherit the chown done inside the image, so without
 # this the container can't create /data/logs etc and crashes on first start
 # with PermissionError. Linux only — macOS Colima maps host user uid into
-# the VM transparently.
+# the VM transparently. `find ... -exec chown` with the default action does
+# not follow symlinks (POSIX find traverses without dereferencing for -exec
+# by default); we also pass `-h` to chown so even a symlink whose target is
+# outside the tree only has its own metadata changed, never the target's.
 if [ $LOCAL_MODE -eq 0 ]; then
-    chown -R 1000:1000 "$SYGEN_ROOT/data" "$SYGEN_ROOT/claude-auth"
+    find "$SYGEN_ROOT/data" "$SYGEN_ROOT/claude-auth" \
+        -xdev -exec chown -h 1000:1000 {} +
 fi
 
 if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
@@ -1002,26 +1071,34 @@ if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
     # issues the way `tr -dc ... </dev/urandom | head -c N` has under pipefail.
     API_TOKEN=$(openssl rand -hex 32)
     JWT_SECRET=$(openssl rand -hex 32)
-    cat > "$SYGEN_ROOT/data/config/config.json" <<JSON
-{
-  "instance_name": "$SUB",
-  "language": "en",
-  "log_level": "INFO",
-  "transport": "api",
-  "transports": ["api"],
-  "allowed_user_ids": [],
-  "api": {
-    "enabled": true,
-    "host": "0.0.0.0",
-    "port": 8081,
-    "token": "$API_TOKEN",
-    "jwt_secret": "$JWT_SECRET",
-    "chat_id": 0,
-    "allow_public": true,
-    "cors_origins": ["$CORS_ORIGIN"]
-  }
-}
-JSON
+    # Build with `jq -n` so any string value (SUB, CORS_ORIGIN) is JSON-escaped
+    # automatically — a heredoc would interpolate raw shell, letting a
+    # tampered FQDN inject extra keys (e.g. flip allow_public, override
+    # jwt_secret) into the bootstrap config. SUB/CORS_ORIGIN are already
+    # validated by validate_fqdn above; this is defence in depth.
+    jq -n \
+        --arg sub "$SUB" \
+        --arg token "$API_TOKEN" \
+        --arg jwt "$JWT_SECRET" \
+        --arg cors "$CORS_ORIGIN" \
+        '{
+            instance_name: $sub,
+            language: "en",
+            log_level: "INFO",
+            transport: "api",
+            transports: ["api"],
+            allowed_user_ids: [],
+            api: {
+                enabled: true,
+                host: "0.0.0.0",
+                port: 8081,
+                token: $token,
+                jwt_secret: $jwt,
+                chat_id: 0,
+                allow_public: true,
+                cors_origins: [$cors]
+            }
+        }' > "$SYGEN_ROOT/data/config/config.json"
 fi
 
 # Preserve user-set values across re-runs of install.sh. Each call to

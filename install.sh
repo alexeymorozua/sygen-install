@@ -141,7 +141,7 @@ _release_and_die() {
     local details="${2:-}"
     if [ -n "${SYGEN_INSTALL_TOKEN:-}" ]; then
         warn "Releasing subdomain reservation back to the pool (cert failure)"
-        curl -fsS -X DELETE \
+        curl -fsS --ipv4 -X DELETE \
             -H "Content-Type: application/json" \
             -d "$(jq -nc --arg t "$SYGEN_INSTALL_TOKEN" '{install_token:$t}')" \
             "https://install.${DOMAIN}/api/release" >/dev/null 2>&1 || true
@@ -572,7 +572,7 @@ if [ "$AUTO_MODE" -eq 1 ]; then
         # canonical heartbeat URL if .env didn't carry one (older installs).
         PROBE_URL="${SYGEN_INSTALL_HEARTBEAT_URL:-https://install.${DOMAIN}/api/heartbeat}"
         log "Auto-mode re-run: probing Worker reservation (heartbeat $PROBE_URL)"
-        PROBE_HTTP=$(curl -sS -o /tmp/sygen-heartbeat-probe.json -w '%{http_code}' \
+        PROBE_HTTP=$(curl -sS --ipv4 -o /tmp/sygen-heartbeat-probe.json -w '%{http_code}' \
             -X POST -H 'Content-Type: application/json' \
             -d "$(jq -nc --arg t "$SYGEN_INSTALL_TOKEN" '{install_token:$t}')" \
             "$PROBE_URL" 2>/dev/null || echo "000")
@@ -641,7 +641,12 @@ if [ "$AUTO_MODE" -eq 1 ]; then
     # probe revealed the reservation was sweep'd.
     if [ -z "${SYGEN_INSTALL_TOKEN:-}" ]; then
         log "Auto-mode: requesting subdomain from $PROVISION_URL"
-        PROVISION_RESPONSE=$(curl -fsS -X POST -H "Content-Type: application/json" \
+        # --ipv4 forces curl to resolve+connect over IPv4 so Worker sees an
+        # IPv4 in CF-Connecting-IP and creates an A record (not AAAA).
+        # Critical: install.sh's later DNS-propagation check only looks for
+        # A; on dual-stack hosts (e.g. Hostiko) curl would otherwise pick
+        # IPv6 first → Worker creates AAAA → propagation check times out.
+        PROVISION_RESPONSE=$(curl -fsS --ipv4 -X POST -H "Content-Type: application/json" \
             -d '{}' "$PROVISION_URL") \
             || die "provision request failed (network or 5xx) — set SYGEN_SUBDOMAIN/CF_API_TOKEN/CF_ZONE_ID to use a custom subdomain"
 
@@ -807,7 +812,7 @@ PAYLOAD=\$(jq -nc \\
     --arg v "\$CERTBOT_VALIDATION" \\
     '{install_token:\$t,name:\$n,value:\$v}')
 
-curl -fsS -X POST -H "Content-Type: application/json" \\
+curl -fsS --ipv4 -X POST -H "Content-Type: application/json" \\
     -d "\$PAYLOAD" "\$DNS_CHALLENGE_URL" >/dev/null \\
     || { echo "sygen-acme-auth-hook: POST failed" >&2; exit 1; }
 
@@ -845,7 +850,7 @@ PAYLOAD=\$(jq -nc \\
     --arg n "\$NAME" \\
     '{install_token:\$t,name:\$n}')
 
-curl -fsS -X DELETE -H "Content-Type: application/json" \\
+curl -fsS --ipv4 -X DELETE -H "Content-Type: application/json" \\
     -d "\$PAYLOAD" "\$DNS_CHALLENGE_URL" >/dev/null \\
     || echo "sygen-acme-cleanup-hook: DELETE failed (non-fatal)" >&2
 
@@ -893,7 +898,7 @@ HOOK
             local ca_name="$1"
             local eab_url="https://install.${DOMAIN}/api/eab"
             local resp
-            resp=$(curl -fsS -X POST -H "Content-Type: application/json" \
+            resp=$(curl -fsS --ipv4 -X POST -H "Content-Type: application/json" \
                 -d "$(jq -nc --arg t "$SYGEN_INSTALL_TOKEN" --arg c "$ca_name" '{install_token:$t,ca:$c}')" \
                 "$eab_url" 2>/dev/null) || return 1
             local kid hmac dir email

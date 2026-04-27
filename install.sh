@@ -1331,9 +1331,6 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
 elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     STAGE="nginx"
     # Tailscale terminates TLS itself via `tailscale serve`; no nginx needed.
-    # `tailscale serve` requires HTTPS Certificates to be enabled in the
-    # tailnet admin (DNS settings). If it isn't, the first --bg call returns
-    # a clear error and we surface it.
     log "Configuring 'tailscale serve' for $FQDN (tailnet HTTPS termination)"
 
     # Use the binary resolved earlier (PATH on Linux / .app bundle on
@@ -1341,21 +1338,51 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     # would re-introduce the App-Store-CLI failure mode we just fixed.
     : "${TAILSCALE_BIN:=tailscale}"
 
+    # macOS Tailscale.app runs tailscaled as root via system extension /
+    # launchd; the CLI talks to the daemon over a user-accessible unix
+    # socket, so sudo is unnecessary and actively harmful — it would
+    # prompt for a password we can't supply over a non-TTY install (the
+    # iOS launcher uses `nohup bash -c ...` without -tt). On Linux the
+    # apt-installed daemon owns its socket as root, so the CLI does
+    # need sudo for any state-mutating call (serve, reset).
+    TAILSCALE_SUDO=""
+    if [ "$LOCAL_MODE" -eq 0 ]; then
+        TAILSCALE_SUDO="sudo"
+    fi
+
+    # Helper: run a tailscale subcommand and surface its real stderr to
+    # the operator. The previous static "is HTTPS enabled?" message
+    # blamed the wrong thing in 90% of failures (sudo-tty, daemon down,
+    # MagicDNS off all returned the same fake guess). Real stderr lets
+    # the caller see what actually broke.
+    _ts_run() {
+        local label="$1"; shift
+        local fatal="$1"; shift
+        local out
+        if ! out="$($TAILSCALE_SUDO "$TAILSCALE_BIN" "$@" 2>&1)"; then
+            local first
+            first="$(printf '%s' "$out" | head -n1)"
+            if [ "$fatal" = "1" ]; then
+                die "tailscale ${label} failed: ${first}"
+            else
+                warn "tailscale ${label} failed (non-fatal): ${first}"
+                return 1
+            fi
+        fi
+        return 0
+    }
+
     # Wipe any prior config so re-runs end up with the same routes we want.
     # 'reset' is a no-op when no serve config exists.
-    sudo "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 || true
+    $TAILSCALE_SUDO "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 || true
 
     # Mountpoints share port 443; subsequent --bg calls add path handlers
     # to the existing serve config. Order matters: more-specific paths first
     # so they don't get shadowed by the catch-all "/" → admin route.
-    sudo "$TAILSCALE_BIN" serve --bg --set-path=/api/ "http://127.0.0.1:8081" \
-        || die "tailscale serve /api/ failed — is HTTPS enabled in your tailnet (admin > DNS)?"
-    sudo "$TAILSCALE_BIN" serve --bg --set-path=/ws/ "http://127.0.0.1:8081" \
-        || die "tailscale serve /ws/ failed"
-    sudo "$TAILSCALE_BIN" serve --bg --set-path=/upload "http://127.0.0.1:8081" \
-        || warn "tailscale serve /upload failed (uploads disabled — non-fatal)"
-    sudo "$TAILSCALE_BIN" serve --bg "http://127.0.0.1:${SYGEN_ADMIN_PORT}" \
-        || die "tailscale serve / failed"
+    _ts_run "serve /api/" 1 serve --bg --set-path=/api/ "http://127.0.0.1:8081"
+    _ts_run "serve /ws/"  1 serve --bg --set-path=/ws/  "http://127.0.0.1:8081"
+    _ts_run "serve /upload" 0 serve --bg --set-path=/upload "http://127.0.0.1:8081"
+    _ts_run "serve /" 1 serve --bg "http://127.0.0.1:${SYGEN_ADMIN_PORT}"
 fi
 
 # ---------- 8. Wait for admin bootstrap ----------

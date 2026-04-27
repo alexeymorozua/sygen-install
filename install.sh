@@ -1351,15 +1351,43 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     fi
 
     # Helper: run a tailscale subcommand and surface its real stderr to
-    # the operator. The previous static "is HTTPS enabled?" message
-    # blamed the wrong thing in 90% of failures (sudo-tty, daemon down,
-    # MagicDNS off all returned the same fake guess). Real stderr lets
-    # the caller see what actually broke.
+    # the operator. Replaces the static "is HTTPS enabled?" guess that
+    # blamed the wrong thing 90% of the time.
+    #
+    # Round-5 hardening:
+    #  - stdin redirected from /dev/null so a CLI that wants confirmation
+    #    (e.g. "Serve is not enabled — visit URL ...") gets EOF and exits
+    #    immediately instead of hanging forever.
+    #  - "Serve is not enabled" detected explicitly: the CLI prints the
+    #    enable URL and the message bypasses normal exit codes. We emit
+    #    a structured tailnet_feature_gate error so the iOS app can show
+    #    the URL on the failure card.
     _ts_run() {
         local label="$1"; shift
         local fatal="$1"; shift
         local out
-        if ! out="$($TAILSCALE_SUDO "$TAILSCALE_BIN" "$@" 2>&1)"; then
+        # Note: redirect stdin BEFORE the command so a hung interactive
+        # prompt doesn't keep install.sh blocked. Some Tailscale builds
+        # write the gate notice to stdout, others to stderr — capture both.
+        out="$($TAILSCALE_SUDO "$TAILSCALE_BIN" "$@" </dev/null 2>&1)"
+        local rc=$?
+
+        # Tailnet feature gate: succeed-or-die outcome doesn't apply —
+        # the CLI may print the gate notice and still return 0. Match on
+        # the message itself so both 0 and non-0 exits are caught.
+        if printf '%s' "$out" | grep -q "Serve is not enabled"; then
+            local enable_url
+            enable_url="$(printf '%s' "$out" | grep -oE 'https://login\.tailscale\.com/[^[:space:]]+' | head -n1)"
+            local hint="Tailscale Serve is not enabled on your tailnet."
+            if [ -n "$enable_url" ]; then
+                hint="$hint Open $enable_url to enable it, then re-run the install."
+            else
+                hint="$hint Enable it at https://login.tailscale.com/admin/dns then re-run the install."
+            fi
+            die "$hint"
+        fi
+
+        if [ $rc -ne 0 ]; then
             local first
             first="$(printf '%s' "$out" | head -n1)"
             if [ "$fatal" = "1" ]; then
@@ -1374,15 +1402,21 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
 
     # Wipe any prior config so re-runs end up with the same routes we want.
     # 'reset' is a no-op when no serve config exists.
-    $TAILSCALE_SUDO "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 || true
+    $TAILSCALE_SUDO "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 </dev/null || true
 
     # Mountpoints share port 443; subsequent --bg calls add path handlers
     # to the existing serve config. Order matters: more-specific paths first
     # so they don't get shadowed by the catch-all "/" → admin route.
-    _ts_run "serve /api/" 1 serve --bg --set-path=/api/ "http://127.0.0.1:8081"
-    _ts_run "serve /ws/"  1 serve --bg --set-path=/ws/  "http://127.0.0.1:8081"
-    _ts_run "serve /upload" 0 serve --bg --set-path=/upload "http://127.0.0.1:8081"
-    _ts_run "serve /" 1 serve --bg "http://127.0.0.1:${SYGEN_ADMIN_PORT}"
+    #
+    # IMPORTANT: backend URLs MUST include the same path as --set-path or
+    # Tailscale Serve strips the prefix on the way to the backend. Sygen
+    # core expects /api/auth/login etc., not /auth/login, so without the
+    # trailing path the proxy returns 404 on every mobile login request.
+    # The catch-all "/" mapping has no path to preserve and is fine bare.
+    _ts_run "serve /api/"   1 serve --bg --set-path=/api/   "http://127.0.0.1:8081/api/"
+    _ts_run "serve /ws/"    1 serve --bg --set-path=/ws/    "http://127.0.0.1:8081/ws/"
+    _ts_run "serve /upload" 0 serve --bg --set-path=/upload "http://127.0.0.1:8081/upload"
+    _ts_run "serve /"       1 serve --bg "http://127.0.0.1:${SYGEN_ADMIN_PORT}"
 fi
 
 # ---------- 8. Wait for admin bootstrap ----------

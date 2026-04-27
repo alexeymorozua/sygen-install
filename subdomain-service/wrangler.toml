@@ -36,6 +36,12 @@ SYGEN_DOMAIN = "sygen.pro"
 SYGEN_CF_ZONE_ID = "6ae59801f8ac7b5dc33b6e32d844b0a6"
 TTL_DAYS = "30"
 SUBDOMAIN_LENGTH = "8"
+# Per-IP cap on /api/provision per 1-hour window. Default in code is 5;
+# bumped to 30 to support iterative VPS-deploy testing from a single
+# developer IP without rotating subdomains. Production users almost never
+# hit even 5 (one provision per fresh install). Defence-in-depth still
+# protects the underlying CF API quota — 30/h * 1 IP <<< 1200/5min/zone.
+PROVISION_RATE_LIMIT = "30"
 
 # Daily sweep at 02:00 UTC — deletes expired reservations.
 [triggers]

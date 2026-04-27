@@ -381,17 +381,29 @@ if [ $LOCAL_MODE -eq 1 ]; then
             warn "  For iPhone access, re-run with SELF_HOSTED_MODE=tailscale or =publicdomain."
             ;;
         tailscale)
-            # Pre-flight: CLI must be installed AND the daemon authenticated.
+            # Pre-flight: CLI must be reachable AND the daemon authenticated.
             # We don't try to log the user in — Tailscale auth flows are
             # interactive (browser/SSO) and beyond install.sh's mandate.
-            if ! command -v tailscale >/dev/null 2>&1; then
-                if [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-                    die "Tailscale.app is installed but the 'tailscale' CLI isn't in PATH. Run '/Applications/Tailscale.app/Contents/MacOS/Tailscale install-cli' (sudo) and retry."
-                fi
-                die "SELF_HOSTED_MODE=tailscale but 'tailscale' CLI not found. Install Tailscale (https://tailscale.com/kb/1017/install), run 'tailscale up', then retry."
+            #
+            # Tailscale 1.96+ from the Mac App Store does NOT install a
+            # /usr/local/bin/tailscale wrapper; the `install-cli` subcommand
+            # is gone. So we look in PATH first, then fall back to the
+            # in-bundle binary at /Applications/Tailscale.app/... — calling
+            # it directly works (whereas a symlink to it crashes with a
+            # bundleIdentifier registry error). Variable is exported so
+            # later `tailscale serve` calls use the same resolved path.
+            TAILSCALE_BIN=""
+            if command -v tailscale >/dev/null 2>&1; then
+                TAILSCALE_BIN="$(command -v tailscale)"
+            elif [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+                TAILSCALE_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+                log "Using Tailscale binary from /Applications/Tailscale.app (CLI not in PATH)"
+            else
+                die "SELF_HOSTED_MODE=tailscale but Tailscale not found. Install from https://tailscale.com/download (Mac App Store works), run 'tailscale up' (or open the app and log in), then retry."
             fi
-            ts_status_json="$(tailscale status --json 2>/dev/null)" \
-                || die "Tailscale daemon not running or device not logged in. Run 'tailscale up' and retry."
+            export TAILSCALE_BIN
+            ts_status_json="$("$TAILSCALE_BIN" status --json 2>/dev/null)" \
+                || die "Tailscale daemon not running or device not logged in. Open Tailscale.app (or run 'tailscale up') and retry."
 
             # jq isn't guaranteed yet on a fresh Mac (we install it below) —
             # use python3 (always present on modern macOS) to extract DNSName
@@ -468,7 +480,12 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
         die "Tailscale installed. Run 'sudo tailscale up' to log in to your tailnet, then re-run this installer."
     fi
 
-    ts_status_json="$(tailscale status --json 2>/dev/null)" \
+    # Linux apt-installed tailscale is always in PATH; macOS may need a
+    # bundle-resolved binary. TAILSCALE_BIN is the single source of truth
+    # for every later invocation.
+    TAILSCALE_BIN="$(command -v tailscale)"
+    export TAILSCALE_BIN
+    ts_status_json="$("$TAILSCALE_BIN" status --json 2>/dev/null)" \
         || die "Tailscale daemon not running or device not logged in. Run 'sudo tailscale up' and retry."
 
     # python3 is preinstalled on every modern Debian/Ubuntu. Same parser
@@ -1306,20 +1323,25 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     # a clear error and we surface it.
     log "Configuring 'tailscale serve' for $FQDN (tailnet HTTPS termination)"
 
+    # Use the binary resolved earlier (PATH on Linux / .app bundle on
+    # macOS App-Store installs). Falling back to a bare `tailscale` here
+    # would re-introduce the App-Store-CLI failure mode we just fixed.
+    : "${TAILSCALE_BIN:=tailscale}"
+
     # Wipe any prior config so re-runs end up with the same routes we want.
     # 'reset' is a no-op when no serve config exists.
-    sudo tailscale serve reset >/dev/null 2>&1 || true
+    sudo "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 || true
 
     # Mountpoints share port 443; subsequent --bg calls add path handlers
     # to the existing serve config. Order matters: more-specific paths first
     # so they don't get shadowed by the catch-all "/" → admin route.
-    sudo tailscale serve --bg --set-path=/api/ "http://127.0.0.1:8081" \
+    sudo "$TAILSCALE_BIN" serve --bg --set-path=/api/ "http://127.0.0.1:8081" \
         || die "tailscale serve /api/ failed — is HTTPS enabled in your tailnet (admin > DNS)?"
-    sudo tailscale serve --bg --set-path=/ws/ "http://127.0.0.1:8081" \
+    sudo "$TAILSCALE_BIN" serve --bg --set-path=/ws/ "http://127.0.0.1:8081" \
         || die "tailscale serve /ws/ failed"
-    sudo tailscale serve --bg --set-path=/upload "http://127.0.0.1:8081" \
+    sudo "$TAILSCALE_BIN" serve --bg --set-path=/upload "http://127.0.0.1:8081" \
         || warn "tailscale serve /upload failed (uploads disabled — non-fatal)"
-    sudo tailscale serve --bg "http://127.0.0.1:${SYGEN_ADMIN_PORT}" \
+    sudo "$TAILSCALE_BIN" serve --bg "http://127.0.0.1:${SYGEN_ADMIN_PORT}" \
         || die "tailscale serve / failed"
 fi
 

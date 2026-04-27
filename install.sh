@@ -593,6 +593,19 @@ else
         fi
     done
 
+    # Homebrew installs the docker-compose binary into
+    # $(brew --prefix)/lib/docker/cli-plugins/, but Docker CLI only autodiscovers
+    # plugins from ~/.docker/cli-plugins/ or /usr/local/lib/docker/cli-plugins/.
+    # Without this symlink, `docker compose <verb>` fails with "unknown command"
+    # immediately after a fresh brew install, which used to make the next
+    # `docker compose version` check kill the install. Idempotent — `ln -sf`
+    # is fine on re-runs.
+    BREW_COMPOSE_PLUGIN="$(brew --prefix 2>/dev/null)/lib/docker/cli-plugins/docker-compose"
+    if [ -x "$BREW_COMPOSE_PLUGIN" ]; then
+        mkdir -p "$HOME/.docker/cli-plugins"
+        ln -sf "$BREW_COMPOSE_PLUGIN" "$HOME/.docker/cli-plugins/docker-compose"
+    fi
+
     if ! colima status >/dev/null 2>&1; then
         log "macOS: starting Colima (4 CPU / 8 GB RAM / 50 GB disk)"
         colima start --cpu 4 --memory 8 --disk 50
@@ -601,7 +614,7 @@ else
     fi
 
     if ! docker compose version >/dev/null 2>&1; then
-        die "docker compose plugin missing after brew install — check your Homebrew setup"
+        die "docker compose plugin missing after brew install — try: ln -sf $(brew --prefix)/lib/docker/cli-plugins/docker-compose ~/.docker/cli-plugins/docker-compose"
     fi
 fi
 

@@ -62,8 +62,12 @@ services:
     command: --label-enable --monitor-only --interval 1800
     environment:
       - TZ=UTC
-      # Docker 29+ dropped API <1.40; Watchtower defaults to 1.25 otherwise.
-      - DOCKER_API_VERSION=1.40
+      # No DOCKER_API_VERSION pin — modern Watchtower (1.7+) negotiates the
+      # API version with the daemon at startup. The previous 1.40 pin was
+      # added when Watchtower defaulted to 1.25 and Docker 29 dropped that;
+      # but Colima 0.10+ ships Engine 27 which REJECTS API <1.44, so the
+      # pin actively breaks updates now. Bare default = pick the highest
+      # mutually supported version.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
@@ -81,7 +85,8 @@ services:
       - "8082"
     environment:
       - TZ=UTC
-      - DOCKER_API_VERSION=1.40
+      # No DOCKER_API_VERSION — auto-negotiate with the daemon. See the
+      # watchtower service above for the full rationale.
       - SYGEN_UPDATER_TOKEN=${SYGEN_UPDATER_TOKEN:-}
       - CHECK_INTERVAL=1800
       - CORE_IMAGE=${SYGEN_CORE_IMAGE:-ghcr.io/alexeymorozua/sygen-core:latest}

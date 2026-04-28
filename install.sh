@@ -590,13 +590,45 @@ else
     # plain localhost install would be wasteful churn.
     macos_pkgs=(colima docker docker-compose jq)
     if [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
-        macos_pkgs+=(nginx certbot)
+        # certbot deliberately NOT in this list — installing it via brew
+        # pulls cryptography/cffi/pycparser as Python deps, and on a Mac
+        # that already has a different version of those packages from a
+        # prior `pip install` (e.g. a developer running other Python
+        # projects in the brew prefix), brew's link step fails or the
+        # imports go to the wrong site-packages. We isolate certbot via
+        # pipx below — its own venv, zero conflicts with system pip.
+        macos_pkgs+=(nginx pipx)
     fi
     for pkg in "${macos_pkgs[@]}"; do
         if ! brew list "$pkg" >/dev/null 2>&1; then
             brew install "$pkg"
         fi
     done
+
+    # certbot in an isolated pipx venv — first run creates it, re-runs are
+    # a no-op via `pipx list | grep`. inject pulls in the manual-DNS
+    # plugin we use for Worker-mediated DNS-01 (no provider key needed
+    # at install time; the auth-hook script POSTs to install.sygen.pro).
+    if [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
+        # pipx ensures its bin dir (~/.local/bin) is on PATH for THIS shell,
+        # so the certbot-bin resolution below sees it without re-login.
+        pipx ensurepath >/dev/null 2>&1 || true
+        export PATH="$HOME/.local/bin:$PATH"
+        if ! pipx list 2>/dev/null | grep -q "package certbot "; then
+            log "macOS: installing certbot in isolated pipx venv"
+            pipx install certbot >/dev/null \
+                || die "pipx install certbot failed — see error above"
+        fi
+        # Custom-mode juser provides their own CF token and we use the
+        # dns-cloudflare plugin; auto-mode goes through Worker-mediated
+        # manual hooks and doesn't need a plugin. Inject the plugin into
+        # the same venv so certbot can find it. Idempotent — pipx no-ops
+        # if the package is already injected.
+        if [ -n "${CF_API_TOKEN:-}" ]; then
+            pipx inject certbot certbot-dns-cloudflare >/dev/null 2>&1 \
+                || warn "pipx inject certbot-dns-cloudflare failed — custom-mode cert may fail"
+        fi
+    fi
 
     # Homebrew installs the docker-compose binary into
     # $(brew --prefix)/lib/docker/cli-plugins/, but Docker CLI only autodiscovers
@@ -901,7 +933,16 @@ ACME_HOOK_DIR="/usr/local/sbin"
 CERTBOT_CONFIG_DIR=""
 CERTBOT_LIVE_DIR="/etc/letsencrypt"
 if [ "$needs_cert" -eq 1 ] && [ $LOCAL_MODE -eq 1 ]; then
-    if [ -x "$(brew --prefix 2>/dev/null)/bin/certbot" ]; then
+    # macOS: prefer the pipx-installed certbot from the deps stage above
+    # (~/.local/bin/certbot), then ~/.local/bin from PATH, then brew as
+    # legacy fallback. pipx isolation means certbot's Python deps never
+    # collide with whatever pip globals the user already has in their
+    # brew prefix.
+    if [ -x "$HOME/.local/bin/certbot" ]; then
+        CERTBOT_BIN="$HOME/.local/bin/certbot"
+    elif command -v certbot >/dev/null 2>&1; then
+        CERTBOT_BIN="$(command -v certbot)"
+    elif [ -x "$(brew --prefix 2>/dev/null)/bin/certbot" ]; then
         CERTBOT_BIN="$(brew --prefix)/bin/certbot"
     fi
     # macOS: hooks + cert state in user-space so certbot needs no sudo.

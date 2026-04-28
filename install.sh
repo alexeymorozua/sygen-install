@@ -1403,6 +1403,66 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     rm -f "$SYGEN_ROOT/docker-compose.yml.bak"
 fi
 
+# ---------- 5b. Host metrics daemon (macOS + Linux) ----------
+# Writes live host CPU/RAM/disk usage to $SYGEN_ROOT/host_metrics.json every
+# 10 s. Bind-mounted into sygen-core read-only at /data/host_metrics.json so
+# the dashboard reports host-true USED values (psutil inside Colima only
+# sees the VM; on bare-metal Linux the daemon agrees with /proc).
+STAGE="host-metrics"
+log "Installing host_metrics_daemon → $SYGEN_ROOT/host_metrics.json"
+
+mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs"
+
+curl -fsSL -o "$SYGEN_ROOT/bin/host_metrics_daemon.py" \
+    "$BASE_URL/scripts/host_metrics_daemon.py" \
+    || die "could not fetch host_metrics_daemon.py"
+chmod 0755 "$SYGEN_ROOT/bin/host_metrics_daemon.py"
+
+# Touch the metrics file so the docker-compose bind-mount has a real file
+# target (else Docker creates a directory at that path and the mount is
+# useless until manually fixed). Daemon overwrites this on first tick.
+touch "$SYGEN_ROOT/host_metrics.json"
+chmod 0644 "$SYGEN_ROOT/host_metrics.json"
+
+PYTHON_BIN="$(command -v python3 || true)"
+[ -z "$PYTHON_BIN" ] && die "python3 not found — required for host_metrics_daemon"
+
+if [ $LOCAL_MODE -eq 1 ]; then
+    # macOS — launchd LaunchAgent (per-user, runs in user session).
+    PLIST_DST="$HOME/Library/LaunchAgents/com.sygen.host-metrics.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    curl -fsSL -o /tmp/sygen.host-metrics.plist.tmpl \
+        "$BASE_URL/scripts/com.sygen.host-metrics.plist" \
+        || die "could not fetch com.sygen.host-metrics.plist"
+    sed \
+        -e "s|__PYTHON__|$PYTHON_BIN|g" \
+        -e "s|__SCRIPT__|$SYGEN_ROOT/bin/host_metrics_daemon.py|g" \
+        -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
+        /tmp/sygen.host-metrics.plist.tmpl > "$PLIST_DST"
+    rm -f /tmp/sygen.host-metrics.plist.tmpl
+
+    # Idempotent reload: unload an old copy if present, then load fresh.
+    launchctl unload "$PLIST_DST" >/dev/null 2>&1 || true
+    launchctl load -w "$PLIST_DST" \
+        || warn "launchctl load failed — host metrics will fall back to Colima view"
+else
+    # Linux — systemd unit, system-wide.
+    UNIT_DST="/etc/systemd/system/sygen-host-metrics.service"
+    curl -fsSL -o /tmp/sygen-host-metrics.service.tmpl \
+        "$BASE_URL/scripts/sygen-host-metrics.service" \
+        || die "could not fetch sygen-host-metrics.service"
+    sed \
+        -e "s|__PYTHON__|$PYTHON_BIN|g" \
+        -e "s|__SCRIPT__|$SYGEN_ROOT/bin/host_metrics_daemon.py|g" \
+        -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
+        /tmp/sygen-host-metrics.service.tmpl > "$UNIT_DST"
+    rm -f /tmp/sygen-host-metrics.service.tmpl
+
+    systemctl daemon-reload
+    systemctl enable --now sygen-host-metrics.service \
+        || warn "systemd enable failed — host metrics will fall back to /proc"
+fi
+
 # ---------- 6. Start stack ----------
 log "Pulling images"
 docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env" pull

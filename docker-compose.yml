@@ -15,6 +15,12 @@ services:
       - /srv/sygen/data:/data
       # Persist Claude Code CLI credentials across container rebuilds.
       - /srv/sygen/claude-auth:/home/sygen/.claude
+      # Live host metrics (CPU/RAM/disk) written by host_metrics_daemon on
+      # the macOS / Linux host. Read-only bind. install.sh touches the file
+      # before `docker compose up` so the mount target exists; the daemon
+      # then overwrites it atomically every 10 s. Helpers in
+      # sygen_bot.api.rest_routes prefer this over container-local psutil.
+      - /srv/sygen/host_metrics.json:/data/host_metrics.json:ro
     environment:
       - SYGEN_HOME=/data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

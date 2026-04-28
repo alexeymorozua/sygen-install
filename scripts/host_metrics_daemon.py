@@ -72,9 +72,18 @@ def _ram_used_macos() -> int:
 
 
 def _disk_used_macos() -> int:
-    """Host disk used in bytes via `df -k /` (1024-byte blocks)."""
+    """Host disk used in bytes.
+
+    On modern macOS (APFS) the boot volume is split into a sealed read-only
+    system volume mounted at ``/`` (~12 GB) and a writable data volume at
+    ``/System/Volumes/Data`` (where /Users lives — typically hundreds of GB).
+    The user-meaningful "disk used" is the data volume; ``df /`` would only
+    report system files. Fall back to ``/`` if the Data path is missing
+    (Intel Macs on older macOS, or unusual setups).
+    """
+    target = "/System/Volumes/Data" if os.path.exists("/System/Volumes/Data") else "/"
     out = subprocess.run(
-        ["/bin/df", "-k", "/"], capture_output=True, text=True, timeout=5,
+        ["/bin/df", "-k", target], capture_output=True, text=True, timeout=5,
     ).stdout
     lines = out.strip().splitlines()
     if len(lines) < 2:

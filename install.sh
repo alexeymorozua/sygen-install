@@ -643,12 +643,58 @@ else
         ln -sf "$BREW_COMPOSE_PLUGIN" "$HOME/.docker/cli-plugins/docker-compose"
     fi
 
+    # Detect host CPU/RAM/disk so Colima can size itself to the box and
+    # so the core agent can report host-true metrics on the dashboard
+    # (psutil inside a container otherwise reports VM resources, e.g.
+    # "4 cores · aarch64 · 8 GB" on an M4 with 32 GB).
+    HOST_CPU="$(/usr/sbin/sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+    HOST_RAM_BYTES="$(/usr/sbin/sysctl -n hw.memsize 2>/dev/null || echo 0)"
+    HOST_RAM_GB=$(( HOST_RAM_BYTES / 1024 / 1024 / 1024 ))
+    HOST_CPU_MODEL="$(/usr/sbin/sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
+    # df -k returns 1024-byte blocks; convert to bytes via *1024.
+    HOST_DISK_TOTAL_KB="$(df -k / 2>/dev/null | awk 'NR==2 {print $2}')"
+    HOST_DISK_TOTAL_BYTES=$(( ${HOST_DISK_TOTAL_KB:-0} * 1024 ))
+    HOST_DISK_TOTAL_GB=$(( HOST_DISK_TOTAL_BYTES / 1024 / 1024 / 1024 ))
+
+    # Colima sizing — give the VM ~85% of host RAM (operator wants "all
+    # resources"; we leave a small reserve so macOS itself doesn't swap)
+    # and a generous disk cap that's bounded by what the host actually
+    # has free. Falls back to install.sh's old defaults on detection
+    # failure so a weird host doesn't brick the install.
+    COLIMA_CPU="${HOST_CPU}"
+    if [ "$HOST_RAM_GB" -gt 0 ]; then
+        COLIMA_RAM=$(( HOST_RAM_GB * 85 / 100 ))
+        [ "$COLIMA_RAM" -lt 4 ] && COLIMA_RAM=4
+    else
+        COLIMA_RAM=8
+    fi
+    if [ "$HOST_DISK_TOTAL_GB" -gt 0 ]; then
+        # Cap at half the host disk so we don't fill the SSD; minimum 50 GB.
+        COLIMA_DISK=$(( HOST_DISK_TOTAL_GB / 2 ))
+        [ "$COLIMA_DISK" -lt 50 ] && COLIMA_DISK=50
+        [ "$COLIMA_DISK" -gt 500 ] && COLIMA_DISK=500
+    else
+        COLIMA_DISK=50
+    fi
+
     if ! colima status >/dev/null 2>&1; then
-        log "macOS: starting Colima (4 CPU / 8 GB RAM / 50 GB disk)"
-        colima start --cpu 4 --memory 8 --disk 50
+        log "macOS: starting Colima (${COLIMA_CPU} CPU / ${COLIMA_RAM} GB RAM / ${COLIMA_DISK} GB disk; host: ${HOST_CPU_MODEL}, ${HOST_RAM_GB} GB, ${HOST_DISK_TOTAL_GB} GB)"
+        colima start --cpu "$COLIMA_CPU" --memory "$COLIMA_RAM" --disk "$COLIMA_DISK"
     else
         log "macOS: Colima already running"
     fi
+
+    # Persist host-true metrics in .env so docker-compose can pass them
+    # to sygen-core as env vars. Core's _get_cpu_count/_get_cpu_model/
+    # _get_*_bytes helpers prefer the SYGEN_HOST_* env vars over psutil
+    # so the dashboard shows "Apple M4 · 10 cores · 32 GB" (host) instead
+    # of "aarch64 · 10 cores · 27 GB" (VM after the colima sizing above).
+    {
+        printf 'SYGEN_HOST_CPU_COUNT=%s\n' "$HOST_CPU"
+        printf 'SYGEN_HOST_CPU_MODEL=%s\n' "$HOST_CPU_MODEL"
+        printf 'SYGEN_HOST_RAM_TOTAL_BYTES=%s\n' "$HOST_RAM_BYTES"
+        printf 'SYGEN_HOST_DISK_TOTAL_BYTES=%s\n' "$HOST_DISK_TOTAL_BYTES"
+    } > /tmp/sygen-host-metrics.env
 
     if ! docker compose version >/dev/null 2>&1; then
         die "docker compose plugin missing after brew install — try: ln -sf $(brew --prefix)/lib/docker/cli-plugins/docker-compose ~/.docker/cli-plugins/docker-compose"
@@ -1319,6 +1365,13 @@ umask 077
     # baked-in default in the hook script itself.
     if [ -n "$EFFECTIVE_DNS_CHALLENGE_URL" ]; then
         echo "SYGEN_DNS_CHALLENGE_URL=$EFFECTIVE_DNS_CHALLENGE_URL"
+    fi
+    # macOS: pass host CPU/RAM/disk metadata into core so the dashboard
+    # reports host-true values instead of Colima VM resources. File was
+    # generated up in the Colima section. No-op on Linux (file absent
+    # because that branch never runs).
+    if [ -f /tmp/sygen-host-metrics.env ]; then
+        cat /tmp/sygen-host-metrics.env
     fi
 } > "$SYGEN_ROOT/.env"
 umask 022

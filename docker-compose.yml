@@ -27,6 +27,14 @@ services:
       # 501 from the apply endpoint.
       - SYGEN_UPDATER_TOKEN=${SYGEN_UPDATER_TOKEN:-}
       - SYGEN_UPDATER_URL=${SYGEN_UPDATER_URL:-http://sygen-updater:8082}
+      # Host-true CPU/RAM/disk metadata (macOS only — install.sh detects
+      # them via sysctl/df and writes to .env). On Linux these are absent
+      # and core falls back to psutil — which on Linux reports host
+      # resources directly, so no override is needed there.
+      - SYGEN_HOST_CPU_COUNT=${SYGEN_HOST_CPU_COUNT:-}
+      - SYGEN_HOST_CPU_MODEL=${SYGEN_HOST_CPU_MODEL:-}
+      - SYGEN_HOST_RAM_TOTAL_BYTES=${SYGEN_HOST_RAM_TOTAL_BYTES:-}
+      - SYGEN_HOST_DISK_TOTAL_BYTES=${SYGEN_HOST_DISK_TOTAL_BYTES:-}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:

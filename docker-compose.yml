@@ -50,26 +50,15 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
 
-  # Polls GHCR every 30 min for new image digests on labeled containers
-  # (--label-enable scopes this to `com.centurylinklabs.watchtower.enable=true`).
-  # --monitor-only means Watchtower never applies updates on its own — it only
-  # detects them. The sygen-updater sidecar + admin UI drive user-approved
-  # apply, so an in-flight session doesn't get killed mid-work.
-  watchtower:
-    image: containrrr/watchtower:latest
-    container_name: sygen-watchtower
-    restart: unless-stopped
-    command: --label-enable --monitor-only --interval 1800
-    environment:
-      - TZ=UTC
-      # No DOCKER_API_VERSION pin — modern Watchtower (1.7+) negotiates the
-      # API version with the daemon at startup. The previous 1.40 pin was
-      # added when Watchtower defaulted to 1.25 and Docker 29 dropped that;
-      # but Colima 0.10+ ships Engine 27 which REJECTS API <1.44, so the
-      # pin actively breaks updates now. Bare default = pick the highest
-      # mutually supported version.
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+  # NOTE: Watchtower removed. It only ran in --monitor-only mode and
+  # duplicated sygen-updater's "poll GHCR every 30 min" job — but, unlike
+  # the updater, it had no path into our admin/iOS apply flow, so it just
+  # logged what the updater was already publishing to /api/system/updates.
+  # On Colima 0.10+ it also restart-looped because of Watchtower's bundled
+  # docker-cli vs Engine 27's API floor. Net: noise in `docker ps` with
+  # zero functional benefit. The labeled containers above keep the
+  # `watchtower.enable=true` label so a future re-introduction is one
+  # docker-compose service away if we ever need it.
 
   # Updater sidecar — does what Watchtower intentionally doesn't: actually
   # pull and recreate the core/admin containers on demand. Core exposes

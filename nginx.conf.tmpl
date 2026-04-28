@@ -18,8 +18,10 @@ server {
 
     server_name __FQDN__;
 
-    ssl_certificate     /etc/letsencrypt/live/__FQDN__/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/__FQDN__/privkey.pem;
+    # __CERT_DIR__ is substituted by install.sh — /etc/letsencrypt on Linux,
+    # $SYGEN_ROOT/letsencrypt on macOS public-domain mode.
+    ssl_certificate     __CERT_DIR__/live/__FQDN__/fullchain.pem;
+    ssl_certificate_key __CERT_DIR__/live/__FQDN__/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
 

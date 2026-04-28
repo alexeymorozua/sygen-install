@@ -1321,18 +1321,24 @@ if [ $LOCAL_MODE -eq 1 ]; then
     STAGE="smoke"
     log "macOS: smoke-testing endpoints (admin :${SYGEN_ADMIN_PORT}, core :8081)"
     smoke_ok=0
+    # NOTE: -f turns 4xx/5xx into curl-exit-1, which then triggers the
+    # `|| echo 000` branch — and curl has ALREADY printed the status code
+    # to stdout via -w, so the captured value becomes "401000" / "404000".
+    # That broke the case-match on perfectly healthy services. Drop -f
+    # so HTTP statuses go through unchanged; the OR-fallback only fires
+    # on actual connect failures (where -w produces nothing).
     for i in $(seq 1 30); do
         admin_ok=0
         core_ok=0
         # Admin Next server returns 200 on /, but during boot it may 404
         # /_next assets — accept any non-5xx as "alive".
-        admin_code=$(curl -fsS -o /dev/null -w '%{http_code}' \
+        admin_code=$(curl -sS -o /dev/null -w '%{http_code}' \
             "http://localhost:${SYGEN_ADMIN_PORT}" 2>/dev/null || echo "000")
         case "$admin_code" in 200|301|302|404) admin_ok=1 ;; esac
         # Core /api/system/status is unauthenticated-discoverable: returns
         # 200 if you have a token, 401 otherwise. Both prove the server
         # is up and routing — only a connect failure is a smoke-test fail.
-        core_code=$(curl -fsS -o /dev/null -w '%{http_code}' \
+        core_code=$(curl -sS -o /dev/null -w '%{http_code}' \
             "http://localhost:8081/api/system/status" 2>/dev/null || echo "000")
         case "$core_code" in 200|401|403) core_ok=1 ;; esac
         if [ "$admin_ok" -eq 1 ] && [ "$core_ok" -eq 1 ]; then
@@ -1357,7 +1363,10 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$SELF_HOSTED_SUBMODE" != "tailscale" ]; then
     log "Configuring nginx vhost for $FQDN"
     curl -fsSL -o /tmp/sygen.nginx.tmpl "$BASE_URL/nginx.conf.tmpl" \
         || die "could not fetch nginx.conf.tmpl"
-    sed "s/__FQDN__/$FQDN/g" /tmp/sygen.nginx.tmpl > "/etc/nginx/sites-available/sygen"
+    sed \
+        -e "s/__FQDN__/$FQDN/g" \
+        -e "s|__CERT_DIR__|${CERTBOT_LIVE_DIR}|g" \
+        /tmp/sygen.nginx.tmpl > "/etc/nginx/sites-available/sygen"
     ln -sf "/etc/nginx/sites-available/sygen" /etc/nginx/sites-enabled/sygen
     rm -f /etc/nginx/sites-enabled/default
     nginx -t
@@ -1379,10 +1388,13 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     log "Configuring brew nginx vhost for $FQDN at $NGINX_CONF_DIR/sygen.conf"
     curl -fsSL -o /tmp/sygen.nginx.tmpl "$BASE_URL/nginx.conf.tmpl" \
         || die "could not fetch nginx.conf.tmpl"
-    # Substitute __FQDN__ AND remap the admin upstream from :3000 to the
-    # mac-side host port chosen earlier (default 8080). Core stays on :8081.
+    # Substitute __FQDN__, the cert dir (Linux: /etc/letsencrypt;
+    # macOS-publicdomain: $SYGEN_ROOT/letsencrypt), and remap the admin
+    # upstream from :3000 to the mac-side host port chosen earlier
+    # (default 8080). Core stays on :8081.
     sed \
         -e "s/__FQDN__/$FQDN/g" \
+        -e "s|__CERT_DIR__|${CERTBOT_LIVE_DIR}|g" \
         -e "s|http://127.0.0.1:3000|http://127.0.0.1:${SYGEN_ADMIN_PORT}|g" \
         /tmp/sygen.nginx.tmpl \
         | $SUDO tee "$NGINX_CONF_DIR/sygen.conf" >/dev/null

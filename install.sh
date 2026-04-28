@@ -203,9 +203,14 @@ _release_and_die() {
             "https://install.${DOMAIN}/api/release" >/dev/null 2>&1 || true
     fi
     if [ -n "${FQDN:-}" ]; then
-        rm -rf "/etc/letsencrypt/live/$FQDN" \
-               "/etc/letsencrypt/archive/$FQDN" \
-               "/etc/letsencrypt/renewal/$FQDN.conf" 2>/dev/null || true
+        # CERTBOT_LIVE_DIR defaults to /etc/letsencrypt; macOS publicdomain
+        # mode points it at $SYGEN_ROOT/letsencrypt instead. Use the live
+        # value so we don't try to rm -rf a path that doesn't exist on the
+        # other OS (harmless but noisy in dry-runs).
+        local le_root="${CERTBOT_LIVE_DIR:-/etc/letsencrypt}"
+        rm -rf "$le_root/live/$FQDN" \
+               "$le_root/archive/$FQDN" \
+               "$le_root/renewal/$FQDN.conf" 2>/dev/null || true
     fi
     if [ "$JSON_OUTPUT" = "1" ] && [ "$JSON_DONE" = "0" ]; then
         JSON_DONE=1
@@ -883,15 +888,26 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     needs_cert=1
 fi
 
-# Pick a sudo wrapper + certbot binary path that works on both Linux and
-# brew-on-macOS. Both default to no-op + plain "certbot" on Linux/root.
+# Pick a sudo wrapper + certbot binary path + storage layout for both
+# Linux and brew-on-macOS. Linux runs install.sh as root and writes the
+# hooks/cert state into the standard system paths. macOS in non-TTY SSH
+# can't prompt for sudo, so we keep cert state inside SYGEN_ROOT (user-
+# writable) and skip sudo entirely. Functionally identical from certbot's
+# point of view — it just reads the dirs we hand it via --config-dir &
+# friends.
 SUDO=""
 CERTBOT_BIN="certbot"
+ACME_HOOK_DIR="/usr/local/sbin"
+CERTBOT_CONFIG_DIR=""
+CERTBOT_LIVE_DIR="/etc/letsencrypt"
 if [ "$needs_cert" -eq 1 ] && [ $LOCAL_MODE -eq 1 ]; then
-    SUDO="sudo"
     if [ -x "$(brew --prefix 2>/dev/null)/bin/certbot" ]; then
         CERTBOT_BIN="$(brew --prefix)/bin/certbot"
     fi
+    # macOS: hooks + cert state in user-space so certbot needs no sudo.
+    ACME_HOOK_DIR="$SYGEN_ROOT/acme-hooks"
+    CERTBOT_CONFIG_DIR="$SYGEN_ROOT/letsencrypt"
+    CERTBOT_LIVE_DIR="$CERTBOT_CONFIG_DIR"
 fi
 
 if [ "$needs_cert" -eq 1 ]; then
@@ -899,10 +915,10 @@ if [ "$needs_cert" -eq 1 ]; then
 
     if [ "$AUTO_MODE" -eq 1 ]; then
         # Hooks must exist before any cert renewal too — install once,
-        # certbot.timer reuses them on every renew.
+        # certbot.timer / re-runs reuse them on every renew.
         log "Installing ACME DNS-01 manual hooks (Worker-mediated)"
-        $SUDO mkdir -p /usr/local/sbin
-        $SUDO tee /usr/local/sbin/sygen-acme-auth-hook.sh >/dev/null <<HOOK
+        $SUDO mkdir -p "$ACME_HOOK_DIR"
+        $SUDO tee "$ACME_HOOK_DIR/sygen-acme-auth-hook.sh" >/dev/null <<HOOK
 #!/usr/bin/env bash
 # Sygen ACME DNS-01 auth hook — POSTs the TXT challenge to the Worker.
 # Invoked by certbot --manual-auth-hook with CERTBOT_DOMAIN + CERTBOT_VALIDATION
@@ -939,9 +955,9 @@ curl -fsS --ipv4 -X POST -H "Content-Type: application/json" \\
 # CF is global within seconds; 20s is the same belt LE itself uses.
 sleep 20
 HOOK
-        $SUDO chmod 0755 /usr/local/sbin/sygen-acme-auth-hook.sh
+        $SUDO chmod 0755 "$ACME_HOOK_DIR/sygen-acme-auth-hook.sh"
 
-        $SUDO tee /usr/local/sbin/sygen-acme-cleanup-hook.sh >/dev/null <<HOOK
+        $SUDO tee "$ACME_HOOK_DIR/sygen-acme-cleanup-hook.sh" >/dev/null <<HOOK
 #!/usr/bin/env bash
 # Sygen ACME DNS-01 cleanup hook — DELETEs the challenge TXT via the Worker.
 # Best-effort: an error here doesn't fail the cert (record will be swept
@@ -975,12 +991,20 @@ curl -fsS --ipv4 -X DELETE -H "Content-Type: application/json" \\
 
 exit 0
 HOOK
-        $SUDO chmod 0755 /usr/local/sbin/sygen-acme-cleanup-hook.sh
+        $SUDO chmod 0755 "$ACME_HOOK_DIR/sygen-acme-cleanup-hook.sh"
+    fi
+
+    # Build --config-dir/--work-dir/--logs-dir overrides for macOS so
+    # certbot stays in user-space; empty on Linux (default /etc/letsencrypt).
+    CERTBOT_DIR_ARGS=""
+    if [ -n "$CERTBOT_CONFIG_DIR" ]; then
+        CERTBOT_DIR_ARGS="--config-dir $CERTBOT_CONFIG_DIR --work-dir ${CERTBOT_CONFIG_DIR}-work --logs-dir ${CERTBOT_CONFIG_DIR}-logs"
+        mkdir -p "$CERTBOT_CONFIG_DIR" "${CERTBOT_CONFIG_DIR}-work" "${CERTBOT_CONFIG_DIR}-logs"
     fi
 
     if [ "$AUTO_MODE_REUSE" -eq 1 ]; then
         log "Auto-mode re-run: cert already present, skipping certbot"
-    elif $SUDO test -f "/etc/letsencrypt/live/$FQDN/fullchain.pem"; then
+    elif $SUDO test -f "$CERTBOT_LIVE_DIR/live/$FQDN/fullchain.pem"; then
         log "  cert already present, skipping"
     elif [ "$AUTO_MODE" -eq 1 ]; then
         # Cert issuance cascade (auto-mode only):
@@ -998,14 +1022,16 @@ HOOK
             # Args: <ca-name> [extra certbot args...]
             local ca_name="$1"; shift
             log "  attempt: $ca_name"
+            # shellcheck disable=SC2086 # CERTBOT_DIR_ARGS expansion is intentional
             $SUDO env \
                 SYGEN_INSTALL_TOKEN="$SYGEN_INSTALL_TOKEN" \
                 SYGEN_DNS_CHALLENGE_URL="$SYGEN_DNS_CHALLENGE_URL" \
                 "$CERTBOT_BIN" certonly --non-interactive --agree-tos \
+                $CERTBOT_DIR_ARGS \
                 --preferred-challenges dns \
                 --manual --manual-public-ip-logging-ok \
-                --manual-auth-hook /usr/local/sbin/sygen-acme-auth-hook.sh \
-                --manual-cleanup-hook /usr/local/sbin/sygen-acme-cleanup-hook.sh \
+                --manual-auth-hook "$ACME_HOOK_DIR/sygen-acme-auth-hook.sh" \
+                --manual-cleanup-hook "$ACME_HOOK_DIR/sygen-acme-cleanup-hook.sh" \
                 -d "$FQDN" \
                 "$@"
         }
@@ -1055,16 +1081,21 @@ HOOK
         fi
     else
         log "Obtaining Let's Encrypt cert via Cloudflare DNS-01 (custom mode)"
-        mkdir -p /etc/letsencrypt/sygen
+        # macOS keeps everything inside SYGEN_ROOT (no sudo); Linux uses
+        # the standard /etc/letsencrypt path under root.
+        CF_INI_DIR="${CERTBOT_LIVE_DIR}/sygen"
+        $SUDO mkdir -p "$CF_INI_DIR"
         umask 077
-        cat > /etc/letsencrypt/sygen/cloudflare.ini <<CF_INI
+        $SUDO tee "$CF_INI_DIR/cloudflare.ini" >/dev/null <<CF_INI
 dns_cloudflare_api_token = $CF_API_TOKEN
 CF_INI
         umask 022
-        certbot certonly --non-interactive --agree-tos \
+        # shellcheck disable=SC2086
+        $SUDO "$CERTBOT_BIN" certonly --non-interactive --agree-tos \
+            $CERTBOT_DIR_ARGS \
             --email "admin@$DOMAIN" \
             --dns-cloudflare \
-            --dns-cloudflare-credentials /etc/letsencrypt/sygen/cloudflare.ini \
+            --dns-cloudflare-credentials "$CF_INI_DIR/cloudflare.ini" \
             --dns-cloudflare-propagation-seconds 20 \
             -d "$FQDN" || die "certbot failed"
     fi

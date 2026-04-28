@@ -1007,6 +1007,9 @@ HOOK
     elif $SUDO test -f "$CERTBOT_LIVE_DIR/live/$FQDN/fullchain.pem"; then
         log "  cert already present, skipping"
     elif [ "$AUTO_MODE" -eq 1 ]; then
+        # Log the certbot version up front so any CLI-argument failure
+        # (Round 7) is debuggable from the install log without re-running.
+        log "  certbot version: $($SUDO "$CERTBOT_BIN" --version 2>&1 | head -n1)"
         # Cert issuance cascade (auto-mode only):
         #   1. Let's Encrypt (primary) — 50 cert/week per registered domain,
         #      override-able to 1000+. Worker-mediated DNS-01 hooks.
@@ -1018,22 +1021,54 @@ HOOK
         # slot on cert-fail) and emit a structured JSON error with
         # `tls_rate_limited` code so iOS/web wizards can show a
         # meaningful retry message.
+        # Capture certbot stderr so we can tell a CLI-argument failure
+        # (the same on every CA — installer bug, not rate limit) apart
+        # from genuine CA refusals. Without this distinction the cascade
+        # would hit all three CAs at CLI-parse speed and emit a bogus
+        # `tls_rate_limited` that asks the user to wait an hour for a
+        # bug they can't fix from the wizard.
+        CERT_STDERR=""
         cert_try() {
             # Args: <ca-name> [extra certbot args...]
             local ca_name="$1"; shift
             log "  attempt: $ca_name"
+            local stderr_file
+            stderr_file="$(mktemp -t sygen-certbot-XXXXXX)"
             # shellcheck disable=SC2086 # CERTBOT_DIR_ARGS expansion is intentional
+            #
+            # NOTE: --manual-public-ip-logging-ok was deprecated in
+            # certbot 1.x and removed entirely in 5.x. Do NOT add it
+            # back without checking certbot --version on the smallest
+            # supported distro. Manual-hook public-IP logging is on by
+            # default since 2.x and there's no replacement flag.
             $SUDO env \
                 SYGEN_INSTALL_TOKEN="$SYGEN_INSTALL_TOKEN" \
                 SYGEN_DNS_CHALLENGE_URL="$SYGEN_DNS_CHALLENGE_URL" \
                 "$CERTBOT_BIN" certonly --non-interactive --agree-tos \
                 $CERTBOT_DIR_ARGS \
                 --preferred-challenges dns \
-                --manual --manual-public-ip-logging-ok \
+                --manual \
                 --manual-auth-hook "$ACME_HOOK_DIR/sygen-acme-auth-hook.sh" \
                 --manual-cleanup-hook "$ACME_HOOK_DIR/sygen-acme-cleanup-hook.sh" \
                 -d "$FQDN" \
-                "$@"
+                "$@" 2> >(tee "$stderr_file" >&2)
+            local rc=$?
+            CERT_STDERR="$(head -n5 "$stderr_file" 2>/dev/null | tr '\n' ' ')"
+            rm -f "$stderr_file"
+            return $rc
+        }
+
+        # Detect installer-side breakage: certbot exits non-zero with an
+        # "unrecognized arguments"/"argument" error message before talking
+        # to any CA. In that case all three CA attempts will fail the
+        # exact same way at CLI-parse speed; abort the cascade with an
+        # honest error so the user doesn't get told to wait an hour.
+        cert_was_cli_fail() {
+            case "$CERT_STDERR" in
+                *"unrecognized arguments"*) return 0 ;;
+                *"error: argument"*)        return 0 ;;
+            esac
+            return 1
         }
 
         # Try a fallback CA via Worker /api/eab. Returns 0 on success,
@@ -1065,15 +1100,24 @@ HOOK
         log "Obtaining TLS cert via Worker-mediated DNS-01"
         if cert_try "letsencrypt" --email "admin@$DOMAIN"; then
             log "  ok: letsencrypt"
+        elif cert_was_cli_fail; then
+            # Same args go to every CA, so trying ZeroSSL/GTS would fail
+            # identically and at the same speed — looks like rate-limit
+            # but isn't. Bail with an honest cause.
+            _release_and_die "installer_misconfigured" "certbot rejected its own arguments before reaching any CA: ${CERT_STDERR:-unknown}. This is an install.sh bug, not a CA issue — update the installer and retry."
         else
             warn "  letsencrypt failed — trying ZeroSSL"
             STAGE="cert-fallback"
             if try_eab_ca "zerossl"; then
                 log "  ok: zerossl (fallback #1)"
+            elif cert_was_cli_fail; then
+                _release_and_die "installer_misconfigured" "certbot rejected its own arguments: ${CERT_STDERR:-unknown}. Installer bug — retry pointless."
             else
                 warn "  zerossl failed — trying Google Trust Services"
                 if try_eab_ca "gts"; then
                     log "  ok: gts (fallback #2)"
+                elif cert_was_cli_fail; then
+                    _release_and_die "installer_misconfigured" "certbot rejected its own arguments: ${CERT_STDERR:-unknown}. Installer bug — retry pointless."
                 else
                     _release_and_die "tls_rate_limited" "All three CAs (Let's Encrypt, ZeroSSL, Google Trust Services) refused to issue cert. Most likely rate-limited everywhere; less likely a DNS-01 misconfiguration on our side. Try again in 1 hour."
                 fi

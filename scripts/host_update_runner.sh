@@ -150,6 +150,8 @@ process_trigger() {
 
     LOG_TEXT=""
     OK="false"
+    TOP_ERROR=""
+    FAILED_JSON="[]"
     if [ -z "$PACKAGES" ]; then
         log "No packages in scope — nothing to upgrade"
         LOG_TEXT="no allowlisted packages outdated"
@@ -157,15 +159,59 @@ process_trigger() {
     else
         log "Running: brew upgrade $PACKAGES"
         TMP_LOG="$(mktemp -t sygen_brew_log.XXXXXX 2>/dev/null || mktemp 2>/dev/null || echo "/tmp/sygen_brew_log.$$")"
-        # shellcheck disable=SC2086 — we want word-splitting on the
-        # space-separated package list (already allowlist-validated).
-        if /usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" upgrade $PACKAGES \
+        # Build positional args from the (allowlist-validated) package
+        # list so brew never sees a single string argument that could be
+        # split on shell metacharacters. Defence-in-depth even if the
+        # allowlist stays clean.
+        set --
+        for p in $PACKAGES; do
+            set -- "$@" "$p"
+        done
+        if /usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" upgrade "$@" \
                 > "$TMP_LOG" 2>&1; then
             OK="true"
         else
             OK="false"
         fi
         LOG_TEXT="$(tail -c 32768 "$TMP_LOG" 2>/dev/null || true)"
+
+        # Parse per-package failures from the log so the modal can show
+        # which entries broke. Patterns we look for (brew is consistent
+        # but verbose):
+        #   "Error: <pkg>: ..."
+        #   "Error: Failure while executing; `... <pkg> ...` exited"
+        #   "<pkg> failed to install"
+        if [ "$OK" = "false" ] && [ -n "$JQ_BIN" ] && [ -f "$TMP_LOG" ]; then
+            FAILED_JSON_TMP="["
+            FIRST=1
+            for p in $PACKAGES; do
+                ERR_LINE="$(grep -E "Error: ($p:|.*$p.* failed to install|Failure.*$p)" "$TMP_LOG" 2>/dev/null | head -n 1 || true)"
+                if [ -n "$ERR_LINE" ]; then
+                    if [ $FIRST -eq 0 ]; then
+                        FAILED_JSON_TMP="$FAILED_JSON_TMP,"
+                    fi
+                    FIRST=0
+                    ENTRY="$("$JQ_BIN" -n --arg name "$p" --arg error "$ERR_LINE" '{name:$name, error:$error}' 2>/dev/null || echo '')"
+                    if [ -n "$ENTRY" ]; then
+                        FAILED_JSON_TMP="$FAILED_JSON_TMP$ENTRY"
+                    fi
+                fi
+            done
+            FAILED_JSON_TMP="$FAILED_JSON_TMP]"
+            # Validate the assembled JSON via jq; fall back to [] on parse error.
+            FAILED_JSON="$(printf '%s' "$FAILED_JSON_TMP" | "$JQ_BIN" -c . 2>/dev/null || echo '[]')"
+
+            FAILED_COUNT="$(printf '%s' "$FAILED_JSON" | "$JQ_BIN" 'length' 2>/dev/null || echo 0)"
+            if [ "${FAILED_COUNT:-0}" -eq 0 ]; then
+                # Overall failure with no per-package detail → surface a
+                # top-level reason from the tail of the log.
+                TOP_ERROR="$(printf '%s' "$LOG_TEXT" | grep -E '^Error:' | tail -n 1 || true)"
+                if [ -z "$TOP_ERROR" ]; then
+                    TOP_ERROR="brew upgrade failed (see log)"
+                fi
+            fi
+        fi
+
         rm -f "$TMP_LOG" 2>/dev/null || true
 
         # Special-case: if Colima was upgraded, restart it cleanly so
@@ -184,14 +230,19 @@ process_trigger() {
         esac
     fi
 
-    # Refresh the check file so the UI sees an empty list once the
-    # upgrade succeeded. Best-effort.
+    # Always refresh state.json so the banner doesn't stick if the
+    # standalone check daemon is missing. Write a minimal
+    # "nothing-outdated" stub first; if the proper check script is
+    # available it will overwrite with the real list.
+    STATE_FILE="$STATE_DIR/state.json"
+    NOW_TS="$(now_utc)"
+    DEFAULT_STATE="{\"supported\":true,\"available\":false,\"count\":0,\"packages\":[],\"checked_at\":\"$NOW_TS\"}"
+    write_atomic "$STATE_FILE" "$DEFAULT_STATE"
     if [ -x "$CHECK_SCRIPT" ]; then
         "$CHECK_SCRIPT" >/dev/null 2>&1 || true
     fi
 
     REMAINING="[]"
-    STATE_FILE="$STATE_DIR/state.json"
     if [ -n "$JQ_BIN" ] && [ -f "$STATE_FILE" ]; then
         REMAINING="$("$JQ_BIN" -c '.packages // []' "$STATE_FILE" 2>/dev/null || echo '[]')"
     fi
@@ -206,16 +257,20 @@ process_trigger() {
             --argjson ok "$OK" \
             --arg packages "$PACKAGES" \
             --arg log "$LOG_TEXT" \
+            --arg top_error "$TOP_ERROR" \
+            --argjson failed "$FAILED_JSON" \
             --argjson remaining "$REMAINING" \
             '{started_at:$started_at,
               finished_at:$finished_at,
               ok:$ok,
               packages:($packages | split(" ") | map(select(. != ""))),
+              failed:$failed,
+              error:(if $top_error == "" then null else $top_error end),
               log:$log,
               remaining_packages:$remaining}' 2>/dev/null || true)"
     fi
     if [ -z "$RESULT_BODY" ]; then
-        RESULT_BODY="{\"started_at\":\"$STARTED_AT\",\"finished_at\":\"$FINISHED_AT\",\"ok\":$OK,\"log\":\"\",\"remaining_packages\":[]}"
+        RESULT_BODY="{\"started_at\":\"$STARTED_AT\",\"finished_at\":\"$FINISHED_AT\",\"ok\":$OK,\"failed\":[],\"error\":null,\"log\":\"\",\"remaining_packages\":[]}"
     fi
     write_atomic "$RESULT" "$RESULT_BODY"
 

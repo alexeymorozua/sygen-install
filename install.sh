@@ -1257,24 +1257,37 @@ if [ $LOCAL_MODE -eq 0 ]; then
         -xdev -exec chown -h 1000:1000 {} +
 fi
 
+# Pick a sensible default for instance_name. Auto-mode SUB is a meaningful
+# subdomain (e.g. yuqp3yqv.sygen.pro → "yuqp3yqv"); for everything else
+# (localhost, tailscale, custom) prefer the host's short hostname so each
+# client (admin web, iOS, future agents) shows a label that matches what
+# the operator already calls the box. Falls back to "sygen" if hostname is
+# somehow empty so we never write an empty string.
+if [ "$AUTO_MODE" -eq 1 ] && [ -n "${SUB:-}" ]; then
+    DEFAULT_INSTANCE_NAME="$SUB"
+else
+    DEFAULT_INSTANCE_NAME="$(hostname -s 2>/dev/null || true)"
+    [ -z "$DEFAULT_INSTANCE_NAME" ] && DEFAULT_INSTANCE_NAME="sygen"
+fi
+
 if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
     log "Bootstrapping config.json (api on, host 0.0.0.0, port 8081)"
     # `openssl rand -hex 32` outputs 64 hex chars on one line — no SIGPIPE
     # issues the way `tr -dc ... </dev/urandom | head -c N` has under pipefail.
     API_TOKEN=$(openssl rand -hex 32)
     JWT_SECRET=$(openssl rand -hex 32)
-    # Build with `jq -n` so any string value (SUB, CORS_ORIGIN) is JSON-escaped
-    # automatically — a heredoc would interpolate raw shell, letting a
-    # tampered FQDN inject extra keys (e.g. flip allow_public, override
-    # jwt_secret) into the bootstrap config. SUB/CORS_ORIGIN are already
-    # validated by validate_fqdn above; this is defence in depth.
+    # Build with `jq -n` so any string value (instance name, CORS_ORIGIN) is
+    # JSON-escaped automatically — a heredoc would interpolate raw shell,
+    # letting a tampered FQDN inject extra keys (e.g. flip allow_public,
+    # override jwt_secret) into the bootstrap config. The inputs are
+    # already validated above; this is defence in depth.
     jq -n \
-        --arg sub "$SUB" \
+        --arg name "$DEFAULT_INSTANCE_NAME" \
         --arg token "$API_TOKEN" \
         --arg jwt "$JWT_SECRET" \
         --arg cors "$CORS_ORIGIN" \
         '{
-            instance_name: $sub,
+            instance_name: $name,
             language: "en",
             log_level: "INFO",
             transport: "api",
@@ -1291,6 +1304,28 @@ if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
                 cors_origins: [$cors]
             }
         }' > "$SYGEN_ROOT/data/config/config.json"
+    chmod 600 "$SYGEN_ROOT/data/config/config.json"
+else
+    # Migrate older installs that pre-date instance_name. Idempotent: only
+    # writes when the field is missing OR an empty string. A user-set value
+    # (even one that differs from DEFAULT_INSTANCE_NAME) is preserved — admin
+    # web / iOS / API are the canonical edit surfaces, install.sh must never
+    # stomp them on re-run. Atomic via tmp+mv so a crash mid-write doesn't
+    # truncate the live config.
+    current_name=$(jq -r '.instance_name // ""' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || echo "")
+    if [ -z "$current_name" ]; then
+        log "Seeding instance_name=\"$DEFAULT_INSTANCE_NAME\" in existing config.json"
+        tmp_config="$SYGEN_ROOT/data/config/config.json.tmp.$$"
+        if jq --arg name "$DEFAULT_INSTANCE_NAME" \
+             '. + {instance_name: $name}' \
+             "$SYGEN_ROOT/data/config/config.json" > "$tmp_config"; then
+            chmod 600 "$tmp_config"
+            mv "$tmp_config" "$SYGEN_ROOT/data/config/config.json"
+        else
+            rm -f "$tmp_config"
+            warn "Failed to patch instance_name into config.json (jq error) — leaving as-is"
+        fi
+    fi
 fi
 
 # Preserve user-set values across re-runs of install.sh. Each call to

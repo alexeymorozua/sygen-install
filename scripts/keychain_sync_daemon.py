@@ -4,10 +4,9 @@
 Newer Claude Code CLI builds on macOS migrated their OAuth tokens out of
 ``~/.claude/.credentials.json`` and into the user's login Keychain
 (service: ``Claude Code-credentials``). The on-disk file is left as a
-fake placeholder. Sygen's Docker containers (sygen-core and the
-sandbox where sub-agents run) bind-mount that file at
-``/home/sygen/.claude/.credentials.json`` and only ever see the
-placeholder, which surfaces inside containers as "Not logged in".
+fake placeholder. Sygen's sygen-core container bind-mounts that file at
+``/home/sygen/.claude/.credentials.json`` and only ever sees the
+placeholder, which surfaces inside the container as "Not logged in".
 
 This daemon reads the keychain item and writes the JSON back to the
 file every ``--interval`` seconds (default 15 min) so the file always

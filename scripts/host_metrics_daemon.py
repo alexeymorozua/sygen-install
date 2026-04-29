@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Host metrics bridge for sygen-core (Docker on macOS Colima / Linux).
 
-Writes a JSON snapshot of the *host's* CPU%, RAM used, and disk used to a
-shared path every --interval seconds. sygen-core bind-mounts that file
-read-only at /data/host_metrics.json; helpers in rest_routes.py prefer it
-over container-local /proc/psutil values, which on macOS only see the VM.
+Writes a JSON snapshot of the *host's* CPU%, RAM (used + total), and disk
+(used + total) to a shared path every --interval seconds. sygen-core
+bind-mounts that file read-only at /data/host_metrics.json; helpers in
+rest_routes.py prefer these values over container-local /proc/psutil
+values, which on macOS only see the VM.
 
 Stdlib-only. Auto-detects macOS vs Linux. Atomic writes (tmp + rename)
 so readers never observe a half-written file.
@@ -38,14 +39,14 @@ def _cpu_percent_macos() -> float:
     return 0.0
 
 
-def _ram_used_macos() -> int:
-    """Host RAM used in bytes via vm_stat + sysctl hw.memsize."""
+def _ram_macos() -> tuple[int, int]:
+    """Host RAM (used, total) bytes via vm_stat + sysctl hw.memsize."""
     total = int(subprocess.run(
         ["/usr/sbin/sysctl", "-n", "hw.memsize"],
         capture_output=True, text=True, timeout=5,
     ).stdout.strip() or 0)
     if total <= 0:
-        return 0
+        return (0, 0)
     vm = subprocess.run(
         ["/usr/bin/vm_stat"], capture_output=True, text=True, timeout=5,
     ).stdout
@@ -68,11 +69,11 @@ def _ram_used_macos() -> int:
         elif line.startswith("Pages speculative:"):
             speculative_pages = int(line.split(":")[1].strip().rstrip("."))
     avail = (free_pages + inactive_pages + speculative_pages) * page_size
-    return max(total - avail, 0)
+    return (max(total - avail, 0), total)
 
 
-def _disk_used_macos() -> int:
-    """Host disk used in bytes.
+def _disk_macos() -> tuple[int, int]:
+    """Host disk (used, total) bytes.
 
     On modern macOS (APFS) the boot volume is split into a sealed read-only
     system volume mounted at ``/`` (~12 GB) and a writable data volume at
@@ -87,14 +88,17 @@ def _disk_used_macos() -> int:
     ).stdout
     lines = out.strip().splitlines()
     if len(lines) < 2:
-        return 0
+        return (0, 0)
     parts = lines[1].split()
-    if len(parts) < 3:
-        return 0
+    if len(parts) < 4:
+        return (0, 0)
     try:
-        return int(parts[2]) * 1024
+        # df -k columns: Filesystem  1024-blocks  Used  Available  ...
+        total = int(parts[1]) * 1024
+        used = int(parts[2]) * 1024
+        return (used, total)
     except ValueError:
-        return 0
+        return (0, 0)
 
 
 def _cpu_percent_linux(prev: list[tuple[int, int]]) -> float:
@@ -118,8 +122,8 @@ def _cpu_percent_linux(prev: list[tuple[int, int]]) -> float:
     return round((1 - d_idle / d_total) * 100, 1)
 
 
-def _ram_used_linux() -> int:
-    """Host RAM used in bytes via /proc/meminfo (MemTotal - MemAvailable)."""
+def _ram_linux() -> tuple[int, int]:
+    """Host RAM (used, total) bytes via /proc/meminfo."""
     info: dict[str, int] = {}
     with open("/proc/meminfo") as f:
         for line in f:
@@ -128,11 +132,12 @@ def _ram_used_linux() -> int:
                 info[parts[0].rstrip(":")] = int(parts[1]) * 1024  # kB → B
     total = info.get("MemTotal", 0)
     avail = info.get("MemAvailable", 0)
-    return max(total - avail, 0)
+    return (max(total - avail, 0), total)
 
 
-def _disk_used_linux() -> int:
-    return shutil.disk_usage("/").used
+def _disk_linux() -> tuple[int, int]:
+    du = shutil.disk_usage("/")
+    return (du.used, du.total)
 
 
 def _atomic_write(path: str, payload: dict) -> None:
@@ -155,19 +160,21 @@ def main() -> int:
     while True:
         try:
             if is_macos:
-                payload = {
-                    "ts": time.time(),
-                    "cpu_percent": _cpu_percent_macos(),
-                    "ram_used_bytes": _ram_used_macos(),
-                    "disk_used_bytes": _disk_used_macos(),
-                }
+                ram_used, ram_total = _ram_macos()
+                disk_used, disk_total = _disk_macos()
+                cpu_pct = _cpu_percent_macos()
             else:
-                payload = {
-                    "ts": time.time(),
-                    "cpu_percent": _cpu_percent_linux(cpu_state),
-                    "ram_used_bytes": _ram_used_linux(),
-                    "disk_used_bytes": _disk_used_linux(),
-                }
+                ram_used, ram_total = _ram_linux()
+                disk_used, disk_total = _disk_linux()
+                cpu_pct = _cpu_percent_linux(cpu_state)
+            payload = {
+                "ts": time.time(),
+                "cpu_percent": cpu_pct,
+                "ram_used_bytes": ram_used,
+                "ram_total_bytes": ram_total,
+                "disk_used_bytes": disk_used,
+                "disk_total_bytes": disk_total,
+            }
             _atomic_write(args.output, payload)
         except Exception as exc:
             print(f"host_metrics_daemon: error: {exc}", file=sys.stderr)

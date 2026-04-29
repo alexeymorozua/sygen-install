@@ -674,17 +674,23 @@ else
     HOST_DISK_TOTAL_BYTES=$(( ${HOST_DISK_TOTAL_KB:-0} * 1024 ))
     HOST_DISK_TOTAL_GB=$(( HOST_DISK_TOTAL_BYTES / 1024 / 1024 / 1024 ))
 
-    # Colima sizing — adaptive to host RAM tier (typical Mac configs).
-    # Idle baseline of Linux+Docker+sygen-core/admin/updater/sandbox is
-    # ~10-13 GB. Active workloads (RAG, video transcoding, music gen)
-    # can push to 20+ GB. Goal: leave macOS itself ≥ 8 GB free always.
+    # Colima sizing — generous allocation, agents need RAM to work.
+    # Apple Virtualization.Framework lazily commits memory pages, so the
+    # allocation here is a RESERVATION, not strict physical commitment —
+    # actual usage tracks workload. macOS idle uses 4-6 GB, so even at
+    # 85% on 32 GB we leave 5 GB free for the host UI, which Apple VF
+    # tops up dynamically when VM doesn't need its full allocation.
     #
-    #   <16 GB → die() (idle baseline alone won't fit — install refused)
-    #   16     → 50%  →  8 GB VM   (8 GB for macOS — tight but safe)
-    #   24     → 55%  → 13 GB VM   (11 GB for macOS — comfortable)
-    #   32-47  → 70%  → 22-33 GB   (~10-14 GB for macOS — Mac mini M4 sweet spot)
-    #   48-63  → 75%  → 36-47 GB   (~12-16 GB for macOS — Pro)
-    #   64+    → 80%  → 51+ GB     (~12+ GB for macOS — Studio/Ultra)
+    # Idle Linux+Docker+sygen baseline = ~10-13 GB (just to start).
+    # Active workloads (RAG indexing, video transcoding, music gen,
+    # heavy tool use) can push 20-40 GB. We want headroom for that.
+    #
+    #   <16 GB → die() (baseline alone won't fit)
+    #   16     → 65%  →  10 GB VM   (light tier, basic agents work)
+    #   24     → 75%  →  18 GB VM   (mid laptop tier)
+    #   32-47  → 85%  →  27-40 GB   (Mac mini M4 sweet spot)
+    #   48-63  → 87%  →  42-55 GB   (Pro tier)
+    #   64+    → 90%  →  58+ GB     (Studio/Ultra — agents have room)
     #
     # Disk cap stays at min(host/2, 500 GB), floor 50 GB.
     COLIMA_CPU="${HOST_CPU}"
@@ -692,20 +698,20 @@ else
         die "host has only ${HOST_RAM_GB} GB RAM — sygen requires at least 16 GB (the idle Linux+Docker+sygen baseline is ~10-13 GB and would leave macOS starving). Upgrade hardware or use a remote VPS install."
     fi
     if [ "$HOST_RAM_GB" -ge 64 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 80 / 100 ))
+        COLIMA_RAM=$(( HOST_RAM_GB * 90 / 100 ))
     elif [ "$HOST_RAM_GB" -ge 48 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 75 / 100 ))
+        COLIMA_RAM=$(( HOST_RAM_GB * 87 / 100 ))
     elif [ "$HOST_RAM_GB" -ge 32 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 70 / 100 ))
+        COLIMA_RAM=$(( HOST_RAM_GB * 85 / 100 ))
     elif [ "$HOST_RAM_GB" -ge 24 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 55 / 100 ))
+        COLIMA_RAM=$(( HOST_RAM_GB * 75 / 100 ))
     elif [ "$HOST_RAM_GB" -ge 16 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 50 / 100 ))
+        COLIMA_RAM=$(( HOST_RAM_GB * 65 / 100 ))
     else
         # Detection failed (HOST_RAM_GB=0) — pick a safe middle.
-        COLIMA_RAM=10
+        COLIMA_RAM=12
     fi
-    [ "$COLIMA_RAM" -lt 8 ] && COLIMA_RAM=8
+    [ "$COLIMA_RAM" -lt 10 ] && COLIMA_RAM=10
     if [ "$HOST_DISK_TOTAL_GB" -gt 0 ]; then
         # Cap at half the host disk so we don't fill the SSD; minimum 50 GB.
         COLIMA_DISK=$(( HOST_DISK_TOTAL_GB / 2 ))

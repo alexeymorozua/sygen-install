@@ -1681,6 +1681,73 @@ if [ $LOCAL_MODE -eq 1 ]; then
         "$SYGEN_ROOT/bin/host_update_runner.sh"
 fi
 
+# ---------- 5e. Whisper.cpp (out-of-box voice transcription) ----------
+# Bundled so a fresh install can transcribe voice messages without any
+# additional setup. macOS uses brew (which carries upgrades through the
+# host_updates allowlist); Linux falls back to apt where available and
+# warns otherwise — operators can install manually later.
+#
+# The ggml-small model (~466 MB) is the sweet spot for quality / size /
+# RAM on the boxes Sygen actually ships on. Advanced users can swap to a
+# different model via config.json `transcription.model`.
+STAGE="whisper"
+WHISPER_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+if [ "$OS" = "Darwin" ]; then
+    log "Installing whisper.cpp (out-of-box voice transcription)"
+    if brew list whisper-cpp >/dev/null 2>&1; then
+        log "whisper-cpp already installed"
+    else
+        brew install whisper-cpp \
+            || warn "brew install whisper-cpp failed — voice transcription will not work until installed"
+    fi
+
+    WHISPER_MODEL_DIR="$HOME/.local/share/whisper-cpp/models"
+    WHISPER_MODEL_PATH="$WHISPER_MODEL_DIR/ggml-small.bin"
+    if [ -f "$WHISPER_MODEL_PATH" ]; then
+        log "ggml-small model already present"
+    else
+        log "Downloading ggml-small.bin (~466 MB) → $WHISPER_MODEL_PATH"
+        mkdir -p "$WHISPER_MODEL_DIR"
+        if curl -fL --progress-bar -o "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_URL"; then
+            mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
+        else
+            rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
+            warn "ggml-small download failed — re-run: curl -fL -o $WHISPER_MODEL_PATH $WHISPER_MODEL_URL"
+        fi
+    fi
+elif [ "$OS" = "Linux" ]; then
+    log "Installing whisper.cpp (out-of-box voice transcription)"
+    if command -v whisper-cli >/dev/null 2>&1 || command -v whisper-cpp >/dev/null 2>&1; then
+        log "whisper.cpp already installed"
+    elif command -v apt-get >/dev/null 2>&1; then
+        # Debian/Ubuntu: package is `whisper.cpp` in trixie+/24.10+ universe.
+        # Older releases don't carry it — warn and continue.
+        if apt_retry install -y -qq whisper-cpp 2>/dev/null \
+                || apt_retry install -y -qq whisper.cpp 2>/dev/null; then
+            log "whisper.cpp installed via apt"
+        else
+            warn "whisper.cpp not available via apt on this release — voice transcription disabled until manual install"
+        fi
+    else
+        warn "Unsupported Linux package manager — install whisper.cpp manually for voice transcription"
+    fi
+
+    WHISPER_MODEL_DIR="${SYGEN_ROOT:-/srv/sygen}/whisper-models"
+    WHISPER_MODEL_PATH="$WHISPER_MODEL_DIR/ggml-small.bin"
+    mkdir -p "$WHISPER_MODEL_DIR"
+    if [ -f "$WHISPER_MODEL_PATH" ]; then
+        log "ggml-small model already present"
+    else
+        log "Downloading ggml-small.bin (~466 MB) → $WHISPER_MODEL_PATH"
+        if curl -fL --progress-bar -o "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_URL"; then
+            mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
+        else
+            rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
+            warn "ggml-small download failed — re-run: curl -fL -o $WHISPER_MODEL_PATH $WHISPER_MODEL_URL"
+        fi
+    fi
+fi
+
 # ---------- 6. Start stack ----------
 log "Pulling images"
 docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env" pull

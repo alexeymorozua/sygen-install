@@ -67,7 +67,7 @@ RUNNING="$STATE_DIR/running"
 RESULT="$STATE_DIR/result.json"
 CHECK_SCRIPT="$SYGEN_ROOT/bin/host_updates_check.sh"
 
-ALLOWLIST="${SYGEN_HOST_PKGS:-colima nginx certbot docker jq openssl tailscale}"
+ALLOWLIST="${SYGEN_HOST_PKGS:-colima nginx certbot docker jq openssl tailscale whisper-cpp}"
 
 now_utc() {
     date -u '+%Y-%m-%dT%H:%M:%SZ'

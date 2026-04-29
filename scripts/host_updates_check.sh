@@ -70,7 +70,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 # Allowlist of packages install.sh actually installs (or knows how to
 # upgrade safely). Keep in sync with the same list in
 # sygen_bot/api/rest_routes.py — a wider set on either side leaks scope.
-ALLOWLIST="${SYGEN_HOST_PKGS:-colima nginx certbot docker jq openssl tailscale}"
+ALLOWLIST="${SYGEN_HOST_PKGS:-colima nginx certbot docker jq openssl tailscale whisper-cpp}"
 
 now_utc() {
     # POSIX-portable ISO 8601 UTC timestamp (no fractional seconds).

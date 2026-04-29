@@ -223,6 +223,22 @@ _release_and_die() {
     die "$err_code: $details"
 }
 
+# apt-get retry on lock contention. unattended-upgrades or the cloud-init
+# package run during the first 5 min of a freshly-provisioned VPS holds
+# /var/lib/dpkg/lock-frontend; apt-get then aborts with "Could not get
+# lock". Wrap every apt-get call so we wait the upgrade out instead of
+# bailing the whole install. ~12 attempts × 5 s = 1 min total budget.
+apt_retry() {
+    local i=0
+    while [ $i -lt 12 ]; do
+        if apt-get "$@"; then return 0; fi
+        i=$((i + 1))
+        warn "apt-get failed (attempt $i/12) — likely dpkg lock; retrying in 5 s"
+        sleep 5
+    done
+    die "apt-get failed after 60 s — likely locked by unattended-upgrades. Try: sudo killall apt-get apt; wait 5 min and re-run."
+}
+
 # Catch unexpected non-zero exits (set -e failures from commands that
 # don't go through die()) so JSON consumers always get one final line.
 on_exit() {
@@ -466,8 +482,8 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     if ! command -v tailscale >/dev/null 2>&1; then
         log "Installing Tailscale via official apt repo"
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -y -qq curl gnupg
+        apt_retry update -qq
+        apt_retry install -y -qq curl gnupg
         # Detect distro codename for the Tailscale repo URL (bookworm/bullseye/
         # noble/jammy/etc). Falls back to bookworm — works for current Debian
         # stable + Ubuntu LTS; Tailscale ships universal packages.
@@ -480,8 +496,8 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
         curl -fsSL "https://pkgs.tailscale.com/stable/${TS_DISTRO}/${TS_CODENAME}.tailscale-keyring.list" \
             -o /etc/apt/sources.list.d/tailscale.list \
             || die "Failed to fetch Tailscale apt sources list"
-        apt-get update -qq
-        apt-get install -y -qq tailscale
+        apt_retry update -qq
+        apt_retry install -y -qq tailscale
         die "Tailscale installed. Run 'sudo tailscale up' to log in to your tailnet, then re-run this installer."
     fi
 
@@ -553,15 +569,17 @@ STAGE="deps"
 if [ $LOCAL_MODE -eq 0 ]; then
     log "Installing system packages"
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
+    apt_retry update -qq
     # Base packages always needed. nginx + certbot ONLY for paths that
     # terminate TLS themselves (auto-mode + custom-mode). Tailscale-mode
     # delegates TLS to `tailscale serve` so nginx + certbot are skipped.
+    # openssl: not in Debian-slim minimal images by default; we need
+    # `openssl rand -hex 32` later to generate API + JWT secrets.
     if [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
-        apt-get install -y -qq ca-certificates curl jq gnupg
+        apt_retry install -y -qq ca-certificates curl jq gnupg openssl
     else
-        apt-get install -y -qq \
-            ca-certificates curl jq gnupg nginx \
+        apt_retry install -y -qq \
+            ca-certificates curl jq gnupg openssl nginx \
             certbot python3-certbot-dns-cloudflare
     fi
 
@@ -677,9 +695,24 @@ else
         COLIMA_DISK=50
     fi
 
+    # Apple Silicon + macOS Ventura (13) or newer → use Apple's Virtualization
+    # framework instead of Colima's qemu default. Reasons:
+    #   - qemu has known startup failures on macOS 15.0–15.3 (Sequoia) that
+    #     surface as "VM did not start" with no clear remediation.
+    #   - vz boots ~5× faster and gets virtiofs for the host bind mounts,
+    #     which is significantly snappier than qemu's 9p shares.
+    # Intel macs / older macOS keep qemu (vz isn't available there).
+    COLIMA_EXTRA_ARGS=()
+    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+        macos_major="$(/usr/bin/sw_vers -productVersion 2>/dev/null | cut -d. -f1 || echo 0)"
+        if [ "${macos_major:-0}" -ge 13 ]; then
+            COLIMA_EXTRA_ARGS+=(--vm-type=vz --mount-type=virtiofs)
+        fi
+    fi
+
     if ! colima status >/dev/null 2>&1; then
         log "macOS: starting Colima (${COLIMA_CPU} CPU / ${COLIMA_RAM} GB RAM / ${COLIMA_DISK} GB disk; host: ${HOST_CPU_MODEL}, ${HOST_RAM_GB} GB, ${HOST_DISK_TOTAL_GB} GB)"
-        colima start --cpu "$COLIMA_CPU" --memory "$COLIMA_RAM" --disk "$COLIMA_DISK"
+        colima start --cpu "$COLIMA_CPU" --memory "$COLIMA_RAM" --disk "$COLIMA_DISK" "${COLIMA_EXTRA_ARGS[@]}"
     else
         log "macOS: Colima already running"
     fi
@@ -704,7 +737,7 @@ fi
 # ---------- 1b. Unattended-upgrades (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
     log "Enabling unattended-upgrades"
-    apt-get install -y -qq unattended-upgrades
+    apt_retry install -y -qq unattended-upgrades
 
     # Idempotently enable daily check + unattended install. We deliberately
     # don't touch /etc/apt/apt.conf.d/50unattended-upgrades — the distro
@@ -829,9 +862,29 @@ if [ "$AUTO_MODE" -eq 1 ]; then
         # Critical: install.sh's later DNS-propagation check only looks for
         # A; on dual-stack hosts (e.g. Hostiko) curl would otherwise pick
         # IPv6 first → Worker creates AAAA → propagation check times out.
-        PROVISION_RESPONSE=$(curl -fsS --ipv4 -X POST -H "Content-Type: application/json" \
-            -d '{}' "$PROVISION_URL") \
-            || die "provision request failed (network or 5xx) — set SYGEN_SUBDOMAIN/CF_API_TOKEN/CF_ZONE_ID to use a custom subdomain"
+        #
+        # Retry 3× with 5 s backoff on 5xx (CF Workers occasionally 502
+        # mid-deploy). curl --retry handles non-2xx + transient connect
+        # failures; --retry-all-errors covers POST + the 5xx case explicitly.
+        PROVISION_RESPONSE=""
+        provision_rc=0
+        for attempt in 1 2 3; do
+            if PROVISION_RESPONSE=$(curl -fsS --ipv4 \
+                    --retry 0 --max-time 30 \
+                    -X POST -H "Content-Type: application/json" \
+                    -d '{}' "$PROVISION_URL" 2>/dev/null); then
+                provision_rc=0
+                break
+            fi
+            provision_rc=$?
+            if [ "$attempt" -lt 3 ]; then
+                warn "provision request failed (attempt $attempt/3) — retrying in 5 s"
+                sleep 5
+            fi
+        done
+        if [ $provision_rc -ne 0 ]; then
+            die "provision request failed after 3 attempts (network or 5xx) — set SYGEN_SUBDOMAIN/CF_API_TOKEN/CF_ZONE_ID to use a custom subdomain"
+        fi
 
         FQDN=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.fqdn // empty')
         SYGEN_INSTALL_TOKEN=$(printf '%s' "$PROVISION_RESPONSE" | jq -r '.install_token // empty')
@@ -893,19 +946,23 @@ if [ "$needs_dns" -eq 1 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
     if [ "$AUTO_MODE" -eq 1 ]; then
         log "Auto-mode: A record was created by Worker — waiting for DNS propagation"
         DNS_GOT=""
-        # Periodic progress output so iOS/Android wizards tailing the log
-        # see the install is still alive during the up-to-2-min DNS wait
-        # (otherwise the UI looks frozen and users assume crash).
-        for i in $(seq 1 30); do
-            DNS_GOT=$(dig +short A "$FQDN" @1.1.1.1 2>/dev/null || true)
+        # 60 × 4 s = up to 4 min: busy CF zones occasionally need ≥ 3 min.
+        # Try multiple resolvers per tick — a single resolver (1.1.1.1) can
+        # cache a fresh NXDOMAIN for the new label, which then sticks for
+        # the rest of the wait window even after CF has the record.
+        for i in $(seq 1 60); do
+            for resolver in 1.1.1.1 8.8.8.8 9.9.9.9; do
+                DNS_GOT=$(dig +short +time=2 +tries=1 A "$FQDN" "@$resolver" 2>/dev/null || true)
+                if [ -n "$DNS_GOT" ]; then break; fi
+            done
             if [ -n "$DNS_GOT" ]; then break; fi
-            if [ $((i % 5)) -eq 0 ]; then
-                log "  waiting for DNS… (${i}/30, ~$((i * 4))s elapsed)"
+            if [ $((i % 10)) -eq 0 ]; then
+                log "  waiting for DNS… (${i}/60, ~$((i * 4))s elapsed)"
             fi
             sleep 4
         done
         if [ -z "$DNS_GOT" ]; then
-            die "Worker-created A record for $FQDN did not propagate within ~2 min"
+            die "Worker-created A record for $FQDN did not propagate within ~4 min"
         fi
         if [ "$DNS_GOT" != "$PUBLIC_IP" ]; then
             warn "A record points at $DNS_GOT but VPS public IP is $PUBLIC_IP."
@@ -939,11 +996,19 @@ if [ "$needs_dns" -eq 1 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
         fi
 
         log "Waiting for DNS propagation..."
-        for i in $(seq 1 30); do
-            got=$(dig +short A "$FQDN" @1.1.1.1 2>/dev/null || true)
+        # 60 × 4 s = up to 4 min, multi-resolver. See auto-mode block above
+        # for rationale (busy CF zones / cached NXDOMAIN on a single resolver).
+        for i in $(seq 1 60); do
+            for resolver in 1.1.1.1 8.8.8.8 9.9.9.9; do
+                got=$(dig +short +time=2 +tries=1 A "$FQDN" "@$resolver" 2>/dev/null || true)
+                if [ "$got" = "$PUBLIC_IP" ]; then break; fi
+            done
             if [ "$got" = "$PUBLIC_IP" ]; then
                 log "  DNS resolved: $got"
                 break
+            fi
+            if [ $((i % 10)) -eq 0 ]; then
+                log "  waiting for DNS… (${i}/60, ~$((i * 4))s elapsed)"
             fi
             sleep 4
         done
@@ -1237,6 +1302,14 @@ STAGE="data"
 log "Preparing $SYGEN_ROOT"
 mkdir -p "$SYGEN_ROOT"/{data,claude-auth}
 mkdir -p "$SYGEN_ROOT/data/config"
+# Linux installer runs as root and SYGEN_ROOT lives under /srv/sygen — by
+# default mkdir creates 0755, which lets any local user list the directory
+# (filenames inside leak: .env, _secrets/, etc — even though the files
+# themselves are 0600). Tighten to 0750 on Linux. macOS keeps 0755 because
+# SYGEN_ROOT lives under $HOME and the host already restricts $HOME perms.
+if [ $LOCAL_MODE -eq 0 ]; then
+    chmod 0750 "$SYGEN_ROOT"
+fi
 # Secrets dir holds .initial_admin_password + future per-install secrets.
 # `install -d` is atomic and refuses to follow a pre-existing symlink, so a
 # local non-root attacker cannot pre-create _secrets as a symlink to e.g.
@@ -1339,6 +1412,15 @@ get_env() {
         local existing
         existing=$(grep -E "^${key}=" "$SYGEN_ROOT/.env" 2>/dev/null \
             | head -n1 | cut -d= -f2- || true)
+        # Strip surrounding double or single quotes so `KEY="value"` written
+        # by an operator (or by a future writer that quotes for safety) round-
+        # trips cleanly. Without this, get_env returns `"value"` literally,
+        # the next .env write doubles the quotes (`KEY=""value""`), and every
+        # consumer that doesn't strip downstream sees the wrong value.
+        existing="${existing%\"}"
+        existing="${existing#\"}"
+        existing="${existing%\'}"
+        existing="${existing#\'}"
         if [ -n "$existing" ]; then
             printf '%s' "$existing"
             return
@@ -1475,6 +1557,10 @@ if [ $LOCAL_MODE -eq 1 ]; then
         -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
         /tmp/sygen.host-metrics.plist.tmpl > "$PLIST_DST"
     rm -f /tmp/sygen.host-metrics.plist.tmpl
+    # Defensive: if umask was 077 from an earlier section the redirect
+    # creates the plist 0600, which launchd silently refuses to load
+    # ("file is owned by you but not readable"). Force 0644.
+    chmod 0644 "$PLIST_DST"
 
     # Idempotent reload: unload an old copy if present, then load fresh.
     launchctl unload "$PLIST_DST" >/dev/null 2>&1 || true
@@ -1536,6 +1622,8 @@ if [ $LOCAL_MODE -eq 1 ]; then
             -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
             /tmp/sygen.keychain-sync.plist.tmpl > "$PLIST_DST"
         rm -f /tmp/sygen.keychain-sync.plist.tmpl
+        # Defensive: see host-metrics block — 0600 plists won't load.
+        chmod 0644 "$PLIST_DST"
 
         # One-shot sync BEFORE docker compose up so the file is fresh
         # when sandbox containers bind-mount it on first boot.
@@ -1558,7 +1646,12 @@ log "Pulling images"
 docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env" pull
 
 log "Starting Sygen stack"
-docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env" up -d
+# --remove-orphans removes containers from prior compose files that are no
+# longer in this one (notably the legacy `sygen-watchtower` service that
+# was removed in compose v2 — without this flag, watchtower keeps polling
+# and fights with sygen-updater, surfacing as mysterious "image rolled
+# back" loops).
+docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env" up -d --remove-orphans
 
 # ---------- 6b. macOS smoke-test (Linux uses nginx + Let's Encrypt to verify) ----------
 if [ $LOCAL_MODE -eq 1 ]; then
@@ -1652,12 +1745,65 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     # don't wire up launchd auto-start here — surviving reboots on a self-
     # hosted Mac is an operator concern (and brew-services-as-root has its
     # own warts on Apple Silicon). Document manual restart in the summary.
-    if pgrep -x nginx >/dev/null 2>&1; then
-        log "Reloading running nginx"
+    #
+    # Identify whether the running nginx is OUR brew install. lsof on a
+    # listening master pid + path comparison: if we'd `nginx -s reload` an
+    # unrelated nginx (Wordpress dev, Pow, MAMP, a system-package nginx
+    # from a previous user), we'd silently re-load THEIR config including
+    # OUR sygen.conf — possibly conflicting with their server blocks. Bail
+    # with diagnostic instead.
+    nginx_running_is_ours() {
+        local master_pid
+        master_pid=$(pgrep -f 'nginx: master' 2>/dev/null | head -n1 || true)
+        [ -z "$master_pid" ] && return 2  # no running nginx at all
+        local exe
+        exe=$(/bin/ps -o args= -p "$master_pid" 2>/dev/null | awk '{print $3}' || true)
+        # Older `ps` formats put the binary as $1; check both. lsof is the
+        # belt-and-braces alternative.
+        if [ -z "$exe" ] || [ ! -e "$exe" ]; then
+            exe=$(/bin/ps -o args= -p "$master_pid" 2>/dev/null | awk '{print $1}' || true)
+        fi
+        case "$exe" in
+            "$BREW_NGINX_PREFIX/"*|"$(brew --prefix)/"*) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    # Pre-flight: someone already on 80/443? nginx will fail with
+    # "bind() to 0.0.0.0:80 failed (48: Address already in use)" — surface
+    # the actual occupant so the operator knows what to stop. Apple's
+    # Web Sharing (System Settings → Sharing → Content Caching/File Sharing)
+    # and ControlCenter both bind 80 on a fresh Mac.
+    check_port() {
+        local port="$1"
+        local hits
+        hits=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | tail -n +2 || true)
+        if [ -n "$hits" ]; then
+            local pid_proc
+            pid_proc=$(printf '%s\n' "$hits" | awk '{print $2 " ("$1")"}' | head -n1)
+            # Allow our own already-running nginx to keep 80/443 — the
+            # reload branch below will pick it up.
+            if printf '%s' "$hits" | awk '{print $1}' | grep -qi '^nginx$' \
+                    && nginx_running_is_ours; then
+                return 0
+            fi
+            die "Port $port is already in use by PID $pid_proc. Stop that process first (e.g. 'sudo kill ${pid_proc%% *}'), or for Apple's built-in Web Sharing: System Settings → General → Sharing → disable Content Caching / File Sharing. Then re-run."
+        fi
+    }
+
+    if nginx_running_is_ours; then
+        log "Reloading running brew nginx"
         $SUDO nginx -s reload || die "nginx reload failed"
     else
+        # If a different nginx is running, refuse to touch it — reloading
+        # would re-read OUR sygen.conf into THEIR config tree.
+        if pgrep -f 'nginx: master' >/dev/null 2>&1; then
+            die "An nginx process is running but it does NOT appear to be the brew install at $BREW_NGINX_PREFIX. Refusing to reload someone else's nginx with our sygen.conf. Stop it first (or remove this conflict and re-run): sudo nginx -s stop"
+        fi
+        check_port 80
+        check_port 443
         log "Starting nginx (sudo nginx)"
-        $SUDO nginx || die "could not start nginx"
+        $SUDO nginx || die "could not start nginx — check 'sudo nginx -t' for syntax errors and 'lsof -nP -iTCP:80,443 -sTCP:LISTEN' for port conflicts"
     fi
 elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     STAGE="nginx"
@@ -1716,6 +1862,17 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
                 hint="$hint Enable it at https://login.tailscale.com/admin/dns then re-run the install."
             fi
             die "$hint"
+        fi
+
+        # Tailnet HTTPS Certificates feature is a separate gate from Serve:
+        # tailnets with MagicDNS but without HTTPS Certificates will fail
+        # `tailscale serve` with messages like "your tailnet does not
+        # support HTTPS", "TLS not configured", "no certificate". The user
+        # must enable HTTPS Certificates in the tailnet admin DNS panel.
+        # Match case-insensitively because Tailscale wording shifts between
+        # versions.
+        if printf '%s' "$out" | grep -qiE 'https.*not.*(supported|configured|enabled)|tls.*not.*(configured|available)|certificate.*not.*(configured|available)|enable.*https.*certificate|ssl.*not.*configured'; then
+            die "Tailnet HTTPS Certificates feature is not enabled. Open https://login.tailscale.com/admin/dns and turn on 'HTTPS Certificates' (under MagicDNS), then re-run the install. Raw output: $(printf '%s' "$out" | head -n3 | tr '\n' ' ')"
         fi
 
         if [ $rc -ne 0 ]; then
@@ -1779,6 +1936,88 @@ if [ $LOCAL_MODE -eq 0 ]; then
 systemctl reload nginx
 HOOK
     chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+fi
+
+# ---------- 9b. Cert renewal launchd agent (macOS publicdomain) ----------
+# brew certbot ships no timer / launchd agent of its own. macOS in
+# publicdomain mode would otherwise serve a stale cert after 90 days
+# (LE certs expire) until the operator manually re-runs the installer.
+# Install a per-user LaunchAgent that runs `certbot renew` daily at 03:00.
+if [ $LOCAL_MODE -eq 1 ] && [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
+    STAGE="cert-renew"
+    log "Installing cert-renewal LaunchAgent (daily at 03:00)"
+
+    RENEW_SCRIPT="$SYGEN_ROOT/bin/sygen-cert-renew.sh"
+    mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs"
+    cat > "$RENEW_SCRIPT" <<RENEW
+#!/usr/bin/env bash
+# Sygen cert-renewal driver — invoked by com.sygen.cert-renew.plist.
+# Renews via certbot (manual hooks for the Worker DNS-01 flow) and
+# reloads brew nginx on success. Idempotent: certbot is a no-op when
+# the cert is far from expiry.
+set -euo pipefail
+
+LOG="$SYGEN_ROOT/logs/cert-renew.log"
+exec >>"\$LOG" 2>&1
+echo "--- \$(date -u +%Y-%m-%dT%H:%M:%SZ) starting renewal ---"
+
+# Renew first; if certbot succeeds the cert is on disk regardless of
+# whether nginx reload works. nginx -s reload needs root (master pid
+# is owned by root from `sudo nginx`); -n keeps sudo from prompting in
+# the no-TTY launchd context — it'll exit 1 instead of hanging. If that
+# fails, the operator must manually `sudo nginx -s reload` after seeing
+# the next-day log entry, but the renewed cert won't be served until
+# they do. This is an explicit trade-off vs. wiring up passwordless
+# sudo in /etc/sudoers.d/, which is a heavier operator commitment.
+"$CERTBOT_BIN" renew \\
+    --config-dir "$CERTBOT_CONFIG_DIR" \\
+    --work-dir "${CERTBOT_CONFIG_DIR}-work" \\
+    --logs-dir "${CERTBOT_CONFIG_DIR}-logs" \\
+    --manual-auth-hook    "$ACME_HOOK_DIR/sygen-acme-auth-hook.sh" \\
+    --manual-cleanup-hook "$ACME_HOOK_DIR/sygen-acme-cleanup-hook.sh" \\
+    --non-interactive
+rc=\$?
+
+if [ \$rc -eq 0 ]; then
+    if /usr/bin/sudo -n $(brew --prefix nginx 2>/dev/null || brew --prefix)/bin/nginx -s reload 2>/dev/null; then
+        echo "nginx reloaded"
+    else
+        echo "WARN: certbot renewed but nginx reload requires manual 'sudo nginx -s reload'"
+    fi
+fi
+exit \$rc
+RENEW
+    chmod 0755 "$RENEW_SCRIPT"
+
+    PLIST_DST="$HOME/Library/LaunchAgents/com.sygen.cert-renew.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$PLIST_DST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>           <string>com.sygen.cert-renew</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$RENEW_SCRIPT</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>   <integer>3</integer>
+        <key>Minute</key> <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>  <string>$SYGEN_ROOT/logs/cert-renew.stdout.log</string>
+    <key>StandardErrorPath</key><string>$SYGEN_ROOT/logs/cert-renew.stderr.log</string>
+    <key>RunAtLoad</key>        <false/>
+</dict>
+</plist>
+PLIST
+    chmod 0644 "$PLIST_DST"
+
+    launchctl unload "$PLIST_DST" >/dev/null 2>&1 || true
+    launchctl load -w "$PLIST_DST" \
+        || warn "launchctl load failed — cert will need manual renewal every 90 days"
 fi
 
 # ---------- 10. Nightly backups (Linux only) ----------

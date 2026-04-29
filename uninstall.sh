@@ -100,11 +100,18 @@ esac
 # install or manually-deleted manifest) we fall back to the v1.6.45
 # behaviour: never touch brew, never delete the Colima VM, only handle
 # the launchd agents we hard-coded last release.
+#
+# colima_profile_name was hardcoded to "default" in 1.6.46; v1.6.47+
+# records the actual profile install.sh used so a future non-default
+# profile won't accidentally cause `colima delete` to target someone
+# else's "default" VM. Falls back to "default" for manifests that
+# pre-date the change.
 MANIFEST="$SYGEN_ROOT/.install_manifest.json"
 USE_MANIFEST=0
 MANIFEST_INSTALLED_PKGS=()
 MANIFEST_PLISTS=()
 MANIFEST_COLIMA_CREATED=0
+MANIFEST_COLIMA_PROFILE="default"
 if [ -f "$MANIFEST" ] && command -v python3 >/dev/null 2>&1; then
     if manifest_dump="$(python3 - "$MANIFEST" <<'PY' 2>/dev/null
 import json, sys
@@ -123,6 +130,9 @@ for p in m.get('plists_installed') or []:
 v = m.get('colima_profile_created')
 if isinstance(v, bool):
     print('C\t' + ('1' if v else '0'))
+n = m.get('colima_profile_name')
+if isinstance(n, str) and n:
+    print('N\t' + n)
 PY
 )"; then
         USE_MANIFEST=1
@@ -132,6 +142,7 @@ PY
                 I) MANIFEST_INSTALLED_PKGS+=("$val") ;;
                 L) MANIFEST_PLISTS+=("$val") ;;
                 C) MANIFEST_COLIMA_CREATED="$val" ;;
+                N) MANIFEST_COLIMA_PROFILE="$val" ;;
             esac
         done <<< "$(printf '%s\n' "$manifest_dump" | tail -n +2)"
     else
@@ -160,9 +171,9 @@ if [ $LOCAL_MODE -eq 1 ]; then
             log "  - No sygen-owned brew packages to remove (manifest is empty)"
         fi
         if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
-            log "  - Stop Colima AND delete the default profile (~27 GB VM image — sygen created it)"
+            log "  - Stop Colima AND delete profile '$MANIFEST_COLIMA_PROFILE' (~27 GB VM image — sygen created it)"
         else
-            log "  - Stop Colima (will NOT delete the VM — it pre-existed)"
+            log "  - Stop Colima profile '$MANIFEST_COLIMA_PROFILE' (will NOT delete the VM — it pre-existed)"
         fi
     else
         log "  - Stop Colima (will NOT delete the VM — legacy install, no manifest)"
@@ -331,31 +342,38 @@ if [ $LOCAL_MODE -eq 1 ]; then
             done
         fi
 
-        # Colima — stop first, then optionally delete the VM.
+        # Colima — stop first, then optionally delete the VM. Profile name
+        # comes from the manifest so we don't accidentally target a
+        # different user's "default" if install.sh was run with a custom
+        # COLIMA_PROFILE_NAME.
         if command -v colima >/dev/null 2>&1; then
-            if colima status >/dev/null 2>&1; then
-                log "Stopping Colima"
-                colima stop 2>/dev/null || warn "  colima stop failed (ignored)"
+            if colima status --profile "$MANIFEST_COLIMA_PROFILE" >/dev/null 2>&1; then
+                log "Stopping Colima profile=$MANIFEST_COLIMA_PROFILE"
+                colima stop --profile "$MANIFEST_COLIMA_PROFILE" 2>/dev/null \
+                    || warn "  colima stop failed (ignored)"
             fi
             if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
-                log "Deleting Colima default profile (manifest says we created it — frees ~27 GB)"
-                colima delete --force 2>/dev/null || \
-                    warn "  colima delete failed (ignored — re-run manually if needed)"
+                log "Deleting Colima profile=$MANIFEST_COLIMA_PROFILE (manifest says we created it — frees ~27 GB)"
+                colima delete --profile "$MANIFEST_COLIMA_PROFILE" --force 2>/dev/null \
+                    || warn "  colima delete failed (ignored — re-run manually if needed)"
             else
-                log "Leaving Colima default profile intact (manifest says it pre-existed sygen)"
+                log "Leaving Colima profile=$MANIFEST_COLIMA_PROFILE intact (manifest says it pre-existed sygen)"
             fi
         fi
 
-        # Brew packages — only the ones we installed. --ignore-dependencies
-        # keeps brew from pulling out shared libs (e.g. ca-certificates)
-        # that other packages need; the user can `brew autoremove` later
-        # if they really want to prune.
+        # Brew packages — only the ones we installed. We do NOT pass
+        # --ignore-dependencies: that flag would silently uninstall a
+        # package even when other formulas depend on it, breaking
+        # unrelated tools. If brew refuses because of dependents, we
+        # log it and skip — the user can decide whether to force-prune
+        # via `brew autoremove` or by removing the dependents first.
         if [ ${#MANIFEST_INSTALLED_PKGS[@]} -gt 0 ] && command -v brew >/dev/null 2>&1; then
             log "brew uninstall (sygen-owned packages from manifest)"
             for pkg in "${MANIFEST_INSTALLED_PKGS[@]}"; do
                 if brew list "$pkg" >/dev/null 2>&1; then
-                    brew uninstall --ignore-dependencies "$pkg" 2>/dev/null \
-                        || warn "  brew uninstall $pkg failed (continuing)"
+                    if ! brew uninstall "$pkg" 2>&1; then
+                        warn "  brew uninstall $pkg refused (likely has other dependents) — leaving installed"
+                    fi
                 fi
             done
         fi

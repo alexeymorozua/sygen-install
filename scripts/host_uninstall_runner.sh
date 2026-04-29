@@ -107,21 +107,35 @@ process_trigger() {
     # Detach uninstall into its own session so it survives this
     # runner's death (uninstall.sh wipes $SYGEN_ROOT, which contains
     # this very script). Output goes to a sibling log.
+    #
+    # Cleanup of our own launchd agent + the host_update_runner agent
+    # only fires when uninstall.sh actually succeeded — otherwise we'd
+    # tear down the very mechanism the user needs to retry, leaving
+    # them with a half-uninstalled host and no admin endpoint to fix
+    # it from. On failure we leave the runner alive so the next admin
+    # POST can try again.
     LOG_FILE="$SYGEN_ROOT/logs/uninstall.log"
     mkdir -p "$SYGEN_ROOT/logs" 2>/dev/null || true
     # shellcheck disable=SC2086 -- intentional word-splitting on $UNINSTALL_FLAGS
     nohup sh -c "
-        bash '$UNINSTALL_SCRIPT' $UNINSTALL_FLAGS >>'$LOG_FILE' 2>&1
-        # After uninstall.sh, our own launchd agent + plist must go too.
-        launchctl unload '$PLIST_PATH' >/dev/null 2>&1 || true
-        rm -f '$PLIST_PATH' 2>/dev/null || true
-        # And the host_update_runner agent (it lives in the same
-        # directory hierarchy that uninstall.sh wiped, so its launchd
-        # entry is now pointing at a missing script).
-        launchctl unload '$HOME/Library/LaunchAgents/com.sygen.host-update-runner.plist' >/dev/null 2>&1 || true
-        rm -f '$HOME/Library/LaunchAgents/com.sygen.host-update-runner.plist' 2>/dev/null || true
-        launchctl unload '$HOME/Library/LaunchAgents/com.sygen.host-updates-check.plist' >/dev/null 2>&1 || true
-        rm -f '$HOME/Library/LaunchAgents/com.sygen.host-updates-check.plist' 2>/dev/null || true
+        if bash '$UNINSTALL_SCRIPT' $UNINSTALL_FLAGS >>'$LOG_FILE' 2>&1; then
+            # After uninstall.sh, our own launchd agent + plist must go too.
+            launchctl unload '$PLIST_PATH' >/dev/null 2>&1 || true
+            rm -f '$PLIST_PATH' 2>/dev/null || true
+            # And the host_update_runner agent (it lives in the same
+            # directory hierarchy that uninstall.sh wiped, so its launchd
+            # entry is now pointing at a missing script).
+            launchctl unload '$HOME/Library/LaunchAgents/com.sygen.host-update-runner.plist' >/dev/null 2>&1 || true
+            rm -f '$HOME/Library/LaunchAgents/com.sygen.host-update-runner.plist' 2>/dev/null || true
+            launchctl unload '$HOME/Library/LaunchAgents/com.sygen.host-updates-check.plist' >/dev/null 2>&1 || true
+            rm -f '$HOME/Library/LaunchAgents/com.sygen.host-updates-check.plist' 2>/dev/null || true
+        else
+            printf '%s [host-uninstall-runner] uninstall.sh exited non-zero — leaving runner agents loaded for retry\n' \
+                \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >>'$LOG_FILE'
+            # Clear the running marker so a subsequent admin POST can
+            # write a fresh trigger without hitting the in-progress gate.
+            rm -f '$RUNNING' 2>/dev/null || true
+        fi
     " </dev/null >/dev/null 2>&1 &
 
     # We do NOT clean up the running marker — uninstall.sh removes the

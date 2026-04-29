@@ -138,19 +138,26 @@ json_escape() {
 # ---------- Install manifest (v1.6.46+) ----------
 # Captures what install.sh actually puts on the host (vs. what was already
 # there) so uninstall.sh can remove ONLY what we own. Brew packages and
-# the Colima default profile are the load-bearing fields — they may have
-# been installed by the user before sygen, in which case we must not
-# touch them on uninstall.
+# the Colima profile are the load-bearing fields — they may have been
+# installed by the user before sygen, in which case we must not touch
+# them on uninstall.
 #
 # On re-runs the original classification is preserved (see manifest_load):
 # a package preexisting at first install must stay "preexisting" forever,
 # even though `brew list` will now succeed for sygen-installed packages
-# too. The manifest is written once per install and updated by
-# manifest_write() at the end with any newly-tracked items appended.
+# too. The manifest is written via a trap-on-EXIT handler so a partial
+# install (curl timeout, brew install fail, etc.) still leaves a manifest
+# behind — without it, a re-run would reclassify already-on-disk packages
+# as "preexisting" and uninstall would orphan them on the host.
 SYGEN_MANIFEST_INSTALLED_PKGS=()
 SYGEN_MANIFEST_PREEXISTING_PKGS=()
 SYGEN_MANIFEST_PLISTS=()
 SYGEN_MANIFEST_COLIMA_CREATED=""
+# Colima profile name used by `colima start` AND recorded in the manifest.
+# Fixed at "default" today; making it a variable means we never have a
+# code path where install creates profile X and uninstall deletes profile
+# Y (a footgun if the user later runs colima with a non-default profile).
+COLIMA_PROFILE_NAME="${COLIMA_PROFILE_NAME:-default}"
 
 _manifest_has_item() {
     local needle="$1"
@@ -169,6 +176,7 @@ manifest_record_pkg_installed() {
             ${SYGEN_MANIFEST_PREEXISTING_PKGS[@]+"${SYGEN_MANIFEST_PREEXISTING_PKGS[@]}"}; then
         return 0
     fi
+    log "manifest: recording $pkg as installed_by_sygen"
     SYGEN_MANIFEST_INSTALLED_PKGS+=("$pkg")
 }
 
@@ -179,6 +187,7 @@ manifest_record_pkg_preexisting() {
             ${SYGEN_MANIFEST_PREEXISTING_PKGS[@]+"${SYGEN_MANIFEST_PREEXISTING_PKGS[@]}"}; then
         return 0
     fi
+    log "manifest: recording $pkg as preexisting"
     SYGEN_MANIFEST_PREEXISTING_PKGS+=("$pkg")
 }
 
@@ -213,6 +222,13 @@ manifest_brew_install() {
 
 # Atomic JSON writer. Schema is consumed by uninstall.sh AND by the
 # /api/system/uninstall/preview endpoint — see CONTRACT_admin_api.md.
+#
+# Symlink hardening: bash can't open(O_NOFOLLOW), but we can refuse to
+# write through a pre-existing symlink at either the temp or target path.
+# The manifest lives inside $SYGEN_ROOT so a symlink there would have to
+# be planted by something with $SYGEN_ROOT write access — at which point
+# the host is already compromised — but the check is cheap and would
+# catch a misconfigured symlink-following backup tool.
 manifest_write() {
     local path="$1"
     [ -z "$path" ] && return 0
@@ -220,8 +236,24 @@ manifest_write() {
     dir="$(dirname "$path")"
     mkdir -p "$dir" 2>/dev/null || true
     local tmp="$path.$$.tmp"
+    if [ -L "$path" ]; then
+        warn "manifest target is a symlink, refusing to follow: $path"
+        return 1
+    fi
+    if [ -L "$tmp" ]; then
+        warn "manifest temp path is a symlink, refusing to follow: $tmp"
+        return 1
+    fi
     local installed_at
     installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # umask 022 → 0644 on file create. Defensive belt+suspenders alongside
+    # the chmod below — protects against a process-wide umask 077 caller
+    # leaving the file 0600 (which would still be readable by sygen-core
+    # since both run as the installing user, but unreadable by future
+    # tooling that runs as a different user).
+    local prev_umask
+    prev_umask="$(umask)"
+    umask 022
     {
         printf '{\n'
         printf '  "version": 1,\n'
@@ -243,10 +275,10 @@ manifest_write() {
         printf '],\n'
         if [ "$SYGEN_MANIFEST_COLIMA_CREATED" = "1" ]; then
             printf '  "colima_profile_created": true,\n'
-            printf '  "colima_profile_name": "default",\n'
+            printf '  "colima_profile_name": %s,\n' "$(json_escape "$COLIMA_PROFILE_NAME")"
         elif [ "$SYGEN_MANIFEST_COLIMA_CREATED" = "0" ]; then
             printf '  "colima_profile_created": false,\n'
-            printf '  "colima_profile_name": "default",\n'
+            printf '  "colima_profile_name": %s,\n' "$(json_escape "$COLIMA_PROFILE_NAME")"
         fi
         printf '  "plists_installed": ['
         first=1
@@ -259,6 +291,32 @@ manifest_write() {
     } > "$tmp"
     chmod 0644 "$tmp" 2>/dev/null || true
     mv "$tmp" "$path"
+    umask "$prev_umask"
+}
+
+# Single-source manifest writer. Writes the canonical $SYGEN_ROOT path
+# first, then mirrors it into the bind-mounted host_updates dir via cp
+# so the preview endpoint and uninstall.sh can never disagree on what
+# was recorded. Two independent manifest_write calls used to be possible
+# (disk full on the second) — this one-source-of-truth approach makes
+# that impossible.
+manifest_write_all() {
+    [ -z "${SYGEN_ROOT:-}" ] && return 0
+    local primary="$SYGEN_ROOT/.install_manifest.json"
+    local mirror="$SYGEN_ROOT/host_updates/install_manifest.json"
+    if ! manifest_write "$primary"; then
+        warn "could not write install manifest at $primary"
+        return 1
+    fi
+    if [ -d "$SYGEN_ROOT/host_updates" ]; then
+        if [ -L "$mirror" ]; then
+            warn "manifest mirror is a symlink, refusing to overwrite: $mirror"
+        else
+            cp -f "$primary" "$mirror" 2>/dev/null \
+                || warn "could not mirror manifest to $mirror — preview endpoint may report stale state"
+        fi
+    fi
+    return 0
 }
 
 # Restore prior classification from disk so a re-run doesn't reclassify
@@ -404,8 +462,16 @@ apt_retry() {
 
 # Catch unexpected non-zero exits (set -e failures from commands that
 # don't go through die()) so JSON consumers always get one final line.
+# Also flushes whatever manifest state we accumulated so far so a partial
+# install (curl timeout in stage X, brew install fail, etc.) leaves a
+# manifest behind. Without this, a re-run after a partial would re-see
+# brew packages as already-on-disk and reclassify them as "preexisting"
+# — and a later uninstall would orphan them on the host.
 on_exit() {
     local code=$?
+    if [ -n "${SYGEN_ROOT:-}" ] && [ -d "$SYGEN_ROOT" ]; then
+        manifest_write_all || true
+    fi
     if [ "$JSON_OUTPUT" = "1" ] && [ "$JSON_DONE" = "0" ] && [ "$code" -ne 0 ]; then
         emit_json_error "install script exited with code $code" "stage=$STAGE"
     fi
@@ -905,26 +971,34 @@ else
         fi
     fi
 
-    # Detect whether the `default` Colima profile already existed BEFORE
-    # we (potentially) start it. Profile presence is the load-bearing
+    # Detect whether the chosen Colima profile already existed BEFORE we
+    # (potentially) start it. Profile presence is the load-bearing
     # signal for uninstall: if we created it, uninstall reclaims the VM
     # image; if it pre-existed (user runs Colima for other projects),
     # we leave it alone and only `colima stop`. `colima list` exits 0
     # even when no profile exists, so grep is the actual check.
+    #
+    # Profile name is parameterised via $COLIMA_PROFILE_NAME so detection,
+    # `colima start --profile`, and the manifest record all agree. A
+    # bug here would let install.sh create profile "sygen" while
+    # uninstall.sh deletes profile "default" — a different user's VM.
     COLIMA_PROFILE_PREEXISTED=0
-    if colima list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx default; then
+    if colima list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx -- "$COLIMA_PROFILE_NAME"; then
         COLIMA_PROFILE_PREEXISTED=1
-    elif [ -d "$HOME/.colima/default" ]; then
+    elif [ -d "$HOME/.colima/$COLIMA_PROFILE_NAME" ]; then
         # Belt-and-suspenders for older colima versions whose `list` may
         # not enumerate stopped profiles consistently.
         COLIMA_PROFILE_PREEXISTED=1
     fi
 
-    if ! colima status >/dev/null 2>&1; then
-        log "macOS: starting Colima (${COLIMA_CPU} CPU / ${COLIMA_RAM} GB RAM / ${COLIMA_DISK} GB disk; host: ${HOST_CPU_MODEL}, ${HOST_RAM_GB} GB, ${HOST_DISK_TOTAL_GB} GB)"
-        colima start --cpu "$COLIMA_CPU" --memory "$COLIMA_RAM" --disk "$COLIMA_DISK" ${COLIMA_EXTRA_ARGS[@]+"${COLIMA_EXTRA_ARGS[@]}"}
+    # `colima status` without --profile checks the active profile, which
+    # may not be the one we want. Use --profile so the start gate matches
+    # the profile we plan to start.
+    if ! colima status --profile "$COLIMA_PROFILE_NAME" >/dev/null 2>&1; then
+        log "macOS: starting Colima profile=$COLIMA_PROFILE_NAME (${COLIMA_CPU} CPU / ${COLIMA_RAM} GB RAM / ${COLIMA_DISK} GB disk; host: ${HOST_CPU_MODEL}, ${HOST_RAM_GB} GB, ${HOST_DISK_TOTAL_GB} GB)"
+        colima start --profile "$COLIMA_PROFILE_NAME" --cpu "$COLIMA_CPU" --memory "$COLIMA_RAM" --disk "$COLIMA_DISK" ${COLIMA_EXTRA_ARGS[@]+"${COLIMA_EXTRA_ARGS[@]}"}
     else
-        log "macOS: Colima already running"
+        log "macOS: Colima profile=$COLIMA_PROFILE_NAME already running"
     fi
 
     if [ $COLIMA_PROFILE_PREEXISTED -eq 1 ]; then
@@ -1706,6 +1780,13 @@ umask 077
     if [ -f /tmp/sygen-host-metrics.env ]; then
         cat /tmp/sygen-host-metrics.env
     fi
+    # Host-side install root, exposed to core so the legacy-install
+    # branch of /api/system/uninstall/preview can show the real path
+    # (~/.sygen-local on macOS, /srv/sygen on Linux) instead of "/" —
+    # which is what _HOST_UPDATES_DIR.parent.parent resolves to inside
+    # the container. Used only when the manifest is missing; manifest
+    # mode reads sygen_root from the manifest itself.
+    echo "SYGEN_HOST_DATA_DIR=$SYGEN_ROOT"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"
@@ -2492,20 +2573,13 @@ fi
 STAGE="done"
 
 # Write the install manifest. SYGEN_ROOT path is the canonical copy used
-# by uninstall.sh; the host_updates copy is the same content, bind-mounted
-# into sygen-core at /data/host_updates/install_manifest.json so the
-# /api/system/uninstall/preview endpoint can describe what would be
-# removed without exec'ing into the host. Both paths are written
-# atomically; failure to write one is logged but doesn't fail the
-# install (the user can still uninstall — uninstall.sh falls back to
-# legacy mode when the manifest is missing).
-manifest_write "$SYGEN_MANIFEST_PATH" \
-    || warn "could not write install manifest at $SYGEN_MANIFEST_PATH — uninstall will fall back to legacy mode"
-# Mirror into the bind-mounted host_updates dir so the in-container
-# /api/system/uninstall/preview endpoint can read it. manifest_write
-# auto-creates the parent directory.
-manifest_write "$SYGEN_ROOT/host_updates/install_manifest.json" \
-    || warn "could not write host_updates manifest copy — preview endpoint will report legacy_install"
+# by uninstall.sh; the host_updates copy is mirrored from the canonical
+# one (single source of truth) so the /api/system/uninstall/preview
+# endpoint and uninstall.sh can never disagree on what was recorded.
+# manifest_write_all is also wired into the on_exit trap above so a
+# partial install still leaves a manifest behind.
+manifest_write_all \
+    || warn "could not write install manifest — uninstall will fall back to legacy mode"
 
 if [ "$JSON_OUTPUT" = "1" ]; then
     if [ -z "$ADMIN_PASS" ]; then

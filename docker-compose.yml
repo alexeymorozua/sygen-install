@@ -51,6 +51,12 @@ services:
       - SYGEN_HOST_CPU_MODEL=${SYGEN_HOST_CPU_MODEL:-}
       - SYGEN_HOST_RAM_TOTAL_BYTES=${SYGEN_HOST_RAM_TOTAL_BYTES:-}
       - SYGEN_HOST_DISK_TOTAL_BYTES=${SYGEN_HOST_DISK_TOTAL_BYTES:-}
+      # Host-side install root (~/.sygen-local on macOS, /srv/sygen on
+      # Linux). Read by /api/system/uninstall/preview when no manifest
+      # is present so the legacy-install branch can show the real data
+      # path instead of "/" (which is what _HOST_UPDATES_DIR.parent.parent
+      # resolves to inside the container).
+      - SYGEN_HOST_DATA_DIR=${SYGEN_HOST_DATA_DIR:-}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:

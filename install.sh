@@ -1880,11 +1880,11 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     # (loaded by the default nginx.conf via `include servers/*`). The admin
     # container binds to localhost:$SYGEN_ADMIN_PORT (instead of :3000) on
     # macOS, so the proxy_pass needs to reflect that.
-    BREW_NGINX_PREFIX="$(brew --prefix nginx 2>/dev/null || brew --prefix)"
+    BREW_PREFIX="$(brew --prefix)"
+    BREW_NGINX_PREFIX="$(brew --prefix nginx 2>/dev/null || echo "$BREW_PREFIX")"
     NGINX_CONF_DIR="$BREW_NGINX_PREFIX/etc/nginx/servers"
     if [ ! -d "$NGINX_CONF_DIR" ]; then
-        # Older brew layouts put the conf dir under the toplevel brew prefix.
-        NGINX_CONF_DIR="$(brew --prefix)/etc/nginx/servers"
+        NGINX_CONF_DIR="$BREW_PREFIX/etc/nginx/servers"
     fi
     $SUDO mkdir -p "$NGINX_CONF_DIR"
 
@@ -1925,7 +1925,7 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
         local cmd
         cmd=$(/bin/ps -o args= -p "$master_pid" 2>/dev/null || true)
         case "$cmd" in
-            *"$BREW_NGINX_PREFIX/"*|*"$(brew --prefix)/"*) return 0 ;;
+            *"$BREW_NGINX_PREFIX/"*|*"$BREW_PREFIX/"*) return 0 ;;
             *) return 1 ;;
         esac
     }

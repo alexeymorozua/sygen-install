@@ -104,8 +104,8 @@ def main() -> int:
     parser.add_argument("--target", default=os.path.expanduser(
         "~/.claude/.credentials.json"),
         help="Path to write keychain payload to")
-    parser.add_argument("--interval", type=float, default=900.0,
-        help="Seconds between sync cycles (default 900 = 15 min)")
+    parser.add_argument("--interval", type=float, default=60.0,
+        help="Seconds between sync cycles (default 60 = 1 min)")
     parser.add_argument("--once", action="store_true",
         help="Sync once and exit (no loop)")
     args = parser.parse_args()

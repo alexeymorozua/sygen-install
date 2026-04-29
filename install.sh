@@ -674,18 +674,27 @@ else
     HOST_DISK_TOTAL_BYTES=$(( ${HOST_DISK_TOTAL_KB:-0} * 1024 ))
     HOST_DISK_TOTAL_GB=$(( HOST_DISK_TOTAL_BYTES / 1024 / 1024 / 1024 ))
 
-    # Colima sizing — give the VM ~85% of host RAM (operator wants "all
-    # resources"; we leave a small reserve so macOS itself doesn't swap)
-    # and a generous disk cap that's bounded by what the host actually
-    # has free. Falls back to install.sh's old defaults on detection
-    # failure so a weird host doesn't brick the install.
+    # Colima sizing — adaptive to host RAM:
+    #   <8 GB  → refuse install (idle base = ~10-13 GB Linux+Docker+sygen, won't fit)
+    #   8-15  → 50% (4-7 GB VM, tight but workable for light use)
+    #   16-31 → 60% (10-19 GB VM, comfortable for typical workloads)
+    #   32+   → 85% (~27 GB on Mac mini M4, lots of headroom for RAG / video / music gen)
+    # Disk cap stays at min(host/2, 500 GB), floor 50 GB.
     COLIMA_CPU="${HOST_CPU}"
-    if [ "$HOST_RAM_GB" -gt 0 ]; then
+    if [ "$HOST_RAM_GB" -lt 8 ] && [ "$HOST_RAM_GB" -gt 0 ]; then
+        die "host has only ${HOST_RAM_GB} GB RAM — sygen requires at least 8 GB (16 GB recommended). Free up RAM, upgrade hardware, or use a remote VPS install."
+    fi
+    if [ "$HOST_RAM_GB" -ge 32 ]; then
         COLIMA_RAM=$(( HOST_RAM_GB * 85 / 100 ))
-        [ "$COLIMA_RAM" -lt 4 ] && COLIMA_RAM=4
+    elif [ "$HOST_RAM_GB" -ge 16 ]; then
+        COLIMA_RAM=$(( HOST_RAM_GB * 60 / 100 ))
+    elif [ "$HOST_RAM_GB" -ge 8 ]; then
+        COLIMA_RAM=$(( HOST_RAM_GB * 50 / 100 ))
     else
+        # Detection failed (HOST_RAM_GB=0) — pick a safe middle.
         COLIMA_RAM=8
     fi
+    [ "$COLIMA_RAM" -lt 4 ] && COLIMA_RAM=4
     if [ "$HOST_DISK_TOTAL_GB" -gt 0 ]; then
         # Cap at half the host disk so we don't fill the SSD; minimum 50 GB.
         COLIMA_DISK=$(( HOST_DISK_TOTAL_GB / 2 ))

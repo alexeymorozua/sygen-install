@@ -3,9 +3,13 @@
 
 Writes a JSON snapshot of the *host's* CPU%, RAM (used + total), and disk
 (used + total) to a shared path every --interval seconds. sygen-core
-bind-mounts that file read-only at /data/host_metrics.json; helpers in
-rest_routes.py prefer these values over container-local /proc/psutil
-values, which on macOS only see the VM.
+bind-mounts the PARENT DIRECTORY read-only at /data/host_metrics; the
+daemon writes ``state.json`` inside it atomically (tmp + rename). The
+directory mount is required because Colima freezes the container inode
+of a single-file bind mount at container start, so atomic renames on
+the host leave the container reading an orphan inode (v1.6.32 fix).
+Helpers in rest_routes.py prefer these values over container-local
+/proc/psutil values, which on macOS only see the VM.
 
 Stdlib-only. Auto-detects macOS vs Linux. Atomic writes (tmp + rename)
 so readers never observe a half-written file.
@@ -141,6 +145,8 @@ def _disk_linux() -> tuple[int, int]:
 
 
 def _atomic_write(path: str, payload: dict) -> None:
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
         json.dump(payload, f, separators=(",", ":"))

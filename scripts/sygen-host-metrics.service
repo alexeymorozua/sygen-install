@@ -1,10 +1,10 @@
 [Unit]
-Description=Sygen host metrics bridge (writes /srv/sygen/host_metrics.json for sygen-core)
+Description=Sygen host metrics bridge (writes /srv/sygen/host_metrics/state.json for sygen-core)
 After=local-fs.target
 
 [Service]
 Type=simple
-ExecStart=__PYTHON__ __SCRIPT__ --output __SYGEN_ROOT__/host_metrics.json --interval 10
+ExecStart=__PYTHON__ __SCRIPT__ --output __SYGEN_ROOT__/host_metrics/state.json --interval 10
 Restart=always
 RestartSec=5
 StandardOutput=append:__SYGEN_ROOT__/logs/host-metrics.log

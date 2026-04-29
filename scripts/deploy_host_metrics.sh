@@ -43,17 +43,26 @@ PYTHON_BIN="$(command -v python3 || true)"
 [ -z "$PYTHON_BIN" ] && die "python3 not found"
 
 # ---------- 1. Daemon script ----------
-mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs"
+mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs" "$SYGEN_ROOT/host_metrics"
 log "Fetching host_metrics_daemon.py"
 curl -fsSL -o "$SYGEN_ROOT/bin/host_metrics_daemon.py" \
     "$BASE_URL/scripts/host_metrics_daemon.py" \
     || die "could not fetch host_metrics_daemon.py"
 chmod 0755 "$SYGEN_ROOT/bin/host_metrics_daemon.py"
 
-# Touch metrics file so the bind mount has a real file (Docker turns a
-# missing bind source into a directory, which breaks the mount).
-touch "$SYGEN_ROOT/host_metrics.json"
-chmod 0644 "$SYGEN_ROOT/host_metrics.json"
+# Touch state.json so the docker-compose bind mount has a target on first
+# up — the directory itself is what's mounted, but a placeholder file
+# keeps /api/system/status responses well-formed during the few seconds
+# before the first daemon tick.
+touch "$SYGEN_ROOT/host_metrics/state.json"
+chmod 0644 "$SYGEN_ROOT/host_metrics/state.json"
+
+# Migrate any pre-v1.6.32 single-file artifact (the bug this script
+# fixes — single-file bind mounts on Colima freeze the inode and miss
+# atomic-rename rotations).
+if [ -f "$SYGEN_ROOT/host_metrics.json" ] && [ ! -L "$SYGEN_ROOT/host_metrics.json" ]; then
+    rm -f "$SYGEN_ROOT/host_metrics.json"
+fi
 
 # ---------- 2. Service unit ----------
 if [ $IS_MACOS -eq 1 ]; then
@@ -95,12 +104,35 @@ else
     log "systemd unit started"
 fi
 
-# ---------- 3. docker-compose.yml — add bind mount if missing ----------
+# ---------- 3. docker-compose.yml — ensure dir-style bind mount ----------
 COMPOSE="$SYGEN_ROOT/docker-compose.yml"
-if grep -q '/data/host_metrics.json' "$COMPOSE"; then
-    log "docker-compose.yml: bind mount already present"
+if grep -q ':/data/host_metrics:ro' "$COMPOSE"; then
+    log "docker-compose.yml: directory bind mount already present"
+elif grep -q '/data/host_metrics.json' "$COMPOSE"; then
+    log "docker-compose.yml: rewriting legacy file bind mount → directory bind mount"
+    # Single-file bind mounts on Colima freeze the inode at container start
+    # and miss the daemon's atomic-rename rotations. Rewrite to a directory
+    # mount in place so path traversal resolves to the new inode each read.
+    python3 - "$COMPOSE" "$SYGEN_ROOT" <<'PY'
+import re
+import sys
+import pathlib
+
+compose_path = pathlib.Path(sys.argv[1])
+sygen_root = sys.argv[2]
+text = compose_path.read_text()
+
+# Replace any host path ending in /host_metrics.json on either side of the ':'
+# with the new directory layout. Anchored on the unique target path.
+pattern = re.compile(r"^(\s*-\s*)(\S+?)/host_metrics\.json:/data/host_metrics\.json:ro\s*$", re.MULTILINE)
+new_text, n = pattern.subn(rf"\1{sygen_root}/host_metrics:/data/host_metrics:ro", text)
+if n == 0:
+    print("FATAL: legacy host_metrics.json mount detected but pattern did not match", file=sys.stderr)
+    sys.exit(1)
+compose_path.write_text(new_text)
+PY
 else
-    log "docker-compose.yml: inserting host_metrics.json bind mount"
+    log "docker-compose.yml: inserting host_metrics directory bind mount"
     # Insert after the claude-auth volume line in the core service. Match
     # both /srv/sygen (Linux/auto) and the SYGEN_ROOT-rewritten local form.
     python3 - "$COMPOSE" "$SYGEN_ROOT" <<'PY'
@@ -124,16 +156,22 @@ for line in lines:
     out.append(line)
     if not inserted and needle in line:
         indent = line[: len(line) - len(line.lstrip())]
-        out.append(f"{indent}- {sygen_root}/host_metrics.json:/data/host_metrics.json:ro\n")
+        out.append(f"{indent}- {sygen_root}/host_metrics:/data/host_metrics:ro\n")
         inserted = True
 
 compose_path.write_text("".join(out))
 PY
 fi
 
+# Drop the legacy single-file artifact if it survived a docker-compose
+# rewrite (the file no longer corresponds to any mount).
+if [ -f "$SYGEN_ROOT/host_metrics.json" ] && [ ! -L "$SYGEN_ROOT/host_metrics.json" ]; then
+    rm -f "$SYGEN_ROOT/host_metrics.json"
+fi
+
 # ---------- 4. Recreate core so the new mount takes effect ----------
 log "Recreating sygen-core (docker compose up -d core)"
 docker compose -f "$COMPOSE" --env-file "$SYGEN_ROOT/.env" up -d core
 
-log "Done. Wait ~10 s for the daemon to populate $SYGEN_ROOT/host_metrics.json,"
+log "Done. Wait ~10 s for the daemon to populate $SYGEN_ROOT/host_metrics/state.json,"
 log "then check the dashboard — CPU/RAM/disk USED should now reflect the host."

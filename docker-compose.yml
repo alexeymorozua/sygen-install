@@ -16,11 +16,14 @@ services:
       # Persist Claude Code CLI credentials across container rebuilds.
       - /srv/sygen/claude-auth:/home/sygen/.claude
       # Live host metrics (CPU/RAM/disk) written by host_metrics_daemon on
-      # the macOS / Linux host. Read-only bind. install.sh touches the file
-      # before `docker compose up` so the mount target exists; the daemon
-      # then overwrites it atomically every 10 s. Helpers in
+      # the macOS / Linux host. Read-only DIRECTORY bind — mounting a single
+      # file freezes the container's inode at start time and atomic
+      # daemon writes (tmp + rename) leave it reading an orphan inode on
+      # Colima. install.sh creates the directory before `docker compose up`
+      # so the mount target exists; the daemon writes
+      # state.json inside it atomically every 10 s. Helpers in
       # sygen_bot.api.rest_routes prefer this over container-local psutil.
-      - /srv/sygen/host_metrics.json:/data/host_metrics.json:ro
+      - /srv/sygen/host_metrics:/data/host_metrics:ro
       # Host-level Homebrew update check / apply state. Written by
       # host_updates_check.sh (state.json) and host_update_runner.sh
       # (result.json) on the host; core writes the trigger file

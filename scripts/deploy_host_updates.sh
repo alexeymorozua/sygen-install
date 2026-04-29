@@ -108,11 +108,18 @@ compose_path = pathlib.Path(sys.argv[1])
 sygen_root = sys.argv[2]
 text = compose_path.read_text()
 
-# Anchor on the host_metrics.json mount which install.sh always inserts;
-# we sit right after it, in the same `core` service volumes block.
-needle = "/data/host_metrics.json:ro"
-if needle not in text:
-    print("FATAL: could not find host_metrics.json mount in docker-compose.yml; "
+# Anchor on the host_metrics mount which install.sh always inserts; we
+# sit right after it, in the same `core` service volumes block. Accept
+# both the v1.6.32+ directory mount (/data/host_metrics:ro) and the
+# pre-v1.6.32 file mount (/data/host_metrics.json:ro) so a deploy still
+# works on installs that haven't migrated yet.
+needle = None
+for candidate in ("/data/host_metrics:ro", "/data/host_metrics.json:ro"):
+    if candidate in text:
+        needle = candidate
+        break
+if needle is None:
+    print("FATAL: could not find host_metrics mount in docker-compose.yml; "
           "run a recent install first", file=sys.stderr)
     sys.exit(1)
 

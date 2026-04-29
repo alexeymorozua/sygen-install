@@ -9,7 +9,7 @@
         <string>__PYTHON__</string>
         <string>__SCRIPT__</string>
         <string>--output</string>
-        <string>__SYGEN_ROOT__/host_metrics.json</string>
+        <string>__SYGEN_ROOT__/host_metrics/state.json</string>
         <string>--interval</string>
         <string>10</string>
     </array>

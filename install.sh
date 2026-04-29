@@ -1521,25 +1521,37 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
 fi
 
 # ---------- 5b. Host metrics daemon (macOS + Linux) ----------
-# Writes live host CPU/RAM/disk usage to $SYGEN_ROOT/host_metrics.json every
-# 10 s. Bind-mounted into sygen-core read-only at /data/host_metrics.json so
-# the dashboard reports host-true USED values (psutil inside Colima only
-# sees the VM; on bare-metal Linux the daemon agrees with /proc).
+# Writes live host CPU/RAM/disk usage to $SYGEN_ROOT/host_metrics/state.json
+# every 10 s. The PARENT DIRECTORY is bind-mounted into sygen-core read-only
+# at /data/host_metrics so the dashboard reports host-true USED values
+# (psutil inside Colima only sees the VM; on bare-metal Linux the daemon
+# agrees with /proc). Directory bind (not file bind) is required because
+# Colima freezes the container inode of a single-file mount at start time,
+# so the daemon's atomic-rename writes leave the container reading an
+# orphan inode (v1.6.32 fix).
 STAGE="host-metrics"
-log "Installing host_metrics_daemon → $SYGEN_ROOT/host_metrics.json"
+log "Installing host_metrics_daemon → $SYGEN_ROOT/host_metrics/state.json"
 
-mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs"
+mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs" "$SYGEN_ROOT/host_metrics"
 
 curl -fsSL -o "$SYGEN_ROOT/bin/host_metrics_daemon.py" \
     "$BASE_URL/scripts/host_metrics_daemon.py" \
     || die "could not fetch host_metrics_daemon.py"
 chmod 0755 "$SYGEN_ROOT/bin/host_metrics_daemon.py"
 
-# Touch the metrics file so the docker-compose bind-mount has a real file
-# target (else Docker creates a directory at that path and the mount is
-# useless until manually fixed). Daemon overwrites this on first tick.
-touch "$SYGEN_ROOT/host_metrics.json"
-chmod 0644 "$SYGEN_ROOT/host_metrics.json"
+# Touch state.json inside the bind-mounted directory so docker-compose has a
+# real target on first up (the directory itself is enough but keeping a
+# placeholder makes /api/system/status return supported:false-with-stale
+# instead of file-missing during the few seconds before the daemon writes).
+touch "$SYGEN_ROOT/host_metrics/state.json"
+chmod 0644 "$SYGEN_ROOT/host_metrics/state.json"
+
+# Migrate any pre-v1.6.32 single-file artifact left from an older install.
+# Without this the old `host_metrics.json` lingers on disk forever and
+# confuses operators who grep for it. Safe: the path is no longer read.
+if [ -f "$SYGEN_ROOT/host_metrics.json" ]; then
+    rm -f "$SYGEN_ROOT/host_metrics.json"
+fi
 
 PYTHON_BIN="$(command -v python3 || true)"
 [ -z "$PYTHON_BIN" ] && die "python3 not found — required for host_metrics_daemon"

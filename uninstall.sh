@@ -3,11 +3,18 @@
 #
 # Linux  (Debian/Ubuntu VPS): stops containers, removes systemd backup
 #        timer, nginx vhost, cert renewal hook, and /srv/sygen.
-# macOS  (Darwin): stops containers, stops Colima (does not delete the VM
-#        — it may be shared with other projects), removes ~/.sygen-local.
+# macOS  (Darwin): stops containers, then either:
+#          - manifest mode (v1.6.46+): reads $SYGEN_ROOT/.install_manifest.json
+#            and removes ONLY the brew packages, Colima profile, and
+#            launchd agents that install.sh actually put on the host.
+#          - legacy mode (no manifest): does the minimum-safe cleanup
+#            inherited from v1.6.45 — colima stop (no VM delete),
+#            remove $SYGEN_ROOT, unload known launchd labels, never
+#            touch brew. The user can wipe brew packages and the Colima
+#            VM manually after a fresh install brings the manifest back.
 #
-# Kept (for fast re-install):
-#   - Let's Encrypt cert in /etc/letsencrypt/ (Linux)
+# Kept on Linux (for fast re-install):
+#   - Let's Encrypt cert in /etc/letsencrypt/
 #   - System packages (docker, nginx, certbot, colima, etc.)
 #
 # Optional Cloudflare DNS cleanup:
@@ -24,14 +31,15 @@
 #   curl -fsSL https://install.sygen.pro/uninstall.sh | \
 #       SYGEN_UNINSTALL_CONFIRM=1 sudo bash
 #
-# CLI flags (v1.6.45+, used by host_uninstall_runner.sh):
+# CLI flags:
 #   --force            Skip confirmation prompt (same effect as
 #                      SYGEN_UNINSTALL_CONFIRM=1).
-#   --delete-vm        macOS only: also `colima delete --force` after
-#                      stopping Colima. Reclaims ~27 GB VM image but
-#                      forces a fresh init on next install.
-#   --keep-brew        Informational — brew packages are never removed
-#                      today; flag is accepted for forward compatibility.
+#   --delete-vm        DEPRECATED in v1.6.46+ — manifest now controls VM
+#                      deletion. Accepted for backward compat with old
+#                      host_uninstall_runner.sh; ignored with a warning.
+#   --keep-brew        DEPRECATED in v1.6.46+ — manifest now controls
+#                      brew package removal. Accepted for backward compat;
+#                      ignored with a warning.
 set -euo pipefail
 
 log()  { printf '\033[0;36m==>\033[0m %s\n' "$*"; }
@@ -40,16 +48,14 @@ die()  { printf '\033[0;31mXX\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------- CLI flags ----------
 FORCE=0
-DELETE_VM=0
-KEEP_BREW=1
 while [ $# -gt 0 ]; do
     case "$1" in
-        --force)       FORCE=1 ;;
-        --delete-vm)   DELETE_VM=1 ;;
-        --keep-brew)   KEEP_BREW=1 ;;
-        --no-keep-brew) KEEP_BREW=0 ;;
+        --force)        FORCE=1 ;;
+        --delete-vm)    warn "--delete-vm is ignored in v1.6.46+ — manifest now controls VM deletion" ;;
+        --keep-brew)    warn "--keep-brew is ignored in v1.6.46+ — manifest now controls brew removal" ;;
+        --no-keep-brew) warn "--no-keep-brew is ignored in v1.6.46+ — manifest now controls brew removal" ;;
         --help|-h)
-            sed -n '1,30p' "$0"
+            sed -n '1,42p' "$0"
             exit 0
             ;;
         *) warn "ignoring unknown flag: $1" ;;
@@ -88,18 +94,81 @@ case "$SYGEN_ROOT" in
     *) die "Refusing to remove unexpected SYGEN_ROOT='$SYGEN_ROOT' (safety check)" ;;
 esac
 
+# ---------- Manifest detection ----------
+# v1.6.46+: install.sh writes $SYGEN_ROOT/.install_manifest.json. When it
+# exists we drive the macOS-side cleanup from it. When it doesn't (older
+# install or manually-deleted manifest) we fall back to the v1.6.45
+# behaviour: never touch brew, never delete the Colima VM, only handle
+# the launchd agents we hard-coded last release.
+MANIFEST="$SYGEN_ROOT/.install_manifest.json"
+USE_MANIFEST=0
+MANIFEST_INSTALLED_PKGS=()
+MANIFEST_PLISTS=()
+MANIFEST_COLIMA_CREATED=0
+if [ -f "$MANIFEST" ] && command -v python3 >/dev/null 2>&1; then
+    if manifest_dump="$(python3 - "$MANIFEST" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        m = json.load(f)
+except Exception:
+    sys.exit(2)
+if not isinstance(m, dict):
+    sys.exit(2)
+print('OK')
+for p in m.get('installed_pkgs') or []:
+    if isinstance(p, str): print('I\t' + p)
+for p in m.get('plists_installed') or []:
+    if isinstance(p, str): print('L\t' + p)
+v = m.get('colima_profile_created')
+if isinstance(v, bool):
+    print('C\t' + ('1' if v else '0'))
+PY
+)"; then
+        USE_MANIFEST=1
+        # First line is "OK"; consume it and parse the rest.
+        while IFS=$'\t' read -r kind val; do
+            case "$kind" in
+                I) MANIFEST_INSTALLED_PKGS+=("$val") ;;
+                L) MANIFEST_PLISTS+=("$val") ;;
+                C) MANIFEST_COLIMA_CREATED="$val" ;;
+            esac
+        done <<< "$(printf '%s\n' "$manifest_dump" | tail -n +2)"
+    else
+        warn "manifest at $MANIFEST is unreadable or malformed — falling back to legacy mode"
+    fi
+fi
+
 # ---------- Confirmation gate ----------
 log "This will REMOVE Sygen from this host:"
 log "  - Stop and remove all Sygen containers"
-if [ $LOCAL_MODE -eq 1 ]; then
-    log "  - Delete $SYGEN_ROOT including data, .env, secrets, claude-auth"
-    log "  - Stop Colima (will NOT delete the VM — it may be shared)"
-else
-    log "  - Delete $SYGEN_ROOT including data, .env, secrets, claude-auth"
+log "  - Delete $SYGEN_ROOT including data, .env, secrets, claude-auth"
+if [ $LOCAL_MODE -eq 0 ]; then
     log "  - Delete /var/backups/sygen"
     log "  - Remove systemd units: sygen-backup.timer/.service"
     log "  - Remove cert renewal hook (/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh)"
     log "  - Remove nginx vhost (sygen)"
+fi
+if [ $LOCAL_MODE -eq 1 ]; then
+    if [ $USE_MANIFEST -eq 1 ]; then
+        if [ ${#MANIFEST_PLISTS[@]} -gt 0 ]; then
+            log "  - Unload + remove launchd agents: ${MANIFEST_PLISTS[*]}"
+        fi
+        if [ ${#MANIFEST_INSTALLED_PKGS[@]} -gt 0 ]; then
+            log "  - brew uninstall packages installed by sygen: ${MANIFEST_INSTALLED_PKGS[*]}"
+        else
+            log "  - No sygen-owned brew packages to remove (manifest is empty)"
+        fi
+        if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
+            log "  - Stop Colima AND delete the default profile (~27 GB VM image — sygen created it)"
+        else
+            log "  - Stop Colima (will NOT delete the VM — it pre-existed)"
+        fi
+    else
+        log "  - Stop Colima (will NOT delete the VM — legacy install, no manifest)"
+        log "  - Will NOT remove brew packages — legacy install, no manifest"
+        log "  - Remove known launchd agents (host-updates-check / host-update-runner / host-uninstall-runner / host-metrics / cert-renew)"
+    fi
 fi
 log "  - Release the install.sygen.pro subdomain slot (if .env has SYGEN_INSTALL_TOKEN)"
 log "  - Optionally release Cloudflare DNS A record (if CF_* env vars set)"
@@ -107,8 +176,10 @@ log ""
 log "It will NOT touch:"
 if [ $LOCAL_MODE -eq 0 ]; then
     log "  - The Let's Encrypt cert in /etc/letsencrypt/ (kept for re-install)"
+    log "  - System packages (docker, nginx, certbot, etc.)"
+elif [ $USE_MANIFEST -eq 1 ]; then
+    log "  - Brew packages that pre-existed the install (left intact)"
 fi
-log "  - System packages (docker, nginx, certbot, colima, etc.)"
 log "  - Other services on the host"
 log ""
 
@@ -237,18 +308,78 @@ fi
 
 # ---------- 4. macOS-only ----------
 if [ $LOCAL_MODE -eq 1 ]; then
-    if command -v colima >/dev/null 2>&1; then
-        if colima status >/dev/null 2>&1; then
-            log "Stopping Colima"
-            colima stop 2>/dev/null || warn "  colima stop failed (ignored)"
-        else
-            log "Colima not running — skipping stop"
+    # Helpers shared between manifest mode and legacy mode.
+    unload_plist() {
+        # $1 = launchd label (e.g. com.sygen.host-update-runner). The path
+        # is always $HOME/Library/LaunchAgents/<label>.plist on macOS.
+        local label="$1"
+        local plist="$HOME/Library/LaunchAgents/${label}.plist"
+        launchctl unload "$plist" >/dev/null 2>&1 || true
+        rm -f "$plist" 2>/dev/null || true
+    }
+
+    if [ $USE_MANIFEST -eq 1 ]; then
+        log "Manifest mode — using $MANIFEST to drive cleanup"
+
+        # Plists FIRST so we don't fight a daemon that might re-create
+        # state mid-uninstall (host_metrics is the only realistic one,
+        # but cheap to do all at once).
+        if [ ${#MANIFEST_PLISTS[@]} -gt 0 ]; then
+            log "Unloading launchd agents from manifest"
+            for label in "${MANIFEST_PLISTS[@]}"; do
+                unload_plist "$label"
+            done
         fi
-        if [ $DELETE_VM -eq 1 ]; then
-            log "--delete-vm: removing Colima VM image (frees ~27 GB)"
-            colima delete --force 2>/dev/null || \
-                warn "  colima delete failed (ignored — re-run manually if needed)"
+
+        # Colima — stop first, then optionally delete the VM.
+        if command -v colima >/dev/null 2>&1; then
+            if colima status >/dev/null 2>&1; then
+                log "Stopping Colima"
+                colima stop 2>/dev/null || warn "  colima stop failed (ignored)"
+            fi
+            if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
+                log "Deleting Colima default profile (manifest says we created it — frees ~27 GB)"
+                colima delete --force 2>/dev/null || \
+                    warn "  colima delete failed (ignored — re-run manually if needed)"
+            else
+                log "Leaving Colima default profile intact (manifest says it pre-existed sygen)"
+            fi
         fi
+
+        # Brew packages — only the ones we installed. --ignore-dependencies
+        # keeps brew from pulling out shared libs (e.g. ca-certificates)
+        # that other packages need; the user can `brew autoremove` later
+        # if they really want to prune.
+        if [ ${#MANIFEST_INSTALLED_PKGS[@]} -gt 0 ] && command -v brew >/dev/null 2>&1; then
+            log "brew uninstall (sygen-owned packages from manifest)"
+            for pkg in "${MANIFEST_INSTALLED_PKGS[@]}"; do
+                if brew list "$pkg" >/dev/null 2>&1; then
+                    brew uninstall --ignore-dependencies "$pkg" 2>/dev/null \
+                        || warn "  brew uninstall $pkg failed (continuing)"
+                fi
+            done
+        fi
+    else
+        # Legacy mode: don't touch brew, don't delete the VM, but still
+        # unload the launchd agents we hard-coded in pre-1.6.46 installs
+        # so they don't keep flapping after $SYGEN_ROOT goes away.
+        log "Legacy mode (no manifest at $MANIFEST) — minimal-safe cleanup"
+        if command -v colima >/dev/null 2>&1; then
+            if colima status >/dev/null 2>&1; then
+                log "Stopping Colima"
+                colima stop 2>/dev/null || warn "  colima stop failed (ignored)"
+            else
+                log "Colima not running — skipping stop"
+            fi
+        fi
+        for label in \
+            com.sygen.host-uninstall-runner \
+            com.sygen.host-update-runner \
+            com.sygen.host-updates-check \
+            com.sygen.host-metrics \
+            com.sygen.cert-renew; do
+            unload_plist "$label"
+        done
     fi
 fi
 
@@ -313,13 +444,31 @@ if [ $LOCAL_MODE -eq 0 ]; then
     echo "    - systemd units (sygen-backup.timer + .service)"
     echo "    - Nginx vhost (sygen)"
     echo "    - Cert renewal hook"
+elif [ $USE_MANIFEST -eq 1 ]; then
+    if [ ${#MANIFEST_PLISTS[@]} -gt 0 ]; then
+        echo "    - launchd agents: ${MANIFEST_PLISTS[*]}"
+    fi
+    if [ ${#MANIFEST_INSTALLED_PKGS[@]} -gt 0 ]; then
+        echo "    - Brew packages installed by sygen: ${MANIFEST_INSTALLED_PKGS[*]}"
+    fi
+    if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
+        echo "    - Colima default profile + VM image (sygen created it)"
+    fi
 fi
 echo ""
 echo "  Kept (for fast re-install):"
 if [ $LOCAL_MODE -eq 0 ]; then
     echo "    - Let's Encrypt cert in /etc/letsencrypt/"
+    echo "    - System packages (docker, nginx, certbot, etc.)"
+elif [ $USE_MANIFEST -eq 1 ]; then
+    if [ "$MANIFEST_COLIMA_CREATED" != "1" ]; then
+        echo "    - Colima default profile (you had it before sygen)"
+    fi
+    echo "    - Brew packages that pre-existed the install"
+else
+    echo "    - All brew packages (legacy install — no manifest to drive removal)"
+    echo "    - Colima default profile (legacy install — VM kept)"
 fi
-echo "    - System packages (docker, nginx, certbot, colima, etc.)"
 echo "    - Cached Docker images (docker image prune -a to reclaim space)"
 echo ""
 echo "  To re-install:"
@@ -334,11 +483,11 @@ if [ $LOCAL_MODE -eq 0 ]; then
     echo "    apt-get remove docker-ce docker-ce-cli nginx"
 else
     echo "    curl -fsSL https://install.sygen.pro/install.sh | bash"
-    echo ""
-    echo "  If Colima is no longer needed by other projects:"
-    echo "    colima delete"
-    echo ""
-    echo "  To remove brew packages (rare):"
-    echo "    brew uninstall colima docker docker-compose"
+    if [ $USE_MANIFEST -eq 0 ]; then
+        echo ""
+        echo "  Legacy install — to manually finish cleanup:"
+        echo "    colima delete                          # remove the VM (~27 GB)"
+        echo "    brew uninstall colima docker docker-compose jq    # if not used elsewhere"
+    fi
 fi
 echo "====================================================================="

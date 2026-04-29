@@ -4,20 +4,24 @@
 # Sibling of host_update_runner.sh — same trigger-file architecture.
 # Polls $SYGEN_ROOT/host_updates/uninstall_requested every 5 s; when
 # admin POSTs to /api/system/uninstall the core container writes that
-# file with a JSON body describing the requested wipe scope.
+# file with a small JSON body for forensics (requested_at / requested_by).
 #
 # When the trigger appears:
 #   1. Atomically rename to uninstall_running so a parallel runner /
 #      duplicate POST cannot double-execute.
-#   2. Read delete_vm + keep_brew flags from the body.
-#   3. Disown into a detached subshell and exec uninstall.sh --force
-#      (with --delete-vm if requested). The runner script itself is
-#      about to be deleted along with $SYGEN_ROOT/bin, so we cannot
-#      keep waiting on the child — fire-and-forget is the correct
-#      shape here.
-#   4. The detached child runs uninstall.sh, which stops containers,
-#      wipes $SYGEN_ROOT, runs `colima delete --force` if requested,
-#      and finally unloads our launchd agent before disappearing.
+#   2. Disown into a detached subshell and exec `uninstall.sh --force`.
+#      The runner script itself is about to be deleted along with
+#      $SYGEN_ROOT/bin, so we cannot keep waiting on the child —
+#      fire-and-forget is the correct shape here.
+#   3. The detached child runs uninstall.sh, which now reads the
+#      install manifest at $SYGEN_ROOT/.install_manifest.json (if
+#      present) to drive what gets removed (brew packages, Colima VM,
+#      launchd agents). Pre-1.6.46 installs without a manifest fall
+#      back to a minimum-safe cleanup.
+#
+# v1.6.46+ note: the legacy delete_vm / keep_brew JSON fields are
+# IGNORED here — the manifest is the single source of truth. The body
+# is still read+logged for audit/forensics but nothing in it is acted on.
 #
 # Designed for KeepAlive=true under launchd. We do NOT write
 # result.json — by the time the uninstall completes the bind-mounted
@@ -88,33 +92,15 @@ process_trigger() {
 
     log "Uninstall trigger received (body=${BODY:-empty})"
 
-    JQ_BIN="$(command -v jq 2>/dev/null || true)"
-
-    DELETE_VM=0
-    KEEP_BREW=1
-    if [ -n "$BODY" ] && [ -n "$JQ_BIN" ]; then
-        if printf '%s' "$BODY" | "$JQ_BIN" -e '.delete_vm == true' >/dev/null 2>&1; then
-            DELETE_VM=1
-        fi
-        if printf '%s' "$BODY" | "$JQ_BIN" -e '.keep_brew == false' >/dev/null 2>&1; then
-            KEEP_BREW=0
-        fi
-    fi
-
     if [ ! -x "$UNINSTALL_SCRIPT" ] && [ ! -f "$UNINSTALL_SCRIPT" ]; then
         log "FATAL: $UNINSTALL_SCRIPT not found — clearing marker"
         rm -f "$RUNNING" 2>/dev/null || true
         return 0
     fi
 
-    # Build flags for uninstall.sh.
+    # v1.6.46+: --force is the only flag we pass. uninstall.sh reads
+    # $SYGEN_ROOT/.install_manifest.json to decide what to remove.
     UNINSTALL_FLAGS="--force"
-    if [ $DELETE_VM -eq 1 ]; then
-        UNINSTALL_FLAGS="$UNINSTALL_FLAGS --delete-vm"
-    fi
-    if [ $KEEP_BREW -eq 0 ]; then
-        UNINSTALL_FLAGS="$UNINSTALL_FLAGS --no-keep-brew"
-    fi
 
     log "Spawning detached uninstall: bash $UNINSTALL_SCRIPT $UNINSTALL_FLAGS"
 

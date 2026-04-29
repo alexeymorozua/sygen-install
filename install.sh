@@ -135,6 +135,169 @@ json_escape() {
     printf '"%s"' "$s"
 }
 
+# ---------- Install manifest (v1.6.46+) ----------
+# Captures what install.sh actually puts on the host (vs. what was already
+# there) so uninstall.sh can remove ONLY what we own. Brew packages and
+# the Colima default profile are the load-bearing fields — they may have
+# been installed by the user before sygen, in which case we must not
+# touch them on uninstall.
+#
+# On re-runs the original classification is preserved (see manifest_load):
+# a package preexisting at first install must stay "preexisting" forever,
+# even though `brew list` will now succeed for sygen-installed packages
+# too. The manifest is written once per install and updated by
+# manifest_write() at the end with any newly-tracked items appended.
+SYGEN_MANIFEST_INSTALLED_PKGS=()
+SYGEN_MANIFEST_PREEXISTING_PKGS=()
+SYGEN_MANIFEST_PLISTS=()
+SYGEN_MANIFEST_COLIMA_CREATED=""
+
+_manifest_has_item() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+manifest_record_pkg_installed() {
+    local pkg="$1"
+    if _manifest_has_item "$pkg" \
+            ${SYGEN_MANIFEST_INSTALLED_PKGS[@]+"${SYGEN_MANIFEST_INSTALLED_PKGS[@]}"} \
+            ${SYGEN_MANIFEST_PREEXISTING_PKGS[@]+"${SYGEN_MANIFEST_PREEXISTING_PKGS[@]}"}; then
+        return 0
+    fi
+    SYGEN_MANIFEST_INSTALLED_PKGS+=("$pkg")
+}
+
+manifest_record_pkg_preexisting() {
+    local pkg="$1"
+    if _manifest_has_item "$pkg" \
+            ${SYGEN_MANIFEST_INSTALLED_PKGS[@]+"${SYGEN_MANIFEST_INSTALLED_PKGS[@]}"} \
+            ${SYGEN_MANIFEST_PREEXISTING_PKGS[@]+"${SYGEN_MANIFEST_PREEXISTING_PKGS[@]}"}; then
+        return 0
+    fi
+    SYGEN_MANIFEST_PREEXISTING_PKGS+=("$pkg")
+}
+
+manifest_record_plist() {
+    local label="$1"
+    if _manifest_has_item "$label" \
+            ${SYGEN_MANIFEST_PLISTS[@]+"${SYGEN_MANIFEST_PLISTS[@]}"}; then
+        return 0
+    fi
+    SYGEN_MANIFEST_PLISTS+=("$label")
+}
+
+manifest_set_colima_created() {
+    # Once set, never overwrite — a re-run that reuses the existing VM
+    # must not flip a true→false flag and orphan the VM image on
+    # uninstall. Empty (initial state) → record the boolean as given.
+    [ -n "$SYGEN_MANIFEST_COLIMA_CREATED" ] && return 0
+    SYGEN_MANIFEST_COLIMA_CREATED="$1"   # 0 or 1
+}
+
+# Wrap `brew list || brew install` so each package call lands in the
+# right manifest bucket. Used for the macOS deps loop.
+manifest_brew_install() {
+    local pkg="$1"
+    if brew list "$pkg" >/dev/null 2>&1; then
+        manifest_record_pkg_preexisting "$pkg"
+    else
+        manifest_record_pkg_installed "$pkg"
+        brew install "$pkg"
+    fi
+}
+
+# Atomic JSON writer. Schema is consumed by uninstall.sh AND by the
+# /api/system/uninstall/preview endpoint — see CONTRACT_admin_api.md.
+manifest_write() {
+    local path="$1"
+    [ -z "$path" ] && return 0
+    local dir
+    dir="$(dirname "$path")"
+    mkdir -p "$dir" 2>/dev/null || true
+    local tmp="$path.$$.tmp"
+    local installed_at
+    installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    {
+        printf '{\n'
+        printf '  "version": 1,\n'
+        printf '  "installed_at": %s,\n' "$(json_escape "$installed_at")"
+        printf '  "sygen_root": %s,\n' "$(json_escape "$SYGEN_ROOT")"
+        printf '  "installed_pkgs": ['
+        local first=1 p
+        for p in ${SYGEN_MANIFEST_INSTALLED_PKGS[@]+"${SYGEN_MANIFEST_INSTALLED_PKGS[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf '],\n'
+        printf '  "preexisting_pkgs": ['
+        first=1
+        for p in ${SYGEN_MANIFEST_PREEXISTING_PKGS[@]+"${SYGEN_MANIFEST_PREEXISTING_PKGS[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf '],\n'
+        if [ "$SYGEN_MANIFEST_COLIMA_CREATED" = "1" ]; then
+            printf '  "colima_profile_created": true,\n'
+            printf '  "colima_profile_name": "default",\n'
+        elif [ "$SYGEN_MANIFEST_COLIMA_CREATED" = "0" ]; then
+            printf '  "colima_profile_created": false,\n'
+            printf '  "colima_profile_name": "default",\n'
+        fi
+        printf '  "plists_installed": ['
+        first=1
+        for p in ${SYGEN_MANIFEST_PLISTS[@]+"${SYGEN_MANIFEST_PLISTS[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf ']\n'
+        printf '}\n'
+    } > "$tmp"
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv "$tmp" "$path"
+}
+
+# Restore prior classification from disk so a re-run doesn't reclassify
+# "preexisting at first install" → "installed by us" (which would let
+# uninstall remove a brew package the user owned before sygen).
+manifest_load() {
+    local path="$1"
+    [ -f "$path" ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    local out
+    out="$(python3 - "$path" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        m = json.load(f)
+except Exception:
+    sys.exit(0)
+for p in m.get('installed_pkgs') or []:
+    if isinstance(p, str): print('I\t' + p)
+for p in m.get('preexisting_pkgs') or []:
+    if isinstance(p, str): print('P\t' + p)
+for p in m.get('plists_installed') or []:
+    if isinstance(p, str): print('L\t' + p)
+v = m.get('colima_profile_created')
+if isinstance(v, bool):
+    print('C\t' + ('1' if v else '0'))
+PY
+)"
+    [ -z "$out" ] && return 0
+    while IFS=$'\t' read -r kind val; do
+        case "$kind" in
+            I) SYGEN_MANIFEST_INSTALLED_PKGS+=("$val") ;;
+            P) SYGEN_MANIFEST_PREEXISTING_PKGS+=("$val") ;;
+            L) SYGEN_MANIFEST_PLISTS+=("$val") ;;
+            C) SYGEN_MANIFEST_COLIMA_CREATED="$val" ;;
+        esac
+    done <<< "$out"
+}
+
 # Strict allowlist validators for the two values that come back from the
 # Cloudflare provisioning Worker. Both are interpolated into shell
 # scripts, nginx config, JSON config, and `rm -rf` paths — a Worker
@@ -564,6 +727,14 @@ else
     log "Host: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown) — deploying $ADMIN_URL"
 fi
 
+# Manifest path is bound to the now-final SYGEN_ROOT. Load any prior
+# manifest BEFORE the package install loops so re-runs preserve the
+# original classification (a package marked "preexisting" at first
+# install must not flip to "installed_by_us" just because it's now on
+# disk thanks to the previous sygen install).
+SYGEN_MANIFEST_PATH="$SYGEN_ROOT/.install_manifest.json"
+manifest_load "$SYGEN_MANIFEST_PATH"
+
 # ---------- 1. System packages ----------
 STAGE="deps"
 if [ $LOCAL_MODE -eq 0 ]; then
@@ -618,9 +789,7 @@ else
         macos_pkgs+=(nginx pipx)
     fi
     for pkg in "${macos_pkgs[@]}"; do
-        if ! brew list "$pkg" >/dev/null 2>&1; then
-            brew install "$pkg"
-        fi
+        manifest_brew_install "$pkg"
     done
 
     # certbot in an isolated pipx venv — first run creates it, re-runs are
@@ -736,11 +905,32 @@ else
         fi
     fi
 
+    # Detect whether the `default` Colima profile already existed BEFORE
+    # we (potentially) start it. Profile presence is the load-bearing
+    # signal for uninstall: if we created it, uninstall reclaims the VM
+    # image; if it pre-existed (user runs Colima for other projects),
+    # we leave it alone and only `colima stop`. `colima list` exits 0
+    # even when no profile exists, so grep is the actual check.
+    COLIMA_PROFILE_PREEXISTED=0
+    if colima list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx default; then
+        COLIMA_PROFILE_PREEXISTED=1
+    elif [ -d "$HOME/.colima/default" ]; then
+        # Belt-and-suspenders for older colima versions whose `list` may
+        # not enumerate stopped profiles consistently.
+        COLIMA_PROFILE_PREEXISTED=1
+    fi
+
     if ! colima status >/dev/null 2>&1; then
         log "macOS: starting Colima (${COLIMA_CPU} CPU / ${COLIMA_RAM} GB RAM / ${COLIMA_DISK} GB disk; host: ${HOST_CPU_MODEL}, ${HOST_RAM_GB} GB, ${HOST_DISK_TOTAL_GB} GB)"
         colima start --cpu "$COLIMA_CPU" --memory "$COLIMA_RAM" --disk "$COLIMA_DISK" ${COLIMA_EXTRA_ARGS[@]+"${COLIMA_EXTRA_ARGS[@]}"}
     else
         log "macOS: Colima already running"
+    fi
+
+    if [ $COLIMA_PROFILE_PREEXISTED -eq 1 ]; then
+        manifest_set_colima_created 0
+    else
+        manifest_set_colima_created 1
     fi
 
     # Persist host-true metrics in .env so docker-compose can pass them
@@ -1604,6 +1794,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
     launchctl unload "$PLIST_DST" >/dev/null 2>&1 || true
     launchctl load -w "$PLIST_DST" \
         || warn "launchctl load failed — host metrics will fall back to Colima view"
+    manifest_record_plist "com.sygen.host-metrics"
 else
     # Linux — systemd unit, system-wide.
     UNIT_DST="/etc/systemd/system/sygen-host-metrics.service"
@@ -1700,6 +1891,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
         launchctl unload "$plist_dst" >/dev/null 2>&1 || true
         launchctl load -w "$plist_dst" \
             || warn "launchctl load failed for $label — host updates surface unchanged"
+        manifest_record_plist "$label"
     }
     install_host_update_plist "com.sygen.host-updates-check" \
         "$SYGEN_ROOT/bin/host_updates_check.sh"
@@ -1767,9 +1959,11 @@ elif [ "$OS" = "Darwin" ]; then
     WHISPER_BIN_OK=0
     if brew list whisper-cpp >/dev/null 2>&1; then
         log "whisper-cpp already installed"
+        manifest_record_pkg_preexisting whisper-cpp
         WHISPER_BIN_OK=1
     else
         if brew install whisper-cpp; then
+            manifest_record_pkg_installed whisper-cpp
             WHISPER_BIN_OK=1
         else
             _whisper_record_error "brew install whisper-cpp failed"
@@ -2225,6 +2419,7 @@ PLIST
     launchctl unload "$PLIST_DST" >/dev/null 2>&1 || true
     launchctl load -w "$PLIST_DST" \
         || warn "launchctl load failed — cert will need manual renewal every 90 days"
+    manifest_record_plist "com.sygen.cert-renew"
 fi
 
 # ---------- 10. Nightly backups (Linux only) ----------
@@ -2295,6 +2490,22 @@ fi
 
 # ---------- 11. Done ----------
 STAGE="done"
+
+# Write the install manifest. SYGEN_ROOT path is the canonical copy used
+# by uninstall.sh; the host_updates copy is the same content, bind-mounted
+# into sygen-core at /data/host_updates/install_manifest.json so the
+# /api/system/uninstall/preview endpoint can describe what would be
+# removed without exec'ing into the host. Both paths are written
+# atomically; failure to write one is logged but doesn't fail the
+# install (the user can still uninstall — uninstall.sh falls back to
+# legacy mode when the manifest is missing).
+manifest_write "$SYGEN_MANIFEST_PATH" \
+    || warn "could not write install manifest at $SYGEN_MANIFEST_PATH — uninstall will fall back to legacy mode"
+# Mirror into the bind-mounted host_updates dir so the in-container
+# /api/system/uninstall/preview endpoint can read it. manifest_write
+# auto-creates the parent directory.
+manifest_write "$SYGEN_ROOT/host_updates/install_manifest.json" \
+    || warn "could not write host_updates manifest copy — preview endpoint will report legacy_install"
 
 if [ "$JSON_OUTPUT" = "1" ]; then
     if [ -z "$ADMIN_PASS" ]; then

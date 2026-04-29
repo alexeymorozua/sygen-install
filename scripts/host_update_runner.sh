@@ -185,6 +185,13 @@ process_trigger() {
             FAILED_JSON_TMP="["
             FIRST=1
             for p in $PACKAGES; do
+                # Defensive: package names that contain regex metacharacters
+                # would break the grep below (or worse, match unrelated lines).
+                # Allowlist alphanumerics + dash/underscore/dot — that covers
+                # every brew formula and apt package we ship today.
+                case "$p" in
+                    *[!a-zA-Z0-9_.-]*) continue ;;
+                esac
                 ERR_LINE="$(grep -E "Error: ($p:|.*$p.* failed to install|Failure.*$p)" "$TMP_LOG" 2>/dev/null | head -n 1 || true)"
                 if [ -n "$ERR_LINE" ]; then
                     if [ $FIRST -eq 0 ]; then

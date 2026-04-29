@@ -1690,60 +1690,119 @@ fi
 # The ggml-small model (~466 MB) is the sweet spot for quality / size /
 # RAM on the boxes Sygen actually ships on. Advanced users can swap to a
 # different model via config.json `transcription.model`.
+#
+# Both OSes write the model under $HOME/.local/share/whisper-cpp/models —
+# transcription.py reads from the same path regardless of platform, so a
+# Linux SYGEN_ROOT-relative dir would be invisible to the runtime.
+#
+# Set SKIP_WHISPER=1 to skip this section entirely (e.g. CI, hosts that
+# already shipped a model, or operators who want to defer the download).
 STAGE="whisper"
 WHISPER_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-if [ "$OS" = "Darwin" ]; then
+WHISPER_MODEL_SHA256="1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
+WHISPER_MODEL_DIR="$HOME/.local/share/whisper-cpp/models"
+WHISPER_MODEL_PATH="$WHISPER_MODEL_DIR/ggml-small.bin"
+WHISPER_ERROR_FILE="$HOME/.local/share/whisper-cpp/.last_install_error"
+
+# Helpers — keep failures discoverable via /api/system/voice/config.
+_whisper_record_error() {
+    mkdir -p "$(dirname "$WHISPER_ERROR_FILE")" 2>/dev/null || true
+    printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" \
+        > "$WHISPER_ERROR_FILE" 2>/dev/null || true
+}
+_whisper_clear_error() {
+    rm -f "$WHISPER_ERROR_FILE" 2>/dev/null || true
+}
+
+if [ "${SKIP_WHISPER:-0}" = "1" ]; then
+    log "SKIP_WHISPER=1 → skipping whisper.cpp install"
+elif [ "$OS" = "Darwin" ]; then
     log "Installing whisper.cpp (out-of-box voice transcription)"
+    WHISPER_BIN_OK=0
     if brew list whisper-cpp >/dev/null 2>&1; then
         log "whisper-cpp already installed"
+        WHISPER_BIN_OK=1
     else
-        brew install whisper-cpp \
-            || warn "brew install whisper-cpp failed — voice transcription will not work until installed"
+        if brew install whisper-cpp; then
+            WHISPER_BIN_OK=1
+        else
+            _whisper_record_error "brew install whisper-cpp failed"
+            warn "brew install whisper-cpp failed — voice transcription will not work until installed"
+        fi
     fi
 
-    WHISPER_MODEL_DIR="$HOME/.local/share/whisper-cpp/models"
-    WHISPER_MODEL_PATH="$WHISPER_MODEL_DIR/ggml-small.bin"
-    if [ -f "$WHISPER_MODEL_PATH" ]; then
-        log "ggml-small model already present"
-    else
-        log "Downloading ggml-small.bin (~466 MB) → $WHISPER_MODEL_PATH"
-        mkdir -p "$WHISPER_MODEL_DIR"
-        if curl -fL --progress-bar -o "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_URL"; then
-            mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
+    if [ "$WHISPER_BIN_OK" -eq 1 ]; then
+        if [ -f "$WHISPER_MODEL_PATH" ]; then
+            log "ggml-small model already present"
+            _whisper_clear_error
         else
-            rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
-            warn "ggml-small download failed — re-run: curl -fL -o $WHISPER_MODEL_PATH $WHISPER_MODEL_URL"
+            log "Downloading whisper.cpp model (~466 MB, 2-5 min on broadband)…"
+            log "→ $WHISPER_MODEL_PATH"
+            mkdir -p "$WHISPER_MODEL_DIR"
+            if curl -fL --progress-bar -o "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_URL"; then
+                ACTUAL_SHA="$(shasum -a 256 "$WHISPER_MODEL_PATH.tmp" 2>/dev/null | awk '{print $1}')"
+                if [ "$ACTUAL_SHA" != "$WHISPER_MODEL_SHA256" ]; then
+                    rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
+                    _whisper_record_error "SHA-256 mismatch (expected $WHISPER_MODEL_SHA256, got ${ACTUAL_SHA:-<unreadable>})"
+                    warn "ggml-small SHA-256 mismatch — file deleted, re-run installer"
+                else
+                    mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
+                    _whisper_clear_error
+                fi
+            else
+                rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
+                _whisper_record_error "curl download failed: $WHISPER_MODEL_URL"
+                warn "ggml-small download failed — re-run: curl -fL -o $WHISPER_MODEL_PATH $WHISPER_MODEL_URL"
+            fi
         fi
     fi
 elif [ "$OS" = "Linux" ]; then
     log "Installing whisper.cpp (out-of-box voice transcription)"
+    WHISPER_BIN_OK=0
     if command -v whisper-cli >/dev/null 2>&1 || command -v whisper-cpp >/dev/null 2>&1; then
         log "whisper.cpp already installed"
+        WHISPER_BIN_OK=1
     elif command -v apt-get >/dev/null 2>&1; then
         # Debian/Ubuntu: package is `whisper.cpp` in trixie+/24.10+ universe.
         # Older releases don't carry it — warn and continue.
         if apt_retry install -y -qq whisper-cpp 2>/dev/null \
                 || apt_retry install -y -qq whisper.cpp 2>/dev/null; then
             log "whisper.cpp installed via apt"
+            WHISPER_BIN_OK=1
         else
+            _whisper_record_error "apt-get install whisper.cpp failed (package not in this release)"
             warn "whisper.cpp not available via apt on this release — voice transcription disabled until manual install"
         fi
     else
+        _whisper_record_error "no supported package manager (apt-get missing)"
         warn "Unsupported Linux package manager — install whisper.cpp manually for voice transcription"
     fi
 
-    WHISPER_MODEL_DIR="${SYGEN_ROOT:-/srv/sygen}/whisper-models"
-    WHISPER_MODEL_PATH="$WHISPER_MODEL_DIR/ggml-small.bin"
-    mkdir -p "$WHISPER_MODEL_DIR"
-    if [ -f "$WHISPER_MODEL_PATH" ]; then
-        log "ggml-small model already present"
-    else
-        log "Downloading ggml-small.bin (~466 MB) → $WHISPER_MODEL_PATH"
-        if curl -fL --progress-bar -o "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_URL"; then
-            mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
+    # Skip the 466 MB download if the binary isn't on PATH — otherwise
+    # we'd ship a model the runtime can't load.
+    if [ "$WHISPER_BIN_OK" -eq 1 ]; then
+        mkdir -p "$WHISPER_MODEL_DIR"
+        if [ -f "$WHISPER_MODEL_PATH" ]; then
+            log "ggml-small model already present"
+            _whisper_clear_error
         else
-            rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
-            warn "ggml-small download failed — re-run: curl -fL -o $WHISPER_MODEL_PATH $WHISPER_MODEL_URL"
+            log "Downloading whisper.cpp model (~466 MB, 2-5 min on broadband)…"
+            log "→ $WHISPER_MODEL_PATH"
+            if curl -fL --progress-bar -o "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_URL"; then
+                ACTUAL_SHA="$(sha256sum "$WHISPER_MODEL_PATH.tmp" 2>/dev/null | awk '{print $1}')"
+                if [ "$ACTUAL_SHA" != "$WHISPER_MODEL_SHA256" ]; then
+                    rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
+                    _whisper_record_error "SHA-256 mismatch (expected $WHISPER_MODEL_SHA256, got ${ACTUAL_SHA:-<unreadable>})"
+                    warn "ggml-small SHA-256 mismatch — file deleted, re-run installer"
+                else
+                    mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
+                    _whisper_clear_error
+                fi
+            else
+                rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
+                _whisper_record_error "curl download failed: $WHISPER_MODEL_URL"
+                warn "ggml-small download failed — re-run: curl -fL -o $WHISPER_MODEL_PATH $WHISPER_MODEL_URL"
+            fi
         fi
     fi
 fi

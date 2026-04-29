@@ -9,7 +9,7 @@ fake placeholder. Sygen's sygen-core container bind-mounts that file at
 placeholder, which surfaces inside the container as "Not logged in".
 
 This daemon reads the keychain item and writes the JSON back to the
-file every ``--interval`` seconds (default 15 min) so the file always
+file every ``--interval`` seconds (default 60 s = 1 min) so the file always
 holds a fresh token. The OAuth token rotates roughly monthly, so a
 periodic sync is sufficient — no Keychain change-notify needed.
 

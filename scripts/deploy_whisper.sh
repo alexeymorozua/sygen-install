@@ -92,7 +92,11 @@ else
     log "Downloading whisper.cpp model (~466 MB, 2-5 min on broadband)…"
     log "→ $MODEL_PATH"
     if curl -fL --progress-bar -o "$MODEL_PATH.tmp" "$WHISPER_MODEL_URL"; then
-        ACTUAL_SHA="$(shasum -a 256 "$MODEL_PATH.tmp" 2>/dev/null | awk '{print $1}')"
+        if [ "$OS" = "Darwin" ]; then
+            ACTUAL_SHA="$(shasum -a 256 "$MODEL_PATH.tmp" 2>/dev/null | awk '{print $1}')"
+        else
+            ACTUAL_SHA="$(sha256sum "$MODEL_PATH.tmp" 2>/dev/null | awk '{print $1}')"
+        fi
         if [ "$ACTUAL_SHA" != "$WHISPER_MODEL_SHA256" ]; then
             rm -f "$MODEL_PATH.tmp" 2>/dev/null || true
             die "SHA-256 mismatch (expected $WHISPER_MODEL_SHA256, got ${ACTUAL_SHA:-<unreadable>}) — file deleted"

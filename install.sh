@@ -712,7 +712,7 @@ else
 
     if ! colima status >/dev/null 2>&1; then
         log "macOS: starting Colima (${COLIMA_CPU} CPU / ${COLIMA_RAM} GB RAM / ${COLIMA_DISK} GB disk; host: ${HOST_CPU_MODEL}, ${HOST_RAM_GB} GB, ${HOST_DISK_TOTAL_GB} GB)"
-        colima start --cpu "$COLIMA_CPU" --memory "$COLIMA_RAM" --disk "$COLIMA_DISK" "${COLIMA_EXTRA_ARGS[@]}"
+        colima start --cpu "$COLIMA_CPU" --memory "$COLIMA_RAM" --disk "$COLIMA_DISK" ${COLIMA_EXTRA_ARGS[@]+"${COLIMA_EXTRA_ARGS[@]}"}
     else
         log "macOS: Colima already running"
     fi
@@ -1765,8 +1765,8 @@ elif [ "$OS" = "Linux" ]; then
     elif command -v apt-get >/dev/null 2>&1; then
         # Debian/Ubuntu: package is `whisper.cpp` in trixie+/24.10+ universe.
         # Older releases don't carry it — warn and continue.
-        if apt_retry install -y -qq whisper-cpp 2>/dev/null \
-                || apt_retry install -y -qq whisper.cpp 2>/dev/null; then
+        if apt-get install -y -qq whisper-cpp 2>/dev/null \
+                || apt-get install -y -qq whisper.cpp 2>/dev/null; then
             log "whisper.cpp installed via apt"
             WHISPER_BIN_OK=1
         else
@@ -1922,15 +1922,10 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
         local master_pid
         master_pid=$(pgrep -f 'nginx: master' 2>/dev/null | head -n1 || true)
         [ -z "$master_pid" ] && return 2  # no running nginx at all
-        local exe
-        exe=$(/bin/ps -o args= -p "$master_pid" 2>/dev/null | awk '{print $3}' || true)
-        # Older `ps` formats put the binary as $1; check both. lsof is the
-        # belt-and-braces alternative.
-        if [ -z "$exe" ] || [ ! -e "$exe" ]; then
-            exe=$(/bin/ps -o args= -p "$master_pid" 2>/dev/null | awk '{print $1}' || true)
-        fi
-        case "$exe" in
-            "$BREW_NGINX_PREFIX/"*|"$(brew --prefix)/"*) return 0 ;;
+        local cmd
+        cmd=$(/bin/ps -o args= -p "$master_pid" 2>/dev/null || true)
+        case "$cmd" in
+            *"$BREW_NGINX_PREFIX/"*|*"$(brew --prefix)/"*) return 0 ;;
             *) return 1 ;;
         esac
     }

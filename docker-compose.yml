@@ -21,6 +21,13 @@ services:
       # then overwrites it atomically every 10 s. Helpers in
       # sygen_bot.api.rest_routes prefer this over container-local psutil.
       - /srv/sygen/host_metrics.json:/data/host_metrics.json:ro
+      # Host-level Homebrew update check / apply state. Written by
+      # host_updates_check.sh (state.json) and host_update_runner.sh
+      # (result.json) on the host; core writes the trigger file
+      # `requested` here when admin POSTs /api/system/host-updates/apply
+      # and the runner polls for it. install.sh creates this directory
+      # before `docker compose up` so the mount target exists.
+      - /srv/sygen/host_updates:/data/host_updates:rw
     environment:
       - SYGEN_HOME=/data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

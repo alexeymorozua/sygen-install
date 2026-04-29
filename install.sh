@@ -1641,6 +1641,80 @@ if [ $LOCAL_MODE -eq 1 ]; then
     fi
 fi
 
+# ---------- 5d. Host updates check + apply runner (macOS only) ----------
+# Two daemons that together implement the "host-level updates" banner:
+#
+#   - host_updates_check.sh runs at load + weekly (Sun 04:30) and writes
+#     $SYGEN_ROOT/host_updates/state.json describing which allow-listed
+#     Homebrew packages (colima/nginx/certbot/docker/jq/openssl/tailscale)
+#     are outdated.
+#   - host_update_runner.sh sits in a 5-second poll loop watching for
+#     $SYGEN_ROOT/host_updates/requested. Core writes that file when
+#     admin POSTs /api/system/host-updates/apply; the runner validates
+#     against the same allowlist, runs `brew upgrade <pkgs>`, and on
+#     Colima upgrade restarts the VM cleanly.
+#
+# Linux is skipped — apt-get/dnf-driven update flows are out of scope
+# for this iteration (Linux installs are server-class and operators
+# manage `unattended-upgrades` themselves).
+if [ $LOCAL_MODE -eq 1 ]; then
+    STAGE="host-updates"
+    log "Installing host_updates check + apply runner"
+
+    mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs" "$SYGEN_ROOT/host_updates"
+
+    curl -fsSL -o "$SYGEN_ROOT/bin/host_updates_check.sh" \
+        "$BASE_URL/scripts/host_updates_check.sh" \
+        || die "could not fetch host_updates_check.sh"
+    chmod 0755 "$SYGEN_ROOT/bin/host_updates_check.sh"
+
+    curl -fsSL -o "$SYGEN_ROOT/bin/host_update_runner.sh" \
+        "$BASE_URL/scripts/host_update_runner.sh" \
+        || die "could not fetch host_update_runner.sh"
+    chmod 0755 "$SYGEN_ROOT/bin/host_update_runner.sh"
+
+    # Stub out state.json so docker-compose doesn't race the first check.
+    if [ ! -f "$SYGEN_ROOT/host_updates/state.json" ]; then
+        printf '{"supported":false,"reason":"initial install"}\n' \
+            > "$SYGEN_ROOT/host_updates/state.json"
+    fi
+    chmod 0644 "$SYGEN_ROOT/host_updates/state.json"
+
+    # One-shot check before the daemon takes over so the dashboard's
+    # very first GET sees real data.
+    SYGEN_ROOT="$SYGEN_ROOT" "$SYGEN_ROOT/bin/host_updates_check.sh" \
+        --output "$SYGEN_ROOT/host_updates/state.json" \
+        || warn "initial host_updates check failed — daemon will retry"
+
+    # Install both plists.
+    install_host_update_plist() {
+        local label="$1"
+        local script="$2"
+        local plist_dst="$HOME/Library/LaunchAgents/$label.plist"
+        local tmpl="/tmp/$label.plist.tmpl"
+
+        mkdir -p "$HOME/Library/LaunchAgents"
+        curl -fsSL -o "$tmpl" "$BASE_URL/scripts/$label.plist" \
+            || die "could not fetch $label.plist"
+        sed \
+            -e "s|__SCRIPT__|$script|g" \
+            -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
+            -e "s|__HOME__|$HOME|g" \
+            "$tmpl" > "$plist_dst"
+        rm -f "$tmpl"
+        # Defensive: see host-metrics block — 0600 plists won't load.
+        chmod 0644 "$plist_dst"
+
+        launchctl unload "$plist_dst" >/dev/null 2>&1 || true
+        launchctl load -w "$plist_dst" \
+            || warn "launchctl load failed for $label — host updates surface unchanged"
+    }
+    install_host_update_plist "com.sygen.host-updates-check" \
+        "$SYGEN_ROOT/bin/host_updates_check.sh"
+    install_host_update_plist "com.sygen.host-update-runner" \
+        "$SYGEN_ROOT/bin/host_update_runner.sh"
+fi
+
 # ---------- 6. Start stack ----------
 log "Pulling images"
 docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env" pull

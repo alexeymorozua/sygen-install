@@ -1596,62 +1596,16 @@ else
         || warn "systemd enable failed — host metrics will fall back to /proc"
 fi
 
-# ---------- 5c. Keychain → file sync (macOS only) ----------
-# Newer Claude Code CLI builds on macOS migrated OAuth tokens out of
-# ~/.claude/.credentials.json into the login Keychain (service:
-# "Claude Code-credentials"). The on-disk file is left as a fake
-# placeholder. Sygen's Docker containers (sygen-core and the sandbox
-# where sub-agents run) bind-mount that file and only see the
-# placeholder, surfacing as "Not logged in" inside containers.
+# ---------- 5c. Keychain → file sync — OPT-IN, NOT installed by default ----------
+# Sub-agents run on the host CLI by default (`docker.enabled: false` in
+# every per-agent config), so the host's Keychain is read natively and
+# the sync daemon is unnecessary. The daemon ships in scripts/ for users
+# who explicitly want Docker-isolated sub-agents (`docker.enabled: true`)
+# — they can install it on demand:
 #
-# The daemon below reads the keychain item and writes it back to the
-# file every 15 min so the file always carries a fresh token. Skipped
-# on Linux (no keychain) and skipped on macOS hosts that don't have
-# the keychain item yet (user uses ANTHROPIC_API_KEY or hasn't run
-# `claude` interactively yet — they keep working as before).
-if [ $LOCAL_MODE -eq 1 ]; then
-    STAGE="keychain-sync"
-    if security find-generic-password -s "Claude Code-credentials" -w \
-            >/dev/null 2>&1; then
-        log "Installing keychain_sync_daemon → ~/.claude/.credentials.json"
-
-        mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs"
-        curl -fsSL -o "$SYGEN_ROOT/bin/keychain_sync_daemon.py" \
-            "$BASE_URL/scripts/keychain_sync_daemon.py" \
-            || die "could not fetch keychain_sync_daemon.py"
-        chmod 0755 "$SYGEN_ROOT/bin/keychain_sync_daemon.py"
-
-        KEYCHAIN_TARGET="$HOME/.claude/.credentials.json"
-        PLIST_DST="$HOME/Library/LaunchAgents/com.sygen.keychain-sync.plist"
-        mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.claude"
-        curl -fsSL -o /tmp/sygen.keychain-sync.plist.tmpl \
-            "$BASE_URL/scripts/com.sygen.keychain-sync.plist" \
-            || die "could not fetch com.sygen.keychain-sync.plist"
-        sed \
-            -e "s|__PYTHON__|$PYTHON_BIN|g" \
-            -e "s|__SCRIPT__|$SYGEN_ROOT/bin/keychain_sync_daemon.py|g" \
-            -e "s|__TARGET__|$KEYCHAIN_TARGET|g" \
-            -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
-            /tmp/sygen.keychain-sync.plist.tmpl > "$PLIST_DST"
-        rm -f /tmp/sygen.keychain-sync.plist.tmpl
-        # Defensive: see host-metrics block — 0600 plists won't load.
-        chmod 0644 "$PLIST_DST"
-
-        # One-shot sync BEFORE docker compose up so the file is fresh
-        # when sandbox containers bind-mount it on first boot.
-        "$PYTHON_BIN" "$SYGEN_ROOT/bin/keychain_sync_daemon.py" \
-            --target "$KEYCHAIN_TARGET" --once \
-            || warn "initial keychain → file sync failed — daemon will retry"
-
-        # Idempotent reload: unload an old copy if present, then load fresh.
-        launchctl unload "$PLIST_DST" >/dev/null 2>&1 || true
-        launchctl load -w "$PLIST_DST" \
-            || warn "launchctl load failed — keychain sync will not run"
-    else
-        log "Keychain item 'Claude Code-credentials' not found — skipping sync daemon"
-        log "  (login via 'claude' once on the host to populate it, then re-run install)"
-    fi
-fi
+#   bash scripts/deploy_keychain_sync.sh
+#
+# See scripts/keychain_sync_daemon.py + com.sygen.keychain-sync.plist.
 
 # ---------- 5d. Host updates check + apply runner (macOS only) ----------
 # Two daemons that together implement the "host-level updates" banner:

@@ -2193,6 +2193,19 @@ else
     warn "              cat $PW_FILE"
 fi
 
+# iOS deeplink — let users add the server to the Sygen iOS app in one tap.
+# QR is printed only when `qrencode` is available; otherwise the link alone.
+SYGEN_IOS_DEEPLINK="sygen://add?host=$FQDN"
+cat <<DONE
+---------------------------------------------------------------------
+  iOS app — open this link on iPhone (or scan the QR below) to add this server:
+    $SYGEN_IOS_DEEPLINK
+DONE
+if command -v qrencode >/dev/null 2>&1; then
+    echo
+    qrencode -t UTF8 "$SYGEN_IOS_DEEPLINK" 2>/dev/null || true
+fi
+
 cat <<DONE
 
   Core image:  $CORE_IMAGE

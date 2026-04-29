@@ -23,11 +23,44 @@
 #   # Non-interactive (CI / automation):
 #   curl -fsSL https://install.sygen.pro/uninstall.sh | \
 #       SYGEN_UNINSTALL_CONFIRM=1 sudo bash
+#
+# CLI flags (v1.6.45+, used by host_uninstall_runner.sh):
+#   --force            Skip confirmation prompt (same effect as
+#                      SYGEN_UNINSTALL_CONFIRM=1).
+#   --delete-vm        macOS only: also `colima delete --force` after
+#                      stopping Colima. Reclaims ~27 GB VM image but
+#                      forces a fresh init on next install.
+#   --keep-brew        Informational — brew packages are never removed
+#                      today; flag is accepted for forward compatibility.
 set -euo pipefail
 
 log()  { printf '\033[0;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[0;33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[0;31mXX\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---------- CLI flags ----------
+FORCE=0
+DELETE_VM=0
+KEEP_BREW=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force)       FORCE=1 ;;
+        --delete-vm)   DELETE_VM=1 ;;
+        --keep-brew)   KEEP_BREW=1 ;;
+        --no-keep-brew) KEEP_BREW=0 ;;
+        --help|-h)
+            sed -n '1,30p' "$0"
+            exit 0
+            ;;
+        *) warn "ignoring unknown flag: $1" ;;
+    esac
+    shift
+done
+
+if [ $FORCE -eq 1 ]; then
+    SYGEN_UNINSTALL_CONFIRM=1
+    export SYGEN_UNINSTALL_CONFIRM
+fi
 
 # ---------- Platform detection ----------
 OS="$(uname -s)"
@@ -210,6 +243,11 @@ if [ $LOCAL_MODE -eq 1 ]; then
             colima stop 2>/dev/null || warn "  colima stop failed (ignored)"
         else
             log "Colima not running — skipping stop"
+        fi
+        if [ $DELETE_VM -eq 1 ]; then
+            log "--delete-vm: removing Colima VM image (frees ~27 GB)"
+            colima delete --force 2>/dev/null || \
+                warn "  colima delete failed (ignored — re-run manually if needed)"
         fi
     fi
 fi

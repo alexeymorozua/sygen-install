@@ -1705,6 +1705,26 @@ if [ $LOCAL_MODE -eq 1 ]; then
         "$SYGEN_ROOT/bin/host_updates_check.sh"
     install_host_update_plist "com.sygen.host-update-runner" \
         "$SYGEN_ROOT/bin/host_update_runner.sh"
+
+    # --- Self-uninstall runner (v1.6.45+) ---
+    # Pairs with /api/system/uninstall on core. Drops a local copy of
+    # uninstall.sh into $SYGEN_ROOT (so the runner can find it after
+    # network goes down or the install dir is partially torn down) and
+    # installs the runner under the same launchd pattern.
+    log "Installing self-uninstall runner"
+
+    curl -fsSL -o "$SYGEN_ROOT/uninstall.sh" \
+        "$BASE_URL/uninstall.sh" \
+        || warn "could not fetch uninstall.sh — admin/iOS Delete Server will fail until you re-run install.sh"
+    chmod 0755 "$SYGEN_ROOT/uninstall.sh" 2>/dev/null || true
+
+    curl -fsSL -o "$SYGEN_ROOT/bin/host_uninstall_runner.sh" \
+        "$BASE_URL/scripts/host_uninstall_runner.sh" \
+        || die "could not fetch host_uninstall_runner.sh"
+    chmod 0755 "$SYGEN_ROOT/bin/host_uninstall_runner.sh"
+
+    install_host_update_plist "com.sygen.host-uninstall-runner" \
+        "$SYGEN_ROOT/bin/host_uninstall_runner.sh"
 fi
 
 # ---------- 5e. Whisper.cpp (out-of-box voice transcription) ----------

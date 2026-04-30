@@ -110,6 +110,8 @@ MANIFEST="$SYGEN_ROOT/.install_manifest.json"
 USE_MANIFEST=0
 MANIFEST_INSTALLED_PKGS=()
 MANIFEST_PLISTS=()
+MANIFEST_DOWNLOADED_PATHS=()
+MANIFEST_DOWNLOADED_TOTAL_BYTES=0
 MANIFEST_COLIMA_CREATED=0
 MANIFEST_COLIMA_PROFILE="default"
 if [ -f "$MANIFEST" ] && command -v python3 >/dev/null 2>&1; then
@@ -133,6 +135,15 @@ if isinstance(v, bool):
 n = m.get('colima_profile_name')
 if isinstance(n, str) and n:
     print('N\t' + n)
+total = 0
+for d in m.get('downloaded_files') or []:
+    if not isinstance(d, dict): continue
+    p = d.get('path')
+    if not isinstance(p, str) or not p: continue
+    sz = d.get('size_bytes')
+    if isinstance(sz, int) and sz > 0: total += sz
+    print('D\t' + p)
+print('T\t' + str(total))
 PY
 )"; then
         USE_MANIFEST=1
@@ -143,6 +154,8 @@ PY
                 L) MANIFEST_PLISTS+=("$val") ;;
                 C) MANIFEST_COLIMA_CREATED="$val" ;;
                 N) MANIFEST_COLIMA_PROFILE="$val" ;;
+                D) MANIFEST_DOWNLOADED_PATHS+=("$val") ;;
+                T) MANIFEST_DOWNLOADED_TOTAL_BYTES="$val" ;;
             esac
         done <<< "$(printf '%s\n' "$manifest_dump" | tail -n +2)"
     else
@@ -174,6 +187,12 @@ if [ $LOCAL_MODE -eq 1 ]; then
             log "  - Stop Colima AND delete profile '$MANIFEST_COLIMA_PROFILE' (~27 GB VM image — sygen created it)"
         else
             log "  - Stop Colima profile '$MANIFEST_COLIMA_PROFILE' (will NOT delete the VM — it pre-existed)"
+        fi
+        if [ ${#MANIFEST_DOWNLOADED_PATHS[@]} -gt 0 ]; then
+            log "  - Remove ${#MANIFEST_DOWNLOADED_PATHS[@]} file(s) downloaded by install.sh (~$((MANIFEST_DOWNLOADED_TOTAL_BYTES / 1024 / 1024)) MB):"
+            for dp in "${MANIFEST_DOWNLOADED_PATHS[@]}"; do
+                log "      $dp"
+            done
         fi
     else
         log "  - Stop Colima (will NOT delete the VM — legacy install, no manifest)"
@@ -433,6 +452,59 @@ else
     log "Cloudflare env vars not set — skipping DNS cleanup"
 fi
 
+# ---------- 5b. Remove host files install.sh downloaded ----------
+# v1.6.49+: install.sh records files it pulled to host paths OUTSIDE
+# $SYGEN_ROOT in manifest's downloaded_files (today: the ggml-small whisper
+# model, ~466 MB). The wipe below only nukes $SYGEN_ROOT, so without this
+# block those files would orphan on disk after a "clean" uninstall.
+#
+# Only acts on paths the manifest explicitly recorded. A pre-existing
+# whisper model the user staged manually before sygen was never recorded
+# (install.sh's download branch is gated on `if [ -f $MODEL_PATH ]`), so
+# this loop will never touch it.
+if [ ${#MANIFEST_DOWNLOADED_PATHS[@]} -gt 0 ]; then
+    log "Removing files install.sh downloaded to host (manifest's downloaded_files)"
+    for dpath in "${MANIFEST_DOWNLOADED_PATHS[@]}"; do
+        # Defence in depth. The primary safety check is the allowlist
+        # below (path must be under $HOME or $SYGEN_ROOT — the only two
+        # locations install.sh actually writes outside the wipe tree).
+        # An additional reject filter blocks two specific footguns a
+        # tampered manifest could use:
+        #   1. "/" or empty — `rm -f /` is fatal even with -f.
+        #   2. "..": path-traversal smuggled into the allowlist string
+        #      check (which is purely a glob prefix and doesn't resolve
+        #      relative segments). Reject anything containing "..".
+        case "$dpath" in
+            ''|/) warn "  refusing to remove root/empty path from manifest"; continue ;;
+            *..*) warn "  refusing path with .. components: $dpath"; continue ;;
+        esac
+        # Allowlist: only $HOME-rooted (whisper model today) or
+        # $SYGEN_ROOT-rooted (forward-safe — though step 6 below also
+        # wipes $SYGEN_ROOT, so this is mostly belt+suspenders).
+        case "$dpath" in
+            "$HOME"/*|"$SYGEN_ROOT"/*) ;;
+            *)
+                warn "  manifest path is not under \$HOME or \$SYGEN_ROOT, skipping: $dpath"
+                continue
+                ;;
+        esac
+        if [ -f "$dpath" ]; then
+            log "  removing $dpath"
+            rm -f "$dpath" 2>/dev/null \
+                || warn "    failed to remove $dpath (ignored)"
+        else
+            log "  $dpath already gone, skipping"
+        fi
+    done
+
+    # Best-effort: drop now-empty parent dirs so a clean uninstall
+    # doesn't leave behind ~/.local/share/whisper-cpp/models/ as an
+    # empty husk. rmdir refuses non-empty dirs so this is safe even
+    # if the user has other models stashed alongside ours.
+    rmdir "$HOME/.local/share/whisper-cpp/models" 2>/dev/null || true
+    rmdir "$HOME/.local/share/whisper-cpp" 2>/dev/null || true
+fi
+
 # ---------- 6. Wipe SYGEN_ROOT ----------
 # Re-assert the safety guard right before rm -rf. Defends against any later
 # code accidentally clearing $SYGEN_ROOT between the top-of-script check
@@ -471,6 +543,9 @@ elif [ $USE_MANIFEST -eq 1 ]; then
     fi
     if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
         echo "    - Colima default profile + VM image (sygen created it)"
+    fi
+    if [ ${#MANIFEST_DOWNLOADED_PATHS[@]} -gt 0 ]; then
+        echo "    - Files downloaded by install.sh (${#MANIFEST_DOWNLOADED_PATHS[@]}, ~$((MANIFEST_DOWNLOADED_TOTAL_BYTES / 1024 / 1024)) MB)"
     fi
 fi
 echo ""

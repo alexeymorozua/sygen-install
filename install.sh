@@ -152,6 +152,12 @@ json_escape() {
 SYGEN_MANIFEST_INSTALLED_PKGS=()
 SYGEN_MANIFEST_PREEXISTING_PKGS=()
 SYGEN_MANIFEST_PLISTS=()
+# v1.6.49+: files install.sh downloaded to host paths OUTSIDE $SYGEN_ROOT
+# (today: whisper ggml model under ~/.local/share/whisper-cpp/models). Only
+# files we actually fetched land here — preexisting model files stay
+# unrecorded so uninstall.sh never touches a model the user pre-staged.
+# Each entry is a JSON object literal: {"path":"…","purpose":"…","size_bytes":N}.
+SYGEN_MANIFEST_DOWNLOADED=()
 SYGEN_MANIFEST_COLIMA_CREATED=""
 # Colima profile name used by `colima start` AND recorded in the manifest.
 # Fixed at "default" today; making it a variable means we never have a
@@ -198,6 +204,30 @@ manifest_record_plist() {
         return 0
     fi
     SYGEN_MANIFEST_PLISTS+=("$label")
+}
+
+manifest_record_downloaded() {
+    # $1 = absolute host path that install.sh just downloaded (post-SHA-verify
+    # for the whisper model — never call this on a file we'll later delete).
+    # $2 = machine-readable purpose tag (e.g. whisper_small_model).
+    #
+    # Idempotent across re-runs: manifest_load reseeds SYGEN_MANIFEST_DOWNLOADED
+    # before sections run, so a re-run that re-discovers an already-recorded
+    # path must not duplicate the entry. Skip silently on dup; caller can
+    # always call this unconditionally on a successful download.
+    local path="$1"
+    local purpose="$2"
+    local entry
+    for entry in ${SYGEN_MANIFEST_DOWNLOADED[@]+"${SYGEN_MANIFEST_DOWNLOADED[@]}"}; do
+        case "$entry" in
+            *"\"path\":\"$path\""*) return 0 ;;
+        esac
+    done
+    local size
+    size="$(stat -f%z "$path" 2>/dev/null || stat -c%s "$path" 2>/dev/null || echo 0)"
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    log "manifest: recording downloaded $path (purpose=$purpose, $size bytes)"
+    SYGEN_MANIFEST_DOWNLOADED+=("{\"path\":$(json_escape "$path"),\"purpose\":$(json_escape "$purpose"),\"size_bytes\":$size}")
 }
 
 manifest_set_colima_created() {
@@ -256,7 +286,12 @@ manifest_write() {
     umask 022
     {
         printf '{\n'
-        printf '  "version": 1,\n'
+        # version=2 (v1.6.49+) adds the downloaded_files field. v1 manifests
+        # are still readable: rest_routes treats a missing field as an empty
+        # list, uninstall.sh's loop is a no-op when MANIFEST_DOWNLOADED is
+        # empty. The bump is purely informational so the preview UI can
+        # tell the operator a manifest predates the new tracking.
+        printf '  "version": 2,\n'
         printf '  "installed_at": %s,\n' "$(json_escape "$installed_at")"
         printf '  "sygen_root": %s,\n' "$(json_escape "$SYGEN_ROOT")"
         printf '  "installed_pkgs": ['
@@ -285,6 +320,16 @@ manifest_write() {
         for p in ${SYGEN_MANIFEST_PLISTS[@]+"${SYGEN_MANIFEST_PLISTS[@]}"}; do
             [ $first -eq 0 ] && printf ', '
             printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf '],\n'
+        # downloaded_files entries are pre-rendered JSON object literals
+        # (see manifest_record_downloaded) so we just splice them with
+        # commas — saves another shell-side JSON encoder.
+        printf '  "downloaded_files": ['
+        first=1
+        for p in ${SYGEN_MANIFEST_DOWNLOADED[@]+"${SYGEN_MANIFEST_DOWNLOADED[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$p"; first=0
         done
         printf ']\n'
         printf '}\n'
@@ -343,6 +388,15 @@ for p in m.get('plists_installed') or []:
 v = m.get('colima_profile_created')
 if isinstance(v, bool):
     print('C\t' + ('1' if v else '0'))
+for d in m.get('downloaded_files') or []:
+    if not isinstance(d, dict): continue
+    p = d.get('path')
+    if not isinstance(p, str) or not p: continue
+    purpose = d.get('purpose')
+    if not isinstance(purpose, str): purpose = ''
+    size = d.get('size_bytes')
+    if not isinstance(size, int) or size < 0: size = 0
+    print('D\t' + json.dumps({'path': p, 'purpose': purpose, 'size_bytes': size}, separators=(',', ':')))
 PY
 )"
     [ -z "$out" ] && return 0
@@ -352,6 +406,7 @@ PY
             P) SYGEN_MANIFEST_PREEXISTING_PKGS+=("$val") ;;
             L) SYGEN_MANIFEST_PLISTS+=("$val") ;;
             C) SYGEN_MANIFEST_COLIMA_CREATED="$val" ;;
+            D) SYGEN_MANIFEST_DOWNLOADED+=("$val") ;;
         esac
     done <<< "$out"
 }
@@ -2079,6 +2134,11 @@ elif [ "$OS" = "Darwin" ]; then
                 else
                     mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
                     _whisper_clear_error
+                    # Record AFTER the rename so a SHA-mismatch file (which
+                    # we delete) never lands in the manifest. On uninstall
+                    # this entry is what tells uninstall.sh to remove the
+                    # ~466 MB model from $HOME/.local/share/whisper-cpp.
+                    manifest_record_downloaded "$WHISPER_MODEL_PATH" "whisper_small_model"
                 fi
             else
                 rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
@@ -2128,6 +2188,9 @@ elif [ "$OS" = "Linux" ]; then
             else
                 mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
                 _whisper_clear_error
+                # See macOS branch for rationale — record only after the
+                # file passes SHA verify and is renamed into place.
+                manifest_record_downloaded "$WHISPER_MODEL_PATH" "whisper_small_model"
             fi
         else
             rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true

@@ -1800,6 +1800,28 @@ else
     EFFECTIVE_PUBLIC_API_URL=$(get_env NEXT_PUBLIC_SYGEN_API_URL "")
 fi
 
+# Host hostname + IANA timezone, surfaced into core via env vars so
+# /api/system/status and /api/system/timezone can fall back to host
+# metadata before the operator first writes config["instance_name"] /
+# config["user_timezone"] via the admin/iOS PUT endpoints.
+#
+# macOS: prefer the user-friendly ComputerName ("Mac mini (aiagent)");
+# fall back to `hostname` if scutil fails. Linux uses `hostname`.
+# TZ: macOS reads /etc/localtime symlink target (Apple's source of
+# truth — System Settings writes through it); systemsetup is the
+# fallback for unusual setups. Linux uses timedatectl, then /etc/timezone.
+# Empty string is preserved so core's UI-side fallback can kick in
+# rather than mis-claiming a TZ.
+if [ $LOCAL_MODE -eq 1 ]; then
+    HOST_HOSTNAME_VAL="$(scutil --get ComputerName 2>/dev/null || hostname 2>/dev/null || true)"
+    HOST_TZ_VAL="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')"
+    [ -z "$HOST_TZ_VAL" ] && HOST_TZ_VAL="$(systemsetup -gettimezone 2>/dev/null | awk -F': ' '{print $2}')"
+else
+    HOST_HOSTNAME_VAL="$(hostname 2>/dev/null || true)"
+    HOST_TZ_VAL="$(timedatectl show --value -p Timezone 2>/dev/null || cat /etc/timezone 2>/dev/null || true)"
+fi
+[ -z "$HOST_TZ_VAL" ] && HOST_TZ_VAL=""
+
 # docker-compose .env is auto-sourced by `docker compose`.
 umask 077
 {
@@ -1852,6 +1874,12 @@ umask 077
     # stays empty and /api/system/voice/config reports
     # model_present=false until the operator drops a model in.
     echo "SYGEN_HOST_WHISPER_MODELS_DIR=$HOME/.local/share/whisper-cpp/models"
+    # Host hostname + IANA timezone (resolved above). Read by core's
+    # /api/system/status and /api/system/timezone as fallbacks before the
+    # operator writes config["instance_name"] / config["user_timezone"].
+    # Empty string = no fallback; UI then renders its own default.
+    echo "SYGEN_HOST_HOSTNAME=$HOST_HOSTNAME_VAL"
+    echo "SYGEN_HOST_TZ=$HOST_TZ_VAL"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"

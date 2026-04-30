@@ -66,6 +66,12 @@ services:
       # path instead of "/" (which is what _HOST_UPDATES_DIR.parent.parent
       # resolves to inside the container).
       - SYGEN_HOST_DATA_DIR=${SYGEN_HOST_DATA_DIR:-}
+      # Host hostname + IANA timezone (resolved by install.sh). Core uses
+      # them as fallbacks for /api/system/status.instance_name and
+      # /api/system/timezone before the operator writes the values
+      # through admin/iOS. Empty string disables the fallback.
+      - SYGEN_HOST_HOSTNAME=${SYGEN_HOST_HOSTNAME:-}
+      - SYGEN_HOST_TZ=${SYGEN_HOST_TZ:-}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:

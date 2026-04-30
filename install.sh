@@ -1822,6 +1822,16 @@ else
 fi
 [ -z "$HOST_TZ_VAL" ] && HOST_TZ_VAL=""
 
+# docker-compose .env grammar doesn't support multi-line values or quoted
+# strings reliably — drop control chars + quote/equals chars that would
+# break parsing or let a malicious hostname inject extra env vars.
+# Unicode (e.g. emoji in macOS ComputerName) is preserved.
+sanitize_env_value() {
+    printf '%s' "$1" | tr -d '\n\r\t' | tr -d '"' | tr -d "'"
+}
+HOST_HOSTNAME_VAL="$(sanitize_env_value "$HOST_HOSTNAME_VAL")"
+HOST_TZ_VAL="$(sanitize_env_value "$HOST_TZ_VAL")"
+
 # docker-compose .env is auto-sourced by `docker compose`.
 umask 077
 {

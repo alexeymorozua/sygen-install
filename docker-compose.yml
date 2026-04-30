@@ -31,6 +31,15 @@ services:
       # and the runner polls for it. install.sh creates this directory
       # before `docker compose up` so the mount target exists.
       - /srv/sygen/host_updates:/data/host_updates:rw
+      # Whisper.cpp ggml-* model (~466 MB). The container ships whisper-cli
+      # baked into the image, but the model itself lives on the host —
+      # downloaded by install.sh (macOS: $HOME/.local/share/whisper-cpp/models;
+      # Linux fallback: /srv/sygen/whisper-models) and bind-mounted read-only
+      # at the path the runtime expects (Path.home() inside the container is
+      # /home/sygen). If the host directory is empty or missing the model,
+      # /api/system/voice/config returns model_present=false — predictable
+      # fallback when install.sh hasn't downloaded the weights yet.
+      - ${SYGEN_HOST_WHISPER_MODELS_DIR:-/srv/sygen/whisper-models}:/home/sygen/.local/share/whisper-cpp/models:ro
     environment:
       - SYGEN_HOME=/data
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

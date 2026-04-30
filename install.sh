@@ -1787,6 +1787,16 @@ umask 077
     # the container. Used only when the manifest is missing; manifest
     # mode reads sygen_root from the manifest itself.
     echo "SYGEN_HOST_DATA_DIR=$SYGEN_ROOT"
+    # Host directory where install.sh (section 5e below) drops the
+    # whisper.cpp ggml-* model. docker-compose bind-mounts this path
+    # read-only at /home/sygen/.local/share/whisper-cpp/models so the
+    # container's whisper-cli (baked into the image since v1.6.48)
+    # finds the weights without re-downloading 466 MB inside the
+    # container layer. Path matches WHISPER_MODEL_DIR in section 5e —
+    # if the section is skipped (SKIP_WHISPER=1) the directory simply
+    # stays empty and /api/system/voice/config reports
+    # model_present=false until the operator drops a model in.
+    echo "SYGEN_HOST_WHISPER_MODELS_DIR=$HOME/.local/share/whisper-cpp/models"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"
@@ -2078,52 +2088,51 @@ elif [ "$OS" = "Darwin" ]; then
         fi
     fi
 elif [ "$OS" = "Linux" ]; then
-    log "Installing whisper.cpp (out-of-box voice transcription)"
-    WHISPER_BIN_OK=0
+    # Since v1.6.48 the sygen-core container ships its own whisper-cli
+    # (built from source in the Dockerfile), so a successful host apt-install
+    # is no longer required for voice transcription to work — the model is
+    # bind-mounted into the container regardless. We still try apt as a
+    # best-effort so host-side tools (scripts/deploy_whisper.sh, ad-hoc
+    # admin SSH sessions) keep working where the package is available.
+    log "Installing whisper.cpp model (container ships whisper-cli; host package is best-effort)"
     if command -v whisper-cli >/dev/null 2>&1 || command -v whisper-cpp >/dev/null 2>&1; then
-        log "whisper.cpp already installed"
-        WHISPER_BIN_OK=1
+        log "whisper.cpp already installed on host"
     elif command -v apt-get >/dev/null 2>&1; then
         # Debian/Ubuntu: package is `whisper.cpp` in trixie+/24.10+ universe.
-        # Older releases don't carry it — warn and continue.
+        # Older releases (incl. Bookworm) don't carry it — that's fine,
+        # the container build covers the runtime path.
         if apt-get install -y -qq whisper-cpp 2>/dev/null \
                 || apt-get install -y -qq whisper.cpp 2>/dev/null; then
-            log "whisper.cpp installed via apt"
-            WHISPER_BIN_OK=1
+            log "whisper.cpp installed on host via apt"
         else
-            _whisper_record_error "apt-get install whisper.cpp failed (package not in this release)"
-            warn "whisper.cpp not available via apt on this release — voice transcription disabled until manual install"
+            log "whisper.cpp not in this apt release — skipping host install (container has it)"
         fi
-    else
-        _whisper_record_error "no supported package manager (apt-get missing)"
-        warn "Unsupported Linux package manager — install whisper.cpp manually for voice transcription"
     fi
 
-    # Skip the 466 MB download if the binary isn't on PATH — otherwise
-    # we'd ship a model the runtime can't load.
-    if [ "$WHISPER_BIN_OK" -eq 1 ]; then
-        mkdir -p "$WHISPER_MODEL_DIR"
-        if [ -f "$WHISPER_MODEL_PATH" ]; then
-            log "ggml-small model already present"
-            _whisper_clear_error
-        else
-            log "Downloading whisper.cpp model (~466 MB, 2-5 min on broadband)…"
-            log "→ $WHISPER_MODEL_PATH"
-            if curl -fL --progress-bar -o "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_URL"; then
-                ACTUAL_SHA="$(sha256sum "$WHISPER_MODEL_PATH.tmp" 2>/dev/null | awk '{print $1}')"
-                if [ "$ACTUAL_SHA" != "$WHISPER_MODEL_SHA256" ]; then
-                    rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
-                    _whisper_record_error "SHA-256 mismatch (expected $WHISPER_MODEL_SHA256, got ${ACTUAL_SHA:-<unreadable>})"
-                    warn "ggml-small SHA-256 mismatch — file deleted, re-run installer"
-                else
-                    mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
-                    _whisper_clear_error
-                fi
-            else
+    # Always download the model. The container's whisper-cli reads it via
+    # the SYGEN_HOST_WHISPER_MODELS_DIR bind-mount (docker-compose.yml), so
+    # apt-install state on the host no longer gates voice support.
+    mkdir -p "$WHISPER_MODEL_DIR"
+    if [ -f "$WHISPER_MODEL_PATH" ]; then
+        log "ggml-small model already present"
+        _whisper_clear_error
+    else
+        log "Downloading whisper.cpp model (~466 MB, 2-5 min on broadband)…"
+        log "→ $WHISPER_MODEL_PATH"
+        if curl -fL --progress-bar -o "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_URL"; then
+            ACTUAL_SHA="$(sha256sum "$WHISPER_MODEL_PATH.tmp" 2>/dev/null | awk '{print $1}')"
+            if [ "$ACTUAL_SHA" != "$WHISPER_MODEL_SHA256" ]; then
                 rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
-                _whisper_record_error "curl download failed: $WHISPER_MODEL_URL"
-                warn "ggml-small download failed — re-run: curl -fL -o $WHISPER_MODEL_PATH $WHISPER_MODEL_URL"
+                _whisper_record_error "SHA-256 mismatch (expected $WHISPER_MODEL_SHA256, got ${ACTUAL_SHA:-<unreadable>})"
+                warn "ggml-small SHA-256 mismatch — file deleted, re-run installer"
+            else
+                mv "$WHISPER_MODEL_PATH.tmp" "$WHISPER_MODEL_PATH"
+                _whisper_clear_error
             fi
+        else
+            rm -f "$WHISPER_MODEL_PATH.tmp" 2>/dev/null || true
+            _whisper_record_error "curl download failed: $WHISPER_MODEL_URL"
+            warn "ggml-small download failed — re-run: curl -fL -o $WHISPER_MODEL_PATH $WHISPER_MODEL_URL"
         fi
     fi
 fi

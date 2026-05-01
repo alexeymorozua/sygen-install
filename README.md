@@ -129,8 +129,10 @@ Limitations vs. the Linux auto-mode:
   sudo nginx -s reload
   ```
 
-- **No auto-start on reboot.** nginx is started with plain `sudo nginx`;
-  after a reboot run it again or wire up your own launchd plist.
+- **No nginx auto-start.** nginx is started with plain `sudo nginx`;
+  after a reboot, run it again or wire up your own launchd plist. (The
+  Colima VM and the Sygen compose stack themselves do auto-start — see
+  [Auto-start on reboot](#auto-start-on-reboot) below.)
 
 For most self-hosted Mac users, **prefer `tailscale` mode** — it sidesteps
 the port-forwarding, cert-renewal, and reboot-recovery work above.
@@ -144,8 +146,9 @@ Upgrade:    cd ~/.sygen-local && docker compose pull && docker compose up -d
 Uninstall:  curl -fsSL https://install.sygen.pro/uninstall.sh | bash
 ```
 
-Backups and auto-start on login are not configured on macOS yet — back up
-`~/.sygen-local` manually if needed.
+Auto-start on login/boot is configured automatically (see [Auto-start
+on reboot](#auto-start-on-reboot)). Backups are not yet configured on
+macOS — back up `~/.sygen-local` manually if needed.
 
 See the header of [`install.sh`](./install.sh) for the full env var list.
 
@@ -253,6 +256,41 @@ systemctl disable --now unattended-upgrades
 # Stop the nginx reload on cert renewal (certs still renew)
 rm /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 ```
+
+## Auto-start on reboot
+
+A fresh install brings the Sygen stack back up automatically after every
+host reboot, so power blips and scheduled reboots don't require any
+manual recovery.
+
+- **macOS** — two LaunchAgents in `~/Library/LaunchAgents/`:
+  - `pro.sygen.colima.plist` starts the Colima profile at user login.
+  - `pro.sygen.compose.plist` runs `~/.sygen-local/bin/sygen-startup.sh`,
+    which polls `docker info` until the daemon answers (Colima cold-boot
+    is ~5–15 s on Apple VF) and then runs `docker compose up -d` from
+    `~/.sygen-local`. Logs land in `~/.sygen-local/logs/colima-launchd.{log,err}`
+    and `~/.sygen-local/logs/sygen-startup.{out,err}`.
+- **Linux** — a single systemd unit at
+  `/etc/systemd/system/sygen-compose.service` ordered `After=docker.service`.
+  `Type=oneshot` + `RemainAfterExit=yes` runs `docker compose up -d` once
+  per boot.
+
+Disabling:
+
+```bash
+# macOS
+launchctl unload ~/Library/LaunchAgents/pro.sygen.compose.plist
+launchctl unload ~/Library/LaunchAgents/pro.sygen.colima.plist
+
+# Linux
+systemctl disable --now sygen-compose.service
+```
+
+`uninstall.sh` removes both surfaces automatically.
+
+Out of scope: the macOS `publicdomain` sub-mode runs nginx outside the
+compose stack — Sygen will be back up on reboot, but `nginx` won't be
+serving 80/443 until you start it manually (or wire your own plist).
 
 ## Backups
 

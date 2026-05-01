@@ -159,6 +159,13 @@ SYGEN_MANIFEST_PLISTS=()
 # Each entry is a JSON object literal: {"path":"…","purpose":"…","size_bytes":N}.
 SYGEN_MANIFEST_DOWNLOADED=()
 SYGEN_MANIFEST_COLIMA_CREATED=""
+# v1.6.58+: post-reboot auto-start artifacts. macOS gets two LaunchAgents
+# (Colima + compose wrapper); Linux gets a single systemd unit. Stored as
+# absolute paths so uninstall.sh / preview tooling can render them
+# verbatim. SYGEN_MANIFEST_PLISTS still tracks the macOS plists too — the
+# autostart-specific field is purely for self-documenting manifests.
+SYGEN_MANIFEST_AUTOSTART_PLISTS=()
+SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT=""
 # Colima profile name used by `colima start` AND recorded in the manifest.
 # Fixed at "default" today; making it a variable means we never have a
 # code path where install creates profile X and uninstall deletes profile
@@ -228,6 +235,29 @@ manifest_record_downloaded() {
     case "$size" in ''|*[!0-9]*) size=0 ;; esac
     log "manifest: recording downloaded $path (purpose=$purpose, $size bytes)"
     SYGEN_MANIFEST_DOWNLOADED+=("{\"path\":$(json_escape "$path"),\"purpose\":$(json_escape "$purpose"),\"size_bytes\":$size}")
+}
+
+manifest_record_autostart_plist() {
+    # $1 = launchd label (e.g. pro.sygen.colima). The plist path is
+    # always $HOME/Library/LaunchAgents/<label>.plist on macOS. We also
+    # record the label in plists_installed so the existing manifest-driven
+    # uninstall path picks it up without a second loop — the dedicated
+    # autostart_macos_plists field below is only for human/preview use.
+    local label="$1"
+    manifest_record_plist "$label"
+    local plist="$HOME/Library/LaunchAgents/${label}.plist"
+    if _manifest_has_item "$plist" \
+            ${SYGEN_MANIFEST_AUTOSTART_PLISTS[@]+"${SYGEN_MANIFEST_AUTOSTART_PLISTS[@]}"}; then
+        return 0
+    fi
+    SYGEN_MANIFEST_AUTOSTART_PLISTS+=("$plist")
+}
+
+manifest_set_autostart_linux_unit() {
+    # $1 = absolute path to the installed systemd unit file. Single
+    # value (we install exactly one unit) so just overwrite — caller
+    # is expected to pass the canonical /etc/systemd/system/... path.
+    SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT="$1"
 }
 
 manifest_set_colima_created() {
@@ -331,7 +361,24 @@ manifest_write() {
             [ $first -eq 0 ] && printf ', '
             printf '%s' "$p"; first=0
         done
-        printf ']\n'
+        printf '],\n'
+        # v1.6.58+: post-reboot auto-start artifacts. macOS plists are
+        # also redundantly tracked via plists_installed (so existing
+        # uninstall paths keep working); the dedicated field here is
+        # for self-documenting manifests and the iOS preview UI.
+        printf '  "autostart_macos_plists": ['
+        first=1
+        for p in ${SYGEN_MANIFEST_AUTOSTART_PLISTS[@]+"${SYGEN_MANIFEST_AUTOSTART_PLISTS[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf '],\n'
+        if [ -n "$SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT" ]; then
+            printf '  "autostart_linux_unit": %s\n' \
+                "$(json_escape "$SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT")"
+        else
+            printf '  "autostart_linux_unit": null\n'
+        fi
         printf '}\n'
     } > "$tmp"
     chmod 0644 "$tmp" 2>/dev/null || true
@@ -397,6 +444,11 @@ for d in m.get('downloaded_files') or []:
     size = d.get('size_bytes')
     if not isinstance(size, int) or size < 0: size = 0
     print('D\t' + json.dumps({'path': p, 'purpose': purpose, 'size_bytes': size}, separators=(',', ':')))
+for p in m.get('autostart_macos_plists') or []:
+    if isinstance(p, str) and p: print('A\t' + p)
+u = m.get('autostart_linux_unit')
+if isinstance(u, str) and u:
+    print('U\t' + u)
 PY
 )"
     [ -z "$out" ] && return 0
@@ -407,6 +459,8 @@ PY
             L) SYGEN_MANIFEST_PLISTS+=("$val") ;;
             C) SYGEN_MANIFEST_COLIMA_CREATED="$val" ;;
             D) SYGEN_MANIFEST_DOWNLOADED+=("$val") ;;
+            A) SYGEN_MANIFEST_AUTOSTART_PLISTS+=("$val") ;;
+            U) SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT="$val" ;;
         esac
     done <<< "$out"
 }
@@ -2613,6 +2667,112 @@ PLIST
     manifest_record_plist "com.sygen.cert-renew"
 fi
 
+# ---------- 9c. Auto-start on host reboot (macOS + Linux) ----------
+# v1.6.58+: brings the sygen Docker stack back up automatically after a
+# host reboot so operators don't have to ssh in / remember `colima start
+# && docker compose up -d` after a power blip or scheduled reboot.
+#
+# macOS — two LaunchAgents in $HOME/Library/LaunchAgents/:
+#   pro.sygen.colima.plist  → starts the chosen Colima profile at login.
+#   pro.sygen.compose.plist → invokes a wrapper that polls `docker info`
+#                             until the daemon answers, then `docker
+#                             compose up -d` from $SYGEN_ROOT. The
+#                             docker-info poll handles the Colima cold-
+#                             boot window (~5–15 s on Apple VF) without
+#                             racing the compose call.
+#
+# Linux — single systemd unit at /etc/systemd/system/sygen-compose.service.
+#   Native dockerd is already a systemd service, so we only need a
+#   one-shot oneshot service that runs `docker compose up -d`
+#   After=docker.service.
+#
+# Idempotency: `launchctl load -w` and `systemctl enable --now` both
+# fire the service immediately. Both `colima start` and `docker compose
+# up -d` are no-ops when state already matches what we set up earlier
+# in this run, so loading mid-install is safe.
+STAGE="autostart"
+log "Installing auto-start on host reboot"
+
+if [ $LOCAL_MODE -eq 1 ]; then
+    # ----- macOS: Colima LaunchAgent + compose-wrapper LaunchAgent -----
+    COLIMA_BIN="$(command -v colima || true)"
+    DOCKER_BIN="$(command -v docker || true)"
+    BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+    if [ -z "$COLIMA_BIN" ] || [ -z "$DOCKER_BIN" ]; then
+        warn "colima or docker not on PATH — skipping autostart wiring (re-run install.sh after fixing)"
+    else
+        mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs" "$HOME/Library/LaunchAgents"
+
+        # Render the post-Colima compose wrapper ($SYGEN_ROOT/bin/sygen-startup.sh).
+        STARTUP_SCRIPT="$SYGEN_ROOT/bin/sygen-startup.sh"
+        curl -fsSL -o /tmp/sygen-startup.sh.tmpl \
+            "$BASE_URL/scripts/sygen-startup.sh" \
+            || die "could not fetch sygen-startup.sh template"
+        sed \
+            -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
+            -e "s|__DOCKER_BIN__|$DOCKER_BIN|g" \
+            /tmp/sygen-startup.sh.tmpl > "$STARTUP_SCRIPT"
+        rm -f /tmp/sygen-startup.sh.tmpl
+        chmod 0755 "$STARTUP_SCRIPT"
+
+        # Idempotent re-render helper for both LaunchAgents.
+        install_autostart_plist() {
+            local label="$1"
+            local plist_dst="$HOME/Library/LaunchAgents/${label}.plist"
+            local tmpl="/tmp/${label}.plist.tmpl"
+            curl -fsSL -o "$tmpl" "$BASE_URL/scripts/${label}.plist" \
+                || die "could not fetch ${label}.plist template"
+            sed \
+                -e "s|__COLIMA_BIN__|$COLIMA_BIN|g" \
+                -e "s|__COLIMA_PROFILE__|$COLIMA_PROFILE_NAME|g" \
+                -e "s|__BREW_PREFIX__|$BREW_PREFIX|g" \
+                -e "s|__HOME__|$HOME|g" \
+                -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
+                -e "s|__STARTUP_SCRIPT__|$STARTUP_SCRIPT|g" \
+                "$tmpl" > "$plist_dst"
+            rm -f "$tmpl"
+            # Same defensive 0644 chmod as the host-metrics path —
+            # 0600 plists silently fail to load under launchd.
+            chmod 0644 "$plist_dst"
+            launchctl unload "$plist_dst" >/dev/null 2>&1 || true
+            launchctl load -w "$plist_dst" \
+                || warn "launchctl load failed for ${label} — autostart will be inactive until reboot+manual fix"
+            manifest_record_autostart_plist "$label"
+        }
+
+        install_autostart_plist "pro.sygen.colima"
+        install_autostart_plist "pro.sygen.compose"
+    fi
+else
+    # ----- Linux: systemd unit, system-wide -----
+    DOCKER_BIN="$(command -v docker || true)"
+    if [ -z "$DOCKER_BIN" ]; then
+        warn "docker not on PATH — skipping autostart wiring"
+    elif ! command -v systemctl >/dev/null 2>&1; then
+        # Non-systemd distros (alpine, gentoo openrc, etc.) — out of
+        # scope. Leave a clear message; operator can wire up their own.
+        warn "systemctl not found — skipping autostart wiring (non-systemd init: configure your init system manually)"
+    else
+        UNIT_DST="/etc/systemd/system/sygen-compose.service"
+        curl -fsSL -o /tmp/sygen-compose.service.tmpl \
+            "$BASE_URL/scripts/sygen-compose.service" \
+            || die "could not fetch sygen-compose.service template"
+        sed \
+            -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
+            -e "s|__DOCKER_BIN__|$DOCKER_BIN|g" \
+            /tmp/sygen-compose.service.tmpl > "$UNIT_DST"
+        rm -f /tmp/sygen-compose.service.tmpl
+        chmod 0644 "$UNIT_DST"
+
+        systemctl daemon-reload
+        if systemctl enable --now sygen-compose.service; then
+            manifest_set_autostart_linux_unit "$UNIT_DST"
+        else
+            warn "systemctl enable --now sygen-compose.service failed — stack will not auto-start on reboot"
+        fi
+    fi
+fi
+
 # ---------- 10. Nightly backups (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
     log "Installing nightly backup timer (/var/backups/sygen, 7-day retention)"
@@ -2779,6 +2939,8 @@ DONE
 if [ $LOCAL_MODE -eq 0 ]; then
     cat <<DONE
   Backups:     /var/backups/sygen/sygen-*.tar.gz  (daily, 7-day retention)
+  Auto-start:  enabled — sygen-compose.service starts the stack on every boot
+               Disable: systemctl disable --now sygen-compose.service
 
   Upgrade:     cd $SYGEN_ROOT && docker compose pull && docker compose up -d
   Logs:        docker compose -f $SYGEN_ROOT/docker-compose.yml logs -f core
@@ -2787,6 +2949,10 @@ else
     cat <<DONE
   Mode:        macOS / $SELF_HOSTED_SUBMODE
   Backups:     not configured on macOS (manual tar of $SYGEN_ROOT)
+
+  Auto-start:  enabled — Sygen will start automatically after reboot/login
+               (LaunchAgents: pro.sygen.colima, pro.sygen.compose)
+               Disable: launchctl unload ~/Library/LaunchAgents/pro.sygen.{colima,compose}.plist
 
   Stop:        colima stop
   Start:       colima start && cd $SYGEN_ROOT && docker compose up -d

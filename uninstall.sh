@@ -114,6 +114,12 @@ MANIFEST_DOWNLOADED_PATHS=()
 MANIFEST_DOWNLOADED_TOTAL_BYTES=0
 MANIFEST_COLIMA_CREATED=0
 MANIFEST_COLIMA_PROFILE="default"
+# v1.6.58+: post-reboot auto-start artifacts. macOS plists are also in
+# MANIFEST_PLISTS (existing path) so the unload loop already covers them;
+# we keep the dedicated list around for the summary banner. The Linux
+# unit field is single-valued (we install exactly one).
+MANIFEST_AUTOSTART_PLISTS=()
+MANIFEST_AUTOSTART_LINUX_UNIT=""
 if [ -f "$MANIFEST" ] && command -v python3 >/dev/null 2>&1; then
     if manifest_dump="$(python3 - "$MANIFEST" <<'PY' 2>/dev/null
 import json, sys
@@ -144,6 +150,11 @@ for d in m.get('downloaded_files') or []:
     if isinstance(sz, int) and sz > 0: total += sz
     print('D\t' + p)
 print('T\t' + str(total))
+for p in m.get('autostart_macos_plists') or []:
+    if isinstance(p, str) and p: print('A\t' + p)
+u = m.get('autostart_linux_unit')
+if isinstance(u, str) and u:
+    print('U\t' + u)
 PY
 )"; then
         USE_MANIFEST=1
@@ -156,6 +167,8 @@ PY
                 N) MANIFEST_COLIMA_PROFILE="$val" ;;
                 D) MANIFEST_DOWNLOADED_PATHS+=("$val") ;;
                 T) MANIFEST_DOWNLOADED_TOTAL_BYTES="$val" ;;
+                A) MANIFEST_AUTOSTART_PLISTS+=("$val") ;;
+                U) MANIFEST_AUTOSTART_LINUX_UNIT="$val" ;;
             esac
         done <<< "$(printf '%s\n' "$manifest_dump" | tail -n +2)"
     else
@@ -169,7 +182,10 @@ log "  - Stop and remove all Sygen containers"
 log "  - Delete $SYGEN_ROOT including data, .env, secrets, claude-auth"
 if [ $LOCAL_MODE -eq 0 ]; then
     log "  - Delete /var/backups/sygen"
-    log "  - Remove systemd units: sygen-backup.timer/.service"
+    log "  - Remove systemd units: sygen-backup.timer/.service, sygen-compose.service"
+    if [ -n "$MANIFEST_AUTOSTART_LINUX_UNIT" ]; then
+        log "    (manifest: $MANIFEST_AUTOSTART_LINUX_UNIT)"
+    fi
     log "  - Remove cert renewal hook (/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh)"
     log "  - Remove nginx vhost (sygen)"
 fi
@@ -313,6 +329,15 @@ if [ $LOCAL_MODE -eq 0 ]; then
     rm -f /etc/systemd/system/sygen-backup.timer
     rm -f /etc/systemd/system/sygen-backup.service
     rm -f /usr/local/sbin/sygen-backup.sh
+
+    # v1.6.58+: auto-start unit. Hardcoded by name (matches the
+    # sygen-backup pattern above); manifest tracking is informational.
+    log "Removing systemd auto-start unit (sygen-compose.service)"
+    if systemctl list-unit-files sygen-compose.service >/dev/null 2>&1; then
+        systemctl disable --now sygen-compose.service >/dev/null 2>&1 || true
+    fi
+    rm -f /etc/systemd/system/sygen-compose.service
+
     systemctl daemon-reload 2>/dev/null || true
 
     log "Removing /var/backups/sygen"
@@ -414,7 +439,9 @@ if [ $LOCAL_MODE -eq 1 ]; then
             com.sygen.host-update-runner \
             com.sygen.host-updates-check \
             com.sygen.host-metrics \
-            com.sygen.cert-renew; do
+            com.sygen.cert-renew \
+            pro.sygen.colima \
+            pro.sygen.compose; do
             unload_plist "$label"
         done
     fi
@@ -531,7 +558,7 @@ echo "    - Containers (core, admin, updater, watchtower)"
 echo "    - $SYGEN_ROOT (data, .env, secrets, claude-auth)"
 if [ $LOCAL_MODE -eq 0 ]; then
     echo "    - /var/backups/sygen (nightly backups)"
-    echo "    - systemd units (sygen-backup.timer + .service)"
+    echo "    - systemd units (sygen-backup.timer + .service, sygen-compose.service)"
     echo "    - Nginx vhost (sygen)"
     echo "    - Cert renewal hook"
 elif [ $USE_MANIFEST -eq 1 ]; then

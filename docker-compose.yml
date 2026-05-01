@@ -72,6 +72,13 @@ services:
       # through admin/iOS. Empty string disables the fallback.
       - SYGEN_HOST_HOSTNAME=${SYGEN_HOST_HOSTNAME:-}
       - SYGEN_HOST_TZ=${SYGEN_HOST_TZ:-}
+      # Cron schedules ("0 8 * * *") are interpreted in the container's
+      # timezone via ``resolve_user_timezone``. Defaulting ``TZ`` to the
+      # host operator's IANA zone keeps wall-clock cron intuitive without
+      # making the operator edit ``user_timezone`` after install. Falls
+      # back to UTC when SYGEN_HOST_TZ is empty (CI / Linux installs that
+      # haven't run install.sh).
+      - TZ=${SYGEN_HOST_TZ:-UTC}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:

@@ -10,6 +10,9 @@ EnvironmentFile=__SYGEN_ROOT__/.env
 # SYGEN_HOME — the data subfolder, matching what sygen-core sees so
 # updater reads/writes manifest + .env via the same conventions.
 Environment=SYGEN_HOME=__SYGEN_ROOT__/data
+# HOME points at SYGEN_ROOT so any tools that expand ~ (Claude CLI,
+# pip cache during Apply Update, etc.) land inside the writable tree.
+Environment=HOME=__SYGEN_ROOT__
 Environment=PATH=__VENV_DIR__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=__VENV_DIR__/bin/sygen-updater
 Restart=on-failure

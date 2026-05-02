@@ -572,19 +572,30 @@ _release_and_die() {
 }
 
 # apt-get retry on lock contention. unattended-upgrades or the cloud-init
-# package run during the first 5 min of a freshly-provisioned VPS holds
+# package run during the first 10-15 min of a freshly-provisioned VPS holds
 # /var/lib/dpkg/lock-frontend; apt-get then aborts with "Could not get
 # lock". Wrap every apt-get call so we wait the upgrade out instead of
-# bailing the whole install. ~12 attempts × 5 s = 1 min total budget.
+# bailing the whole install. 60 attempts × 10 s = 10 min total budget.
 apt_retry() {
+    local max_attempts=60
+    local sleep_secs=10
     local i=0
-    while [ $i -lt 12 ]; do
+    while [ $i -lt $max_attempts ]; do
         if apt-get "$@"; then return 0; fi
         i=$((i + 1))
-        warn "apt-get failed (attempt $i/12) — likely dpkg lock; retrying in 5 s"
-        sleep 5
+        local extra=""
+        if command -v fuser >/dev/null 2>&1; then
+            local holder
+            holder="$(fuser /var/lib/dpkg/lock-frontend 2>&1 | awk '{print $NF}' | head -c 32 || true)"
+            [ -n "$holder" ] && extra=" (lock held by pid=$holder)"
+        fi
+        if [ -z "$extra" ] && systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
+            extra=" (unattended-upgrades running)"
+        fi
+        warn "apt-get failed (attempt $i/$max_attempts)${extra} — retrying in ${sleep_secs}s"
+        sleep $sleep_secs
     done
-    die "apt-get failed after 60 s — likely locked by unattended-upgrades. Try: sudo killall apt-get apt; wait 5 min and re-run."
+    die "apt-get could not acquire dpkg lock after $((max_attempts * sleep_secs / 60)) min. Wait for unattended-upgrades to finish ('systemctl status unattended-upgrades'), or run 'systemctl stop unattended-upgrades && killall apt-get apt 2>/dev/null; rm -f /var/lib/dpkg/lock*' then re-install."
 }
 
 # Catch unexpected non-zero exits (set -e failures from commands that

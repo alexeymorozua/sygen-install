@@ -262,6 +262,31 @@ The apply path skips restarting the updater; a manual `pip install
 --upgrade sygen-updater` (or a fresh `install.sh` run, which rebuilds
 the venv from scratch) is the path to update the updater binary itself.
 
+### When the pinned release is not yet published
+
+The defaults in `install.sh` (`SYGEN_CORE_VERSION` /
+`SYGEN_ADMIN_VERSION`) point at the version the next git tag will
+produce. If you run `install.sh` *before* that tag is created, GitHub
+returns 404 for the wheel/tarball download and the installer dies with
+a clear message. Two ways to recover:
+
+```bash
+# 1) pin to the most recent published tag
+SYGEN_CORE_VERSION=1.6.74 SYGEN_ADMIN_VERSION=0.5.54 \
+    bash install.sh
+
+# 2) build from a local checkout (transitional / dev)
+SYGEN_RELEASE_SOURCE=source \
+    SYGEN_CORE_SOURCE_DIR=$HOME/Agents/sygen \
+    SYGEN_ADMIN_SOURCE_DIR=$HOME/sygen-admin \
+    bash install.sh
+```
+
+Every wheel and tarball pulled from GitHub Releases is SHA256-verified
+against an `.sha256` sidecar published alongside the asset. A missing
+sidecar is treated as a broken release and the installer aborts (fail
+closed — no opt-out).
+
 Opting out:
 
 ```bash
@@ -303,7 +328,9 @@ launchctl unload ~/Library/LaunchAgents/pro.sygen.admin.plist
 launchctl unload ~/Library/LaunchAgents/pro.sygen.updater.plist
 
 # Linux
-systemctl disable --now sygen-compose.service
+systemctl disable --now sygen-core.service
+systemctl disable --now sygen-admin.service
+systemctl disable --now sygen-updater.service
 ```
 
 `uninstall.sh` removes both surfaces automatically.

@@ -27,10 +27,10 @@
 #   ANTHROPIC_API_KEY         injected into core process env
 #   SYGEN_INSTALL_BASE_URL    default: https://install.sygen.pro
 #                             (source of nginx.conf.tmpl + service templates)
-#   SYGEN_CORE_VERSION        default: 1.6.74 — version of `sygen` Python
+#   SYGEN_CORE_VERSION        default: 1.6.75 — version of `sygen` Python
 #                             package to install (or "latest" to query
 #                             GitHub Releases for the latest tag).
-#   SYGEN_ADMIN_VERSION       default: 0.5.54 — version of sygen-admin
+#   SYGEN_ADMIN_VERSION       default: 0.5.55 — version of sygen-admin
 #                             tarball to download from GitHub Releases.
 #   SYGEN_RELEASE_SOURCE      default: github (download wheel + tarball
 #                             from GitHub Releases). "source" = build from
@@ -726,8 +726,8 @@ BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://raw.githubusercontent.com/alexeymoro
 # release. SYGEN_RELEASE_SOURCE=source pulls from local checkouts
 # (SYGEN_CORE_SOURCE_DIR / SYGEN_ADMIN_SOURCE_DIR) — the transitional path
 # for a freshly-cut commit that isn't released yet.
-CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.74}"
-ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.54}"
+CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.75}"
+ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.55}"
 RELEASE_SOURCE="${SYGEN_RELEASE_SOURCE:-github}"
 CORE_SOURCE_DIR="${SYGEN_CORE_SOURCE_DIR:-}"
 ADMIN_SOURCE_DIR="${SYGEN_ADMIN_SOURCE_DIR:-}"
@@ -948,7 +948,10 @@ if [ $LOCAL_MODE -eq 0 ]; then
     # delegates TLS to `tailscale serve` so nginx + certbot are skipped.
     # python3-venv: required for `python3 -m venv`. python3-pip: needed for
     # `pip install` inside the venv (the venv inherits pip from the base).
-    BASE_PKGS="ca-certificates curl jq gnupg openssl python3 python3-venv python3-pip build-essential"
+    # P1-10: include `tar` defensively — stock Debian/Ubuntu has it but
+    # minimal LXC/container images sometimes don't, and we extract the
+    # admin tarball during install.
+    BASE_PKGS="ca-certificates curl jq gnupg openssl python3 python3-venv python3-pip build-essential tar"
     if [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
         # shellcheck disable=SC2086
         apt_retry install -y -qq $BASE_PKGS
@@ -1830,6 +1833,12 @@ umask 077
 {
     echo "SYGEN_CORE_VERSION=$EFFECTIVE_CORE_VERSION"
     echo "SYGEN_ADMIN_VERSION=$EFFECTIVE_ADMIN_VERSION"
+    # P0-3: pin the Python interpreter the updater uses to seed new venvs.
+    # Without this the updater falls back to `shutil.which("python3")`,
+    # which on macOS is /usr/bin/python3 (Apple stub, often 3.9) — not
+    # the brew python@3.14 we built the live venv with. The updater
+    # logs this on startup so the operator can verify after each restart.
+    echo "SYGEN_PYTHON_BIN=$PYTHON_BIN"
     echo "ANTHROPIC_API_KEY=$EFFECTIVE_ANTHROPIC_KEY"
     echo "CLAUDE_CODE_OAUTH_TOKEN=$EFFECTIVE_OAUTH_TOKEN"
     echo "LOG_LEVEL=$EFFECTIVE_LOG_LEVEL"
@@ -1904,6 +1913,61 @@ fetch_release_asset() {
         || die "could not download $url (HTTP error or network failure)"
 }
 
+# Helper: pick the sha256 CLI for this host. macOS ships `shasum -a 256`,
+# Linux ships `sha256sum`. Both produce `<hex>  <filename>` lines.
+sha256_compute() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        die "no sha256 tool found (need sha256sum or shasum)"
+    fi
+}
+
+# P0-5 helper: HEAD-probe a Release asset to differentiate "not yet
+# published" (404 → caller falls back to source mode or prints guidance)
+# from "real network failure" (caller dies).
+gh_release_asset_exists() {
+    # $1=asset_url. Returns 0 if HEAD says 200, 1 if 404, 2 on other errors.
+    local url="$1"
+    local code
+    code=$(curl -sSI -o /dev/null -w '%{http_code}' --max-time 30 -L "$url" 2>/dev/null || echo "000")
+    case "$code" in
+        200) return 0 ;;
+        404) return 1 ;;
+        *)   return 2 ;;
+    esac
+}
+
+# P0-2 fix: every wheel/tarball pulled from GitHub Releases must be SHA256-
+# verified. .sha256 sidecar is REQUIRED (fail closed) — a missing sidecar
+# means the release was published without checksums and we refuse to
+# install it. Sidecar format: one line "<hex>  <basename>".
+# Caller is responsible for pre-checking asset existence with
+# gh_release_asset_exists if a 404 fallback is desired.
+fetch_release_asset_verified() {
+    # $1=asset_url, $2=dest
+    local asset_url="$1" dest="$2"
+    fetch_release_asset "$asset_url" "$dest"
+    local sha_url="${asset_url}.sha256"
+    local sha_dest="${dest}.sha256"
+    log "  verifying SHA256 against ${sha_url}"
+    if ! curl -fL --retry 3 --retry-delay 5 --max-time 60 -o "$sha_dest" "$sha_url"; then
+        rm -f "$dest" "$sha_dest" 2>/dev/null || true
+        die "missing checksum sidecar at $sha_url — refusing to install unverified asset"
+    fi
+    local expected
+    expected="$(awk '{print $1}' "$sha_dest")"
+    local actual
+    actual="$(sha256_compute "$dest")"
+    rm -f "$sha_dest" 2>/dev/null || true
+    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+        rm -f "$dest" 2>/dev/null || true
+        die "SHA256 mismatch for $asset_url — expected ${expected:-<unreadable>}, got ${actual:-<unreadable>}"
+    fi
+}
+
 # ----- 5a. Core: pip install sygen into the venv -----
 log "Creating Python venv at $VENV_DIR (using $PYTHON_BIN)"
 # --clear nukes any prior venv contents on a re-run so we never end up
@@ -1925,12 +1989,27 @@ else
     CORE_WHEEL="sygen-${EFFECTIVE_CORE_VERSION}-py3-none-any.whl"
     CORE_WHEEL_URL="$(gh_release_url "$CORE_GITHUB_REPO" "$EFFECTIVE_CORE_VERSION" "$CORE_WHEEL")"
     CORE_WHEEL_DEST="/tmp/sygen-${EFFECTIVE_CORE_VERSION}-${$}.whl"
-    log "Downloading sygen wheel ${EFFECTIVE_CORE_VERSION} from GitHub Releases"
-    fetch_release_asset "$CORE_WHEEL_URL" "$CORE_WHEEL_DEST"
-    log "Installing sygen wheel into venv"
-    "$VENV_PIP" install --quiet "$CORE_WHEEL_DEST" \
-        || die "pip install of sygen wheel failed"
-    rm -f "$CORE_WHEEL_DEST"
+    # P0-5: HEAD-probe before downloading. 404 → release not yet published;
+    # surface an actionable error (or auto-switch to source mode if a local
+    # checkout is available).
+    _probe=0
+    gh_release_asset_exists "$CORE_WHEEL_URL" || _probe=$?
+    if [ "$_probe" = "1" ]; then
+        if [ -n "$CORE_SOURCE_DIR" ] && [ -d "$CORE_SOURCE_DIR" ]; then
+            warn "sygen wheel ${EFFECTIVE_CORE_VERSION} not published yet — falling back to local checkout at $CORE_SOURCE_DIR"
+            "$VENV_PIP" install --quiet "$CORE_SOURCE_DIR" \
+                || die "pip install $CORE_SOURCE_DIR failed (fallback after missing release)"
+        else
+            die "sygen wheel not yet published at $CORE_WHEEL_URL. Either wait for the release, set SYGEN_CORE_VERSION=<existing-tag>, or re-run with SYGEN_RELEASE_SOURCE=source SYGEN_CORE_SOURCE_DIR=<path-to-sygen-checkout>"
+        fi
+    else
+        log "Downloading sygen wheel ${EFFECTIVE_CORE_VERSION} from GitHub Releases"
+        fetch_release_asset_verified "$CORE_WHEEL_URL" "$CORE_WHEEL_DEST"
+        log "Installing sygen wheel into venv"
+        "$VENV_PIP" install --quiet "$CORE_WHEEL_DEST" \
+            || die "pip install of sygen wheel failed"
+        rm -f "$CORE_WHEEL_DEST"
+    fi
 fi
 [ -x "$VENV_SYGEN_BIN" ] \
     || die "sygen entry point missing at $VENV_SYGEN_BIN after install"
@@ -1951,7 +2030,14 @@ else
     UPDATER_WHEEL="sygen_updater-${EFFECTIVE_CORE_VERSION}-py3-none-any.whl"
     UPDATER_WHEEL_URL="$(gh_release_url "$CORE_GITHUB_REPO" "$EFFECTIVE_CORE_VERSION" "$UPDATER_WHEEL")"
     UPDATER_WHEEL_DEST="/tmp/sygen-updater-${EFFECTIVE_CORE_VERSION}-${$}.whl"
-    if curl -fL --retry 2 --max-time 300 -o "$UPDATER_WHEEL_DEST" "$UPDATER_WHEEL_URL" 2>/dev/null; then
+    # P0-2 + P0-5: verify SHA256 if asset exists, else best-effort skip
+    # (updater is non-critical for first install; admin still works
+    # without it). Skip path is unchanged from previous behaviour.
+    _probe=0
+    gh_release_asset_exists "$UPDATER_WHEEL_URL" || _probe=$?
+    if [ "$_probe" = "0" ]; then
+        log "Downloading + verifying sygen-updater wheel ${EFFECTIVE_CORE_VERSION}"
+        fetch_release_asset_verified "$UPDATER_WHEEL_URL" "$UPDATER_WHEEL_DEST"
         log "Installing sygen-updater wheel into venv"
         "$VENV_PIP" install --quiet "$UPDATER_WHEEL_DEST" \
             || warn "pip install sygen-updater failed — updater service inactive"
@@ -1973,7 +2059,11 @@ mkdir -p "$ADMIN_DIR" "$ADMIN_PREV_DIR"
 # Keeps the previous admin around at admin-prev/ for one-step rollback.
 ADMIN_STAGING_DIR="$SYGEN_ROOT/admin-staging-$$"
 mkdir -p "$ADMIN_STAGING_DIR"
-trap 'rm -rf "$ADMIN_STAGING_DIR" 2>/dev/null || true' EXIT
+# P0-1 fix: stack the staging cleanup *and* on_exit so a die() between
+# here and the post-swap trap reset still flushes the manifest. Without
+# the on_exit call the partial install would orphan brew packages on
+# the next re-run (see manifest_load classification logic).
+trap 'rm -rf "$ADMIN_STAGING_DIR" 2>/dev/null || true; on_exit' EXIT
 
 if [ "$RELEASE_SOURCE" = "source" ]; then
     [ -n "$ADMIN_SOURCE_DIR" ] && [ -d "$ADMIN_SOURCE_DIR" ] \
@@ -1999,12 +2089,39 @@ else
     ADMIN_TARBALL="sygen-admin-${EFFECTIVE_ADMIN_VERSION}.tar.gz"
     ADMIN_TARBALL_URL="$(gh_release_url "$ADMIN_GITHUB_REPO" "$EFFECTIVE_ADMIN_VERSION" "$ADMIN_TARBALL")"
     ADMIN_TARBALL_DEST="/tmp/sygen-admin-${EFFECTIVE_ADMIN_VERSION}-${$}.tar.gz"
-    log "Downloading sygen-admin tarball ${EFFECTIVE_ADMIN_VERSION} from GitHub Releases"
-    fetch_release_asset "$ADMIN_TARBALL_URL" "$ADMIN_TARBALL_DEST"
-    log "Extracting admin tarball into staging dir"
-    tar -xzf "$ADMIN_TARBALL_DEST" -C "$ADMIN_STAGING_DIR" \
-        || die "tar -xzf failed for admin tarball"
-    rm -f "$ADMIN_TARBALL_DEST"
+    # P0-5: probe before download so a missing release surfaces a
+    # clear message (or auto-falls-back to source build).
+    _probe=0
+    gh_release_asset_exists "$ADMIN_TARBALL_URL" || _probe=$?
+    if [ "$_probe" = "1" ]; then
+        if [ -n "$ADMIN_SOURCE_DIR" ] && [ -d "$ADMIN_SOURCE_DIR" ]; then
+            warn "sygen-admin tarball ${EFFECTIVE_ADMIN_VERSION} not published yet — falling back to local checkout at $ADMIN_SOURCE_DIR"
+            pushd "$ADMIN_SOURCE_DIR" >/dev/null \
+                || die "could not enter $ADMIN_SOURCE_DIR"
+            NEXT_PUBLIC_APP_VERSION="$EFFECTIVE_ADMIN_VERSION" \
+                "$NODE_BIN" "$(dirname "$NODE_BIN")/npm" ci --no-audit --no-fund \
+                || die "npm ci failed in $ADMIN_SOURCE_DIR (fallback after missing release)"
+            NEXT_PUBLIC_APP_VERSION="$EFFECTIVE_ADMIN_VERSION" \
+                "$NODE_BIN" "$(dirname "$NODE_BIN")/npm" run build \
+                || die "npm run build failed in $ADMIN_SOURCE_DIR (fallback after missing release)"
+            mkdir -p "$ADMIN_STAGING_DIR/.next"
+            cp -R .next/standalone/. "$ADMIN_STAGING_DIR/"
+            cp -R .next/static "$ADMIN_STAGING_DIR/.next/static"
+            if [ -d public ]; then
+                cp -R public "$ADMIN_STAGING_DIR/public"
+            fi
+            popd >/dev/null
+        else
+            die "sygen-admin tarball not yet published at $ADMIN_TARBALL_URL. Either wait for the release, set SYGEN_ADMIN_VERSION=<existing-tag>, or re-run with SYGEN_RELEASE_SOURCE=source SYGEN_ADMIN_SOURCE_DIR=<path-to-sygen-admin-checkout>"
+        fi
+    else
+        log "Downloading sygen-admin tarball ${EFFECTIVE_ADMIN_VERSION} from GitHub Releases"
+        fetch_release_asset_verified "$ADMIN_TARBALL_URL" "$ADMIN_TARBALL_DEST"
+        log "Extracting admin tarball into staging dir"
+        tar -xzf "$ADMIN_TARBALL_DEST" -C "$ADMIN_STAGING_DIR" \
+            || die "tar -xzf failed for admin tarball"
+        rm -f "$ADMIN_TARBALL_DEST"
+    fi
 fi
 
 # Sanity-check: server.js must exist; otherwise the launchd/systemd
@@ -2012,13 +2129,22 @@ fi
 [ -f "$ADMIN_STAGING_DIR/server.js" ] \
     || die "admin tarball/build missing server.js — check release artefact layout"
 
-# Atomic swap: previous admin → admin-prev, staging → admin.
+# P1-6 fix: stop-before-swap so launchd's KeepAlive doesn't respawn into
+# the empty $ADMIN_DIR window between the two `mv` calls. Best-effort —
+# on a fresh install the service isn't running yet, so unload/disable
+# silently no-ops. Linux uses systemctl; macOS uses launchctl.
 if [ -d "$ADMIN_DIR" ] && [ -n "$(ls -A "$ADMIN_DIR" 2>/dev/null)" ]; then
+    if [ $LOCAL_MODE -eq 1 ]; then
+        launchctl unload "$HOME/Library/LaunchAgents/pro.sygen.admin.plist" >/dev/null 2>&1 || true
+    else
+        systemctl stop sygen-admin.service >/dev/null 2>&1 || true
+    fi
     rm -rf "$ADMIN_PREV_DIR"
     mv "$ADMIN_DIR" "$ADMIN_PREV_DIR"
 fi
 mv "$ADMIN_STAGING_DIR" "$ADMIN_DIR"
-trap on_exit EXIT  # restore the install-wide trap
+trap on_exit EXIT  # restore the install-wide trap (the post-swap
+                   # service-install block re-loads/re-starts the unit)
 
 manifest_set_native_paths "$VENV_DIR" "$ADMIN_DIR" \
     "$EFFECTIVE_CORE_VERSION" "$EFFECTIVE_ADMIN_VERSION"
@@ -2056,8 +2182,16 @@ if [ -f "$SYGEN_ROOT/host_metrics.json" ]; then
     rm -f "$SYGEN_ROOT/host_metrics.json"
 fi
 
-PYTHON_BIN="$(command -v python3 || true)"
-[ -z "$PYTHON_BIN" ] && die "python3 not found — required for host_metrics_daemon"
+# P1-8 fix: don't reassign $PYTHON_BIN here — that would clobber the
+# brew python@3.14 path resolved during deps stage and stamp the
+# launchd/systemd unit with /usr/bin/python3 (Apple stub) instead. Use
+# a separate variable so host_metrics has its own preference (brew
+# python first via $PYTHON_BIN, system python3 only as a fallback).
+HOST_METRICS_PYTHON="${PYTHON_BIN:-}"
+if [ -z "$HOST_METRICS_PYTHON" ]; then
+    HOST_METRICS_PYTHON="$(command -v python3 || true)"
+fi
+[ -n "$HOST_METRICS_PYTHON" ] || die "python3 not found — required for host_metrics_daemon"
 
 if [ $LOCAL_MODE -eq 1 ]; then
     # macOS — launchd LaunchAgent (per-user, runs in user session).
@@ -2067,7 +2201,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
         "$BASE_URL/scripts/com.sygen.host-metrics.plist" \
         || die "could not fetch com.sygen.host-metrics.plist"
     sed \
-        -e "s|__PYTHON__|$PYTHON_BIN|g" \
+        -e "s|__PYTHON__|$HOST_METRICS_PYTHON|g" \
         -e "s|__SCRIPT__|$SYGEN_ROOT/bin/host_metrics_daemon.py|g" \
         -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
         /tmp/sygen.host-metrics.plist.tmpl > "$PLIST_DST"
@@ -2089,7 +2223,7 @@ else
         "$BASE_URL/scripts/sygen-host-metrics.service" \
         || die "could not fetch sygen-host-metrics.service"
     sed \
-        -e "s|__PYTHON__|$PYTHON_BIN|g" \
+        -e "s|__PYTHON__|$HOST_METRICS_PYTHON|g" \
         -e "s|__SCRIPT__|$SYGEN_ROOT/bin/host_metrics_daemon.py|g" \
         -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
         /tmp/sygen-host-metrics.service.tmpl > "$UNIT_DST"

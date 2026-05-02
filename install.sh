@@ -571,17 +571,33 @@ _release_and_die() {
     die "$err_code: $details"
 }
 
-# apt-get retry on lock contention. unattended-upgrades or the cloud-init
+# apt-get retry on lock contention only. unattended-upgrades or the cloud-init
 # package run during the first 10-15 min of a freshly-provisioned VPS holds
 # /var/lib/dpkg/lock-frontend; apt-get then aborts with "Could not get
-# lock". Wrap every apt-get call so we wait the upgrade out instead of
-# bailing the whole install. 60 attempts × 10 s = 10 min total budget.
+# lock". We retry on lock contention specifically — *other* errors (package
+# not found, network, dependency conflict) are returned as-is so callers
+# can short-circuit (e.g. whisper-cpp fallback). Treating every failure
+# as lock-related caused 10-min spins on missing packages.
+# 60 attempts × 10 s = 10 min total budget on a real lock.
 apt_retry() {
     local max_attempts=60
     local sleep_secs=10
     local i=0
+    local stderr_file
+    stderr_file="$(mktemp)"
     while [ $i -lt $max_attempts ]; do
-        if apt-get "$@"; then return 0; fi
+        if apt-get "$@" 2> >(tee "$stderr_file" >&2); then
+            rm -f "$stderr_file"
+            return 0
+        fi
+        local rc=$?
+        # If stderr does NOT mention a dpkg lock, the failure is not
+        # something retrying will fix. Return the original exit code so
+        # the caller's `|| fallback` chain kicks in.
+        if ! grep -qiE 'could not get lock|lock-frontend|dpkg.*lock|another process' "$stderr_file"; then
+            rm -f "$stderr_file"
+            return $rc
+        fi
         i=$((i + 1))
         local extra=""
         if command -v fuser >/dev/null 2>&1; then
@@ -592,9 +608,10 @@ apt_retry() {
         if [ -z "$extra" ] && systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
             extra=" (unattended-upgrades running)"
         fi
-        warn "apt-get failed (attempt $i/$max_attempts)${extra} — retrying in ${sleep_secs}s"
+        warn "apt-get blocked by dpkg lock (attempt $i/$max_attempts)${extra} — retrying in ${sleep_secs}s"
         sleep $sleep_secs
     done
+    rm -f "$stderr_file"
     die "apt-get could not acquire dpkg lock after $((max_attempts * sleep_secs / 60)) min. Wait for unattended-upgrades to finish ('systemctl status unattended-upgrades'), or run 'systemctl stop unattended-upgrades && killall apt-get apt 2>/dev/null; rm -f /var/lib/dpkg/lock*' then re-install."
 }
 

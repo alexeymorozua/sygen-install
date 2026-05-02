@@ -9,7 +9,11 @@ User=sygen
 Group=sygen
 WorkingDirectory=__SYGEN_ROOT__
 EnvironmentFile=__SYGEN_ROOT__/.env
-Environment=SYGEN_HOME=__SYGEN_ROOT__
+# SYGEN_HOME points at the data subfolder so sygen-core finds config/,
+# _secrets/, sessions/, etc. — install.sh keeps the data/ layout from
+# the Docker era (bind-mounted as /data) and we preserve it here so
+# Apply Update / backup / migration paths don't have to fork.
+Environment=SYGEN_HOME=__SYGEN_ROOT__/data
 Environment=PATH=__VENV_DIR__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=__VENV_DIR__/bin/sygen
 Restart=always

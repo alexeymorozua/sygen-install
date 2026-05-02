@@ -7,7 +7,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=__SYGEN_ROOT__
 EnvironmentFile=__SYGEN_ROOT__/.env
-Environment=SYGEN_HOME=__SYGEN_ROOT__
+# SYGEN_HOME — the data subfolder, matching what sygen-core sees so
+# updater reads/writes manifest + .env via the same conventions.
+Environment=SYGEN_HOME=__SYGEN_ROOT__/data
 Environment=PATH=__VENV_DIR__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=__VENV_DIR__/bin/sygen-updater
 Restart=on-failure

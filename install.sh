@@ -2026,6 +2026,16 @@ umask 077
     # returns {supported: false} and the Update banner stays hidden.
     echo "SYGEN_UPDATES_STATE=$SYGEN_ROOT/data/host_updates/_updates.json"
     echo "SYGEN_UPDATER_URL=http://127.0.0.1:8082"
+    # Updater's atomic-swap targets. Default in updater.py is
+    # SYGEN_HOME/{venv,admin} which resolves to /srv/sygen/data/{venv,admin}
+    # on native (because SYGEN_HOME=$SYGEN_ROOT/data per the systemd unit
+    # so the bot finds config/_secrets/sessions etc. inside data/). But
+    # install.sh puts the live venv + admin at $SYGEN_ROOT/{venv,admin}
+    # — without these overrides Apply Update would mv-swap into a sibling
+    # directory, sygen-core would keep launching the old wheel from
+    # /srv/sygen/venv/bin/sygen and the UI banner would never clear.
+    echo "SYGEN_VENV_DIR=$SYGEN_ROOT/venv"
+    echo "SYGEN_ADMIN_DIR=$SYGEN_ROOT/admin"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"

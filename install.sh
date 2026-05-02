@@ -615,6 +615,37 @@ apt_retry() {
     die "apt-get could not acquire dpkg lock after $((max_attempts * sleep_secs / 60)) min. Wait for unattended-upgrades to finish ('systemctl status unattended-upgrades'), or run 'systemctl stop unattended-upgrades && killall apt-get apt 2>/dev/null; rm -f /var/lib/dpkg/lock*' then re-install."
 }
 
+# Build whisper.cpp from source. Returns 0 on success, non-zero on any
+# failure — caller is expected to fall through to a `warn`. Compiles the
+# `whisper-cli` binary with the existing build-essential toolchain and
+# installs it to /usr/local/bin (with a `whisper-cpp` symlink for callers
+# that look up the older name). Idempotent: if either binary is already
+# present, returns 0 without rebuilding.
+build_whisper_from_source() {
+    if command -v whisper-cli >/dev/null 2>&1 || command -v whisper-cpp >/dev/null 2>&1; then
+        return 0
+    fi
+    log "Building whisper.cpp from source (Ubuntu 24.04 has no apt package)"
+    # cmake is needed for the modern whisper.cpp build (Makefile path is
+    # deprecated upstream). build-essential is already installed above.
+    apt_retry install -y -qq cmake git || return 1
+    local build_dir
+    build_dir="$(mktemp -d)" || return 1
+    (
+        set -e
+        cd "$build_dir"
+        git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git
+        cd whisper.cpp
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON >/dev/null
+        cmake --build build --config Release -j"$(nproc 2>/dev/null || echo 2)" --target whisper-cli >/dev/null
+        install -m 755 build/bin/whisper-cli /usr/local/bin/whisper-cli
+        ln -sf /usr/local/bin/whisper-cli /usr/local/bin/whisper-cpp
+    )
+    local rc=$?
+    rm -rf "$build_dir"
+    return $rc
+}
+
 # Catch unexpected non-zero exits (set -e failures from commands that
 # don't go through die()) so JSON consumers always get one final line.
 # Also flushes whatever manifest state we accumulated so far so a partial
@@ -1022,15 +1053,19 @@ if [ $LOCAL_MODE -eq 0 ]; then
         apt_retry install -y -qq nodejs
     fi
 
-    # whisper-cli is best-effort on Linux (apt package is gated to
-    # trixie+/24.10+). Fall through quietly — sygen-core ships no longer
-    # ships whisper-cli with the package, so we install whisper.cpp via
-    # apt where available and download the model regardless (handled in
-    # the whisper section).
+    # whisper-cli on Linux: try apt first (24.10+/trixie+), fall back to a
+    # source build (~2-3 min with the gcc/g++ already pulled in via
+    # build-essential). Final fallback is a warn so a missing apt mirror or
+    # network glitch doesn't fail the whole install over a best-effort feature.
     if ! command -v whisper-cli >/dev/null 2>&1 && ! command -v whisper-cpp >/dev/null 2>&1; then
-        apt_retry install -y -qq whisper-cpp 2>/dev/null \
-            || apt_retry install -y -qq whisper.cpp 2>/dev/null \
-            || warn "whisper.cpp not installable via apt on this distro — voice transcription disabled until installed manually"
+        if apt_retry install -y -qq whisper-cpp 2>/dev/null \
+                || apt_retry install -y -qq whisper.cpp 2>/dev/null; then
+            log "whisper-cpp installed from apt"
+        elif build_whisper_from_source; then
+            log "whisper.cpp built from source -> /usr/local/bin/whisper-cli"
+        else
+            warn "whisper.cpp not installable on this host — voice transcription disabled until installed manually"
+        fi
     fi
 
     # Host metrics (Linux): /proc reports real values directly, no

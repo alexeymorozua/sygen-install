@@ -636,7 +636,13 @@ build_whisper_from_source() {
         cd "$build_dir"
         git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git
         cd whisper.cpp
-        cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON >/dev/null
+        # BUILD_SHARED_LIBS=OFF — link whisper into the binary so we can
+        # ship a single self-contained /usr/local/bin/whisper-cli without
+        # also having to drop libwhisper.so into /usr/local/lib + run
+        # ldconfig. Avoids "libwhisper.so.1: cannot open shared object
+        # file" at runtime.
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON >/dev/null
         cmake --build build --config Release -j"$(nproc 2>/dev/null || echo 2)" --target whisper-cli >/dev/null
         install -m 755 build/bin/whisper-cli /usr/local/bin/whisper-cli
         ln -sf /usr/local/bin/whisper-cli /usr/local/bin/whisper-cpp
@@ -1998,12 +2004,12 @@ umask 077
         cat /tmp/sygen-host-metrics.env
     fi
     echo "SYGEN_HOST_DATA_DIR=$SYGEN_ROOT"
-    # Whisper.cpp model location. Linux installs put the model under
-    # /usr/local/share/whisper-cpp/models so the unprivileged `sygen` user
-    # can read it; macOS keeps it under the operator's HOME because the
-    # operator is the runtime user.
+    # Whisper.cpp model location. transcribe_audio.py reads Path.home() /
+    # ".local/share/whisper-cpp/models" — must match WHISPER_MODEL_DIR
+    # above so the same path the installer wrote to is the path the agent
+    # reads from. Linux: $SYGEN_ROOT (sygen's HOME). macOS: operator's HOME.
     if [ "$OS" = "Linux" ]; then
-        echo "SYGEN_HOST_WHISPER_MODELS_DIR=/usr/local/share/whisper-cpp/models"
+        echo "SYGEN_HOST_WHISPER_MODELS_DIR=$SYGEN_ROOT/.local/share/whisper-cpp/models"
     else
         echo "SYGEN_HOST_WHISPER_MODELS_DIR=$HOME/.local/share/whisper-cpp/models"
     fi
@@ -2545,16 +2551,16 @@ fi
 STAGE="whisper"
 WHISPER_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 WHISPER_MODEL_SHA256="1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
-# Linux native install runs sygen-core under the unprivileged `sygen` user
-# whose HOME points at SYGEN_ROOT (the user has --no-create-home). The
-# install script itself runs as root, so $HOME=/root — putting the model
-# under /root/.local/share/... made it unreadable to sygen (mode 0700 on
-# /root). Use a system-wide /usr/local/share path on Linux so any user
-# can read the model. macOS keeps the per-user path because the operator
-# *is* the runtime user there.
+# transcribe_audio.py hardcodes Path.home() / ".local/share/whisper-cpp/models"
+# (no env-var override). On Linux native installs sygen-core runs as the
+# unprivileged sygen user with HOME=$SYGEN_ROOT, so the model needs to
+# land in $SYGEN_ROOT/.local/share/whisper-cpp/models. install.sh itself
+# runs as root with $HOME=/root, so we can't use $HOME — we resolve
+# explicitly via $SYGEN_ROOT. macOS keeps the per-user path because the
+# operator IS the runtime user there.
 if [ "$OS" = "Linux" ]; then
-    WHISPER_MODEL_DIR="/usr/local/share/whisper-cpp/models"
-    WHISPER_ERROR_FILE="/usr/local/share/whisper-cpp/.last_install_error"
+    WHISPER_MODEL_DIR="$SYGEN_ROOT/.local/share/whisper-cpp/models"
+    WHISPER_ERROR_FILE="$SYGEN_ROOT/.local/share/whisper-cpp/.last_install_error"
 else
     WHISPER_MODEL_DIR="$HOME/.local/share/whisper-cpp/models"
     WHISPER_ERROR_FILE="$HOME/.local/share/whisper-cpp/.last_install_error"

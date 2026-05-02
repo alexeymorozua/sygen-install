@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sygen core LaunchAgent (native macOS install). Runs the FastAPI/aiohttp
+  service installed in __VENV_DIR__/bin/sygen.
+
+  Placeholders substituted by install.sh:
+    __VENV_DIR__         absolute path to the Python venv (e.g.
+                         /Users/<user>/.sygen-local/venv)
+    __SYGEN_ROOT__       data/.env/logs root (e.g. ~/.sygen-local)
+    __HOME__             user's home dir (for $HOME-relative log paths)
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>            <string>pro.sygen.core</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__VENV_DIR__/bin/sygen</string>
+    </array>
+    <key>WorkingDirectory</key> <string>__SYGEN_ROOT__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SYGEN_HOME</key>   <string>__SYGEN_ROOT__</string>
+        <key>HOME</key>         <string>__HOME__</string>
+        <key>PATH</key>         <string>__VENV_DIR__/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key>        <true/>
+    <key>KeepAlive</key>        <true/>
+    <key>ThrottleInterval</key> <integer>10</integer>
+    <key>StandardOutPath</key>  <string>__SYGEN_ROOT__/logs/core.log</string>
+    <key>StandardErrorPath</key><string>__SYGEN_ROOT__/logs/core.log</string>
+</dict>
+</plist>

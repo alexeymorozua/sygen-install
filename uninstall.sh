@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # Sygen uninstall script — clean removal of Sygen from a host.
 #
-# Linux  (Debian/Ubuntu VPS): stops containers, removes systemd backup
-#        timer, nginx vhost, cert renewal hook, and /srv/sygen.
-# macOS  (Darwin): stops containers, then either:
-#          - manifest mode (v1.6.46+): reads $SYGEN_ROOT/.install_manifest.json
-#            and removes ONLY the brew packages, Colima profile, and
-#            launchd agents that install.sh actually put on the host.
-#          - legacy mode (no manifest): does the minimum-safe cleanup
-#            inherited from v1.6.45 — colima stop (no VM delete),
-#            remove $SYGEN_ROOT, unload known launchd labels, never
-#            touch brew. The user can wipe brew packages and the Colima
-#            VM manually after a fresh install brings the manifest back.
+# Routes on $MANIFEST.install_mode:
+#   - "native"  (v1.7+): stops launchd/systemd services, removes the venv
+#               + admin dir, plists/units, $SYGEN_ROOT.
+#   - "docker"  (or absent — pre-v1.7 manifests): runs the legacy Docker
+#               cleanup path: docker compose down, colima stop/delete,
+#               brew uninstall (manifest-driven), $SYGEN_ROOT wipe.
+#
+# Linux  (Debian/Ubuntu VPS): stops services (native) or containers
+#        (legacy), removes systemd backup timer, nginx vhost, cert
+#        renewal hook, and /srv/sygen.
+# macOS  (Darwin): stops services (native) or containers (legacy), then
+#        runs the appropriate platform cleanup driven by the manifest.
 #
 # Kept on Linux (for fast re-install):
 #   - Let's Encrypt cert in /etc/letsencrypt/
-#   - System packages (docker, nginx, certbot, colima, etc.)
+#   - System packages (python3, node, nginx, certbot, etc.)
 #
 # Optional Cloudflare DNS cleanup:
 #   Set CF_API_TOKEN + CF_ZONE_ID + SYGEN_SUBDOMAIN (and optionally
@@ -108,18 +109,17 @@ esac
 # pre-date the change.
 MANIFEST="$SYGEN_ROOT/.install_manifest.json"
 USE_MANIFEST=0
+INSTALL_MODE=""           # "native" (v1.7+) or "docker" (legacy/v1/v2)
 MANIFEST_INSTALLED_PKGS=()
 MANIFEST_PLISTS=()
 MANIFEST_DOWNLOADED_PATHS=()
 MANIFEST_DOWNLOADED_TOTAL_BYTES=0
 MANIFEST_COLIMA_CREATED=0
 MANIFEST_COLIMA_PROFILE="default"
-# v1.6.58+: post-reboot auto-start artifacts. macOS plists are also in
-# MANIFEST_PLISTS (existing path) so the unload loop already covers them;
-# we keep the dedicated list around for the summary banner. The Linux
-# unit field is single-valued (we install exactly one).
 MANIFEST_AUTOSTART_PLISTS=()
-MANIFEST_AUTOSTART_LINUX_UNIT=""
+MANIFEST_AUTOSTART_LINUX_UNITS=()
+MANIFEST_CORE_VENV=""
+MANIFEST_ADMIN_DIR=""
 if [ -f "$MANIFEST" ] && command -v python3 >/dev/null 2>&1; then
     if manifest_dump="$(python3 - "$MANIFEST" <<'PY' 2>/dev/null
 import json, sys
@@ -131,6 +131,12 @@ except Exception:
 if not isinstance(m, dict):
     sys.exit(2)
 print('OK')
+mode = m.get('install_mode')
+if isinstance(mode, str) and mode:
+    print('M\t' + mode)
+else:
+    # Manifests written before v1.7 lacked install_mode (Docker-mode).
+    print('M\tdocker')
 for p in m.get('installed_pkgs') or []:
     if isinstance(p, str): print('I\t' + p)
 for p in m.get('plists_installed') or []:
@@ -152,15 +158,23 @@ for d in m.get('downloaded_files') or []:
 print('T\t' + str(total))
 for p in m.get('autostart_macos_plists') or []:
     if isinstance(p, str) and p: print('A\t' + p)
-u = m.get('autostart_linux_unit')
-if isinstance(u, str) and u:
-    print('U\t' + u)
+units = m.get('autostart_linux_units')
+if isinstance(units, list):
+    for u in units:
+        if isinstance(u, str) and u: print('U\t' + u)
+else:
+    u = m.get('autostart_linux_unit')
+    if isinstance(u, str) and u: print('U\t' + u)
+v = m.get('core_venv')
+if isinstance(v, str) and v: print('V\t' + v)
+a = m.get('admin_dir')
+if isinstance(a, str) and a: print('B\t' + a)
 PY
 )"; then
         USE_MANIFEST=1
-        # First line is "OK"; consume it and parse the rest.
         while IFS=$'\t' read -r kind val; do
             case "$kind" in
+                M) INSTALL_MODE="$val" ;;
                 I) MANIFEST_INSTALLED_PKGS+=("$val") ;;
                 L) MANIFEST_PLISTS+=("$val") ;;
                 C) MANIFEST_COLIMA_CREATED="$val" ;;
@@ -168,23 +182,44 @@ PY
                 D) MANIFEST_DOWNLOADED_PATHS+=("$val") ;;
                 T) MANIFEST_DOWNLOADED_TOTAL_BYTES="$val" ;;
                 A) MANIFEST_AUTOSTART_PLISTS+=("$val") ;;
-                U) MANIFEST_AUTOSTART_LINUX_UNIT="$val" ;;
+                U) MANIFEST_AUTOSTART_LINUX_UNITS+=("$val") ;;
+                V) MANIFEST_CORE_VENV="$val" ;;
+                B) MANIFEST_ADMIN_DIR="$val" ;;
             esac
         done <<< "$(printf '%s\n' "$manifest_dump" | tail -n +2)"
     else
         warn "manifest at $MANIFEST is unreadable or malformed — falling back to legacy mode"
     fi
 fi
+# Legacy fallback: if there's no manifest but a docker-compose.yml
+# exists, this is a pre-1.7 Docker install and uninstall.sh should run
+# the Docker cleanup path. Otherwise default to native.
+if [ -z "$INSTALL_MODE" ]; then
+    if [ -f "$SYGEN_ROOT/docker-compose.yml" ]; then
+        INSTALL_MODE="docker"
+    else
+        INSTALL_MODE="native"
+    fi
+fi
 
 # ---------- Confirmation gate ----------
-log "This will REMOVE Sygen from this host:"
-log "  - Stop and remove all Sygen containers"
-log "  - Delete $SYGEN_ROOT including data, .env, secrets, claude-auth"
+log "This will REMOVE Sygen from this host (install_mode=$INSTALL_MODE):"
+if [ "$INSTALL_MODE" = "native" ]; then
+    log "  - Stop and unload native services (sygen-core / sygen-admin / sygen-updater)"
+else
+    log "  - Stop and remove all Sygen containers"
+fi
+log "  - Delete $SYGEN_ROOT including data, .env, venv, admin, secrets, claude-auth"
 if [ $LOCAL_MODE -eq 0 ]; then
     log "  - Delete /var/backups/sygen"
-    log "  - Remove systemd units: sygen-backup.timer/.service, sygen-compose.service"
-    if [ -n "$MANIFEST_AUTOSTART_LINUX_UNIT" ]; then
-        log "    (manifest: $MANIFEST_AUTOSTART_LINUX_UNIT)"
+    if [ "$INSTALL_MODE" = "native" ]; then
+        log "  - Disable + remove systemd units: sygen-backup.timer/.service,"
+        log "    sygen-core.service, sygen-admin.service, sygen-updater.service"
+    else
+        log "  - Remove systemd units: sygen-backup.timer/.service, sygen-compose.service"
+    fi
+    if [ ${#MANIFEST_AUTOSTART_LINUX_UNITS[@]} -gt 0 ]; then
+        log "    (manifest: ${MANIFEST_AUTOSTART_LINUX_UNITS[*]})"
     fi
     log "  - Remove cert renewal hook (/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh)"
     log "  - Remove nginx vhost (sygen)"
@@ -199,10 +234,12 @@ if [ $LOCAL_MODE -eq 1 ]; then
         else
             log "  - No sygen-owned brew packages to remove (manifest is empty)"
         fi
-        if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
-            log "  - Stop Colima AND delete profile '$MANIFEST_COLIMA_PROFILE' (~27 GB VM image — sygen created it)"
-        else
-            log "  - Stop Colima profile '$MANIFEST_COLIMA_PROFILE' (will NOT delete the VM — it pre-existed)"
+        if [ "$INSTALL_MODE" = "docker" ]; then
+            if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
+                log "  - Stop Colima AND delete profile '$MANIFEST_COLIMA_PROFILE' (~27 GB VM image — sygen created it)"
+            else
+                log "  - Stop Colima profile '$MANIFEST_COLIMA_PROFILE' (will NOT delete the VM — it pre-existed)"
+            fi
         fi
         if [ ${#MANIFEST_DOWNLOADED_PATHS[@]} -gt 0 ]; then
             log "  - Remove ${#MANIFEST_DOWNLOADED_PATHS[@]} file(s) downloaded by install.sh (~$((MANIFEST_DOWNLOADED_TOTAL_BYTES / 1024 / 1024)) MB):"
@@ -211,9 +248,11 @@ if [ $LOCAL_MODE -eq 1 ]; then
             done
         fi
     else
-        log "  - Stop Colima (will NOT delete the VM — legacy install, no manifest)"
-        log "  - Will NOT remove brew packages — legacy install, no manifest"
-        log "  - Remove known launchd agents (host-updates-check / host-update-runner / host-uninstall-runner / host-metrics / cert-renew)"
+        if [ "$INSTALL_MODE" = "docker" ]; then
+            log "  - Stop Colima (will NOT delete the VM — legacy install, no manifest)"
+            log "  - Will NOT remove brew packages — legacy install, no manifest"
+        fi
+        log "  - Remove known launchd agents (host-updates-check / host-update-runner / host-uninstall-runner / host-metrics / cert-renew / pro.sygen.{core,admin,updater})"
     fi
 fi
 log "  - Release the install.sygen.pro subdomain slot (if .env has SYGEN_INSTALL_TOKEN)"
@@ -295,26 +334,40 @@ else
     log "No SYGEN_INSTALL_TOKEN in .env (custom domain or pre-Phase 3 install) — skipping subdomain release"
 fi
 
-# ---------- 2. Stop containers ----------
-if [ -f "$SYGEN_ROOT/docker-compose.yml" ] && command -v docker >/dev/null 2>&1; then
-    log "Stopping Sygen containers"
-    # Compose auto-sources $SYGEN_ROOT/.env from the project dir, so no --env-file.
-    # `down -v` also removes any named volumes (today there are only bind mounts,
-    # but this is forward-safe).
-    docker compose -f "$SYGEN_ROOT/docker-compose.yml" down -v --remove-orphans 2>/dev/null \
-        || warn "  docker compose down failed — containers may already be gone"
+# ---------- 2. Stop running services / containers ----------
+if [ "$INSTALL_MODE" = "native" ]; then
+    log "Stopping native Sygen services"
+    if [ $LOCAL_MODE -eq 1 ]; then
+        # macOS — unload all three sygen LaunchAgents (idempotent).
+        for label in pro.sygen.core pro.sygen.admin pro.sygen.updater; do
+            launchctl unload "$HOME/Library/LaunchAgents/${label}.plist" >/dev/null 2>&1 || true
+        done
+    else
+        # Linux — stop+disable systemd units (idempotent on missing units).
+        for unit in sygen-core sygen-admin sygen-updater; do
+            if systemctl list-unit-files "${unit}.service" >/dev/null 2>&1; then
+                systemctl disable --now "${unit}.service" >/dev/null 2>&1 || true
+            fi
+        done
+    fi
 else
-    log "No docker-compose.yml at $SYGEN_ROOT — skipping container stop"
-fi
+    # ----- Legacy Docker uninstall path -----
+    if [ -f "$SYGEN_ROOT/docker-compose.yml" ] && command -v docker >/dev/null 2>&1; then
+        log "Stopping Sygen containers (legacy Docker install)"
+        docker compose -f "$SYGEN_ROOT/docker-compose.yml" down -v --remove-orphans 2>/dev/null \
+            || warn "  docker compose down failed — containers may already be gone"
+    else
+        log "No docker-compose.yml at $SYGEN_ROOT — skipping container stop"
+    fi
 
-# Belt-and-suspenders: kill any leftover Sygen containers by name in case the
-# compose file went missing before this script ran.
-if command -v docker >/dev/null 2>&1; then
-    for name in sygen-core sygen-admin sygen-watchtower sygen-updater; do
-        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$name"; then
-            docker rm -f "$name" >/dev/null 2>&1 || true
-        fi
-    done
+    # Belt-and-suspenders: kill any leftover Sygen containers by name.
+    if command -v docker >/dev/null 2>&1; then
+        for name in sygen-core sygen-admin sygen-watchtower sygen-updater; do
+            if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$name"; then
+                docker rm -f "$name" >/dev/null 2>&1 || true
+            fi
+        done
+    fi
 fi
 
 # ---------- 3. Linux-only system cleanup ----------
@@ -330,13 +383,24 @@ if [ $LOCAL_MODE -eq 0 ]; then
     rm -f /etc/systemd/system/sygen-backup.service
     rm -f /usr/local/sbin/sygen-backup.sh
 
-    # v1.6.58+: auto-start unit. Hardcoded by name (matches the
-    # sygen-backup pattern above); manifest tracking is informational.
-    log "Removing systemd auto-start unit (sygen-compose.service)"
-    if systemctl list-unit-files sygen-compose.service >/dev/null 2>&1; then
-        systemctl disable --now sygen-compose.service >/dev/null 2>&1 || true
+    # Auto-start units. Native installs ship three (core/admin/updater);
+    # legacy Docker installs ship one (sygen-compose). Hardcoded by name
+    # to cover the case where the manifest is missing.
+    if [ "$INSTALL_MODE" = "native" ]; then
+        log "Removing systemd native service units (sygen-core/admin/updater)"
+        for unit in sygen-core sygen-admin sygen-updater; do
+            if systemctl list-unit-files "${unit}.service" >/dev/null 2>&1; then
+                systemctl disable --now "${unit}.service" >/dev/null 2>&1 || true
+            fi
+            rm -f "/etc/systemd/system/${unit}.service"
+        done
+    else
+        log "Removing systemd auto-start unit (sygen-compose.service)"
+        if systemctl list-unit-files sygen-compose.service >/dev/null 2>&1; then
+            systemctl disable --now sygen-compose.service >/dev/null 2>&1 || true
+        fi
+        rm -f /etc/systemd/system/sygen-compose.service
     fi
-    rm -f /etc/systemd/system/sygen-compose.service
 
     systemctl daemon-reload 2>/dev/null || true
 
@@ -386,11 +450,8 @@ if [ $LOCAL_MODE -eq 1 ]; then
             done
         fi
 
-        # Colima — stop first, then optionally delete the VM. Profile name
-        # comes from the manifest so we don't accidentally target a
-        # different user's "default" if install.sh was run with a custom
-        # COLIMA_PROFILE_NAME.
-        if command -v colima >/dev/null 2>&1; then
+        # Colima — only relevant for legacy Docker installs.
+        if [ "$INSTALL_MODE" = "docker" ] && command -v colima >/dev/null 2>&1; then
             if colima status --profile "$MANIFEST_COLIMA_PROFILE" >/dev/null 2>&1; then
                 log "Stopping Colima profile=$MANIFEST_COLIMA_PROFILE"
                 colima stop --profile "$MANIFEST_COLIMA_PROFILE" 2>/dev/null \
@@ -422,11 +483,8 @@ if [ $LOCAL_MODE -eq 1 ]; then
             done
         fi
     else
-        # Legacy mode: don't touch brew, don't delete the VM, but still
-        # unload the launchd agents we hard-coded in pre-1.6.46 installs
-        # so they don't keep flapping after $SYGEN_ROOT goes away.
         log "Legacy mode (no manifest at $MANIFEST) — minimal-safe cleanup"
-        if command -v colima >/dev/null 2>&1; then
+        if [ "$INSTALL_MODE" = "docker" ] && command -v colima >/dev/null 2>&1; then
             if colima status >/dev/null 2>&1; then
                 log "Stopping Colima"
                 colima stop 2>/dev/null || warn "  colima stop failed (ignored)"
@@ -441,7 +499,10 @@ if [ $LOCAL_MODE -eq 1 ]; then
             com.sygen.host-metrics \
             com.sygen.cert-renew \
             pro.sygen.colima \
-            pro.sygen.compose; do
+            pro.sygen.compose \
+            pro.sygen.core \
+            pro.sygen.admin \
+            pro.sygen.updater; do
             unload_plist "$label"
         done
     fi
@@ -551,14 +612,22 @@ fi
 # ---------- 7. Final summary ----------
 echo ""
 echo "====================================================================="
-echo " Sygen has been removed from this host."
+echo " Sygen has been removed from this host (install_mode=$INSTALL_MODE)."
 echo "---------------------------------------------------------------------"
 echo "  What was removed:"
-echo "    - Containers (core, admin, updater, watchtower)"
-echo "    - $SYGEN_ROOT (data, .env, secrets, claude-auth)"
+if [ "$INSTALL_MODE" = "native" ]; then
+    echo "    - Native services (sygen-core, sygen-admin, sygen-updater)"
+else
+    echo "    - Containers (core, admin, updater, watchtower)"
+fi
+echo "    - $SYGEN_ROOT (data, .env, venv, admin, secrets, claude-auth)"
 if [ $LOCAL_MODE -eq 0 ]; then
     echo "    - /var/backups/sygen (nightly backups)"
-    echo "    - systemd units (sygen-backup.timer + .service, sygen-compose.service)"
+    if [ "$INSTALL_MODE" = "native" ]; then
+        echo "    - systemd units (sygen-backup, sygen-core, sygen-admin, sygen-updater)"
+    else
+        echo "    - systemd units (sygen-backup, sygen-compose)"
+    fi
     echo "    - Nginx vhost (sygen)"
     echo "    - Cert renewal hook"
 elif [ $USE_MANIFEST -eq 1 ]; then
@@ -568,7 +637,7 @@ elif [ $USE_MANIFEST -eq 1 ]; then
     if [ ${#MANIFEST_INSTALLED_PKGS[@]} -gt 0 ]; then
         echo "    - Brew packages installed by sygen: ${MANIFEST_INSTALLED_PKGS[*]}"
     fi
-    if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
+    if [ "$INSTALL_MODE" = "docker" ] && [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
         echo "    - Colima default profile + VM image (sygen created it)"
     fi
     if [ ${#MANIFEST_DOWNLOADED_PATHS[@]} -gt 0 ]; then
@@ -579,17 +648,19 @@ echo ""
 echo "  Kept (for fast re-install):"
 if [ $LOCAL_MODE -eq 0 ]; then
     echo "    - Let's Encrypt cert in /etc/letsencrypt/"
-    echo "    - System packages (docker, nginx, certbot, etc.)"
+    if [ "$INSTALL_MODE" = "native" ]; then
+        echo "    - System packages (python3, node, nginx, certbot, etc.)"
+    else
+        echo "    - System packages (docker, nginx, certbot, etc.)"
+    fi
 elif [ $USE_MANIFEST -eq 1 ]; then
-    if [ "$MANIFEST_COLIMA_CREATED" != "1" ]; then
+    if [ "$INSTALL_MODE" = "docker" ] && [ "$MANIFEST_COLIMA_CREATED" != "1" ]; then
         echo "    - Colima default profile (you had it before sygen)"
     fi
     echo "    - Brew packages that pre-existed the install"
 else
     echo "    - All brew packages (legacy install — no manifest to drive removal)"
-    echo "    - Colima default profile (legacy install — VM kept)"
 fi
-echo "    - Cached Docker images (docker image prune -a to reclaim space)"
 echo ""
 echo "  To re-install:"
 if [ $LOCAL_MODE -eq 0 ]; then
@@ -598,16 +669,7 @@ if [ $LOCAL_MODE -eq 0 ]; then
     echo ""
     echo "  To remove the kept cert too:"
     echo "    certbot delete --cert-name <fqdn>"
-    echo ""
-    echo "  To remove docker/nginx packages (rare):"
-    echo "    apt-get remove docker-ce docker-ce-cli nginx"
 else
     echo "    curl -fsSL https://install.sygen.pro/install.sh | bash"
-    if [ $USE_MANIFEST -eq 0 ]; then
-        echo ""
-        echo "  Legacy install — to manually finish cleanup:"
-        echo "    colima delete                          # remove the VM (~27 GB)"
-        echo "    brew uninstall colima docker docker-compose jq    # if not used elsewhere"
-    fi
 fi
 echo "====================================================================="

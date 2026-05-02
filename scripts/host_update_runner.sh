@@ -67,7 +67,7 @@ RUNNING="$STATE_DIR/running"
 RESULT="$STATE_DIR/result.json"
 CHECK_SCRIPT="$SYGEN_ROOT/bin/host_updates_check.sh"
 
-ALLOWLIST="${SYGEN_HOST_PKGS:-colima nginx certbot docker jq openssl tailscale whisper-cpp}"
+ALLOWLIST="${SYGEN_HOST_PKGS:-python@3.14 node@22 nginx certbot jq openssl tailscale whisper-cpp pipx}"
 
 now_utc() {
     date -u '+%Y-%m-%dT%H:%M:%SZ'
@@ -221,18 +221,14 @@ process_trigger() {
 
         rm -f "$TMP_LOG" 2>/dev/null || true
 
-        # Special-case: if Colima was upgraded, restart it cleanly so
-        # the new binary actually takes effect. Reuses the persisted
-        # Colima profile (no re-derivation of original `colima start`
-        # flags here — that's stored in ~/.colima/_lima/...).
+        # Special-case: if python or node was upgraded, restart the
+        # native services so they pick up the new runtime.
         case " $PACKAGES " in
-            *" colima "*)
-                if command -v colima >/dev/null 2>&1; then
-                    log "Restarting Colima to pick up new binary"
-                    colima stop >/dev/null 2>&1 || true
-                    colima start >/dev/null 2>&1 || \
-                        log "WARNING: colima start failed — restart it manually"
-                fi
+            *" python@3.14 "*|*" node@22 "*)
+                log "Restarting sygen native services to pick up new runtime"
+                launchctl kickstart -k "gui/$(id -u)/pro.sygen.core"   2>/dev/null || true
+                launchctl kickstart -k "gui/$(id -u)/pro.sygen.admin"  2>/dev/null || true
+                launchctl kickstart -k "gui/$(id -u)/pro.sygen.updater" 2>/dev/null || true
                 ;;
         esac
     fi

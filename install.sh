@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Sygen install script — Docker + (Linux: nginx + Let's Encrypt / macOS: Colima + localhost/Tailscale/public domain).
+# Sygen install script — NATIVE install (no Docker, no Colima).
 #
-# Linux  (Debian 12+/Ubuntu 22+ VPS): apt, systemd, public DNS via Cloudflare,
-#        nginx vhost + cert via certbot DNS-01.
-# macOS  (Darwin): Homebrew-installed Colima as a headless Docker runtime.
-#        Three sub-modes (selected via SELF_HOSTED_MODE):
+# Linux  (Debian 12+/Ubuntu 22+ VPS): apt, Python 3.14 venv, Node 22, systemd
+#        units (sygen-core, sygen-admin, sygen-updater), nginx vhost + cert
+#        via certbot DNS-01.
+# macOS  (Darwin): Homebrew (python@3.14 + node@22 + whisper-cpp), per-user
+#        Python venv at $SYGEN_ROOT/venv, admin tarball at $SYGEN_ROOT/admin,
+#        launchd LaunchAgents (pro.sygen.core, pro.sygen.admin,
+#        pro.sygen.updater). Three sub-modes (selected via SELF_HOSTED_MODE):
 #          - localhost     (default w/o Tailscale) — http://localhost only,
 #                          iPhone cannot reach it (App Transport Security).
 #          - tailscale     (recommended)           — HTTPS on the tailnet via
@@ -21,14 +24,23 @@
 #
 # Optional env:
 #   SYGEN_DOMAIN              default: sygen.pro
-#   ANTHROPIC_API_KEY         injected into core container as env var
+#   ANTHROPIC_API_KEY         injected into core process env
 #   SYGEN_INSTALL_BASE_URL    default: https://install.sygen.pro
-#                             (source of docker-compose.yml + nginx.conf.tmpl)
-#   SYGEN_CORE_IMAGE          pin a specific core image tag
-#   SYGEN_ADMIN_IMAGE         pin a specific admin image tag
-#   SYGEN_CORE_TAG            default: latest (used when *_IMAGE unset)
-#   SYGEN_ADMIN_TAG           default: latest
-#   SYGEN_ADMIN_PORT          (macOS) host port for admin, default 8080
+#                             (source of nginx.conf.tmpl + service templates)
+#   SYGEN_CORE_VERSION        default: 1.6.74 — version of `sygen` Python
+#                             package to install (or "latest" to query
+#                             GitHub Releases for the latest tag).
+#   SYGEN_ADMIN_VERSION       default: 0.5.54 — version of sygen-admin
+#                             tarball to download from GitHub Releases.
+#   SYGEN_RELEASE_SOURCE      default: github (download wheel + tarball
+#                             from GitHub Releases). "source" = build from
+#                             a local checkout in SYGEN_CORE_SOURCE_DIR /
+#                             SYGEN_ADMIN_SOURCE_DIR (transitional / dev).
+#   SYGEN_CORE_SOURCE_DIR     when SYGEN_RELEASE_SOURCE=source: path to
+#                             a `sygen` checkout (pip install <dir>).
+#   SYGEN_ADMIN_SOURCE_DIR    when SYGEN_RELEASE_SOURCE=source: path to
+#                             a `sygen-admin` checkout (npm ci && build).
+#   SYGEN_ADMIN_PORT          host port for admin, default 8080
 #   SELF_HOSTED_MODE          (macOS) localhost | tailscale | publicdomain.
 #                             (Linux) tailscale only.
 #                             If unset on macOS: auto-detect Tailscale and
@@ -39,10 +51,13 @@
 #                             Equivalent to passing `--json-output` as a flag.
 #                             Useful for SSH-driven deploy wizards.
 #
-# The admin panel bootstraps its own "admin" user on first boot and writes the
+# The core service bootstraps its own "admin" user on first boot and writes the
 # one-time password to $SYGEN_ROOT/data/_secrets/.initial_admin_password. The
 # installer prints it at the end. $SYGEN_ROOT is /srv/sygen on Linux and
-# $HOME/.sygen-local on macOS.
+# $HOME/.sygen-local on macOS. Native processes own these ports:
+#   localhost:8081 — sygen-core   (FastAPI/aiohttp REST + WebSocket)
+#   localhost:8080 — sygen-admin  (Next.js standalone, default SYGEN_ADMIN_PORT)
+#   localhost:8082 — sygen-updater (FastAPI, bound to 127.0.0.1, bearer-authed)
 #
 # Usage:
 #   # Linux (VPS, run as root):
@@ -158,19 +173,19 @@ SYGEN_MANIFEST_PLISTS=()
 # unrecorded so uninstall.sh never touches a model the user pre-staged.
 # Each entry is a JSON object literal: {"path":"…","purpose":"…","size_bytes":N}.
 SYGEN_MANIFEST_DOWNLOADED=()
-SYGEN_MANIFEST_COLIMA_CREATED=""
-# v1.6.58+: post-reboot auto-start artifacts. macOS gets two LaunchAgents
-# (Colima + compose wrapper); Linux gets a single systemd unit. Stored as
-# absolute paths so uninstall.sh / preview tooling can render them
-# verbatim. SYGEN_MANIFEST_PLISTS still tracks the macOS plists too — the
-# autostart-specific field is purely for self-documenting manifests.
+# v1.7+ (native): per-platform autostart artifacts. macOS gets three
+# LaunchAgents (core / admin / updater); Linux gets the matching systemd
+# units. Tracked redundantly in SYGEN_MANIFEST_PLISTS too so the existing
+# unload loops in uninstall.sh keep working — the dedicated fields here
+# are for self-documenting manifests and the iOS preview UI.
 SYGEN_MANIFEST_AUTOSTART_PLISTS=()
-SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT=""
-# Colima profile name used by `colima start` AND recorded in the manifest.
-# Fixed at "default" today; making it a variable means we never have a
-# code path where install creates profile X and uninstall deletes profile
-# Y (a footgun if the user later runs colima with a non-default profile).
-COLIMA_PROFILE_NAME="${COLIMA_PROFILE_NAME:-default}"
+SYGEN_MANIFEST_AUTOSTART_LINUX_UNITS=()
+# Resolved native artefact paths. Recorded so uninstall can rm -rf them
+# directly without having to re-derive locations from $SYGEN_ROOT.
+SYGEN_MANIFEST_CORE_VENV=""
+SYGEN_MANIFEST_ADMIN_DIR=""
+SYGEN_MANIFEST_CORE_VERSION=""
+SYGEN_MANIFEST_ADMIN_VERSION=""
 
 _manifest_has_item() {
     local needle="$1"
@@ -253,19 +268,26 @@ manifest_record_autostart_plist() {
     SYGEN_MANIFEST_AUTOSTART_PLISTS+=("$plist")
 }
 
-manifest_set_autostart_linux_unit() {
-    # $1 = absolute path to the installed systemd unit file. Single
-    # value (we install exactly one unit) so just overwrite — caller
-    # is expected to pass the canonical /etc/systemd/system/... path.
-    SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT="$1"
+manifest_record_autostart_linux_unit() {
+    # $1 = absolute path to an installed systemd unit file. Idempotent —
+    # we install three units (core/admin/updater) so multiple calls are
+    # expected; a duplicate path on a re-run must not re-add itself.
+    local path="$1"
+    if _manifest_has_item "$path" \
+            ${SYGEN_MANIFEST_AUTOSTART_LINUX_UNITS[@]+"${SYGEN_MANIFEST_AUTOSTART_LINUX_UNITS[@]}"}; then
+        return 0
+    fi
+    SYGEN_MANIFEST_AUTOSTART_LINUX_UNITS+=("$path")
 }
 
-manifest_set_colima_created() {
-    # Once set, never overwrite — a re-run that reuses the existing VM
-    # must not flip a true→false flag and orphan the VM image on
-    # uninstall. Empty (initial state) → record the boolean as given.
-    [ -n "$SYGEN_MANIFEST_COLIMA_CREATED" ] && return 0
-    SYGEN_MANIFEST_COLIMA_CREATED="$1"   # 0 or 1
+manifest_set_native_paths() {
+    # Record the resolved venv / admin paths and target versions. Called
+    # once per install run from the install stage; safe to re-set on a
+    # re-run since the paths are deterministic from $SYGEN_ROOT.
+    SYGEN_MANIFEST_CORE_VENV="$1"
+    SYGEN_MANIFEST_ADMIN_DIR="$2"
+    SYGEN_MANIFEST_CORE_VERSION="$3"
+    SYGEN_MANIFEST_ADMIN_VERSION="$4"
 }
 
 # Wrap `brew list || brew install` so each package call lands in the
@@ -316,14 +338,19 @@ manifest_write() {
     umask 022
     {
         printf '{\n'
-        # version=2 (v1.6.49+) adds the downloaded_files field. v1 manifests
-        # are still readable: rest_routes treats a missing field as an empty
-        # list, uninstall.sh's loop is a no-op when MANIFEST_DOWNLOADED is
-        # empty. The bump is purely informational so the preview UI can
-        # tell the operator a manifest predates the new tracking.
-        printf '  "version": 2,\n'
+        # version=3 (v1.7+ native install): drops colima_profile_*, adds
+        # install_mode + core_venv/admin_dir/core_version/admin_version
+        # plus a multi-value autostart_linux_units. Older v1/v2 manifests
+        # carry install_mode="docker" implicitly (absent ⇒ docker) — see
+        # uninstall.sh's routing on $USE_NATIVE_MODE.
+        printf '  "version": 3,\n'
+        printf '  "install_mode": "native",\n'
         printf '  "installed_at": %s,\n' "$(json_escape "$installed_at")"
         printf '  "sygen_root": %s,\n' "$(json_escape "$SYGEN_ROOT")"
+        printf '  "core_venv": %s,\n' "$(json_escape "$SYGEN_MANIFEST_CORE_VENV")"
+        printf '  "admin_dir": %s,\n' "$(json_escape "$SYGEN_MANIFEST_ADMIN_DIR")"
+        printf '  "core_version": %s,\n' "$(json_escape "$SYGEN_MANIFEST_CORE_VERSION")"
+        printf '  "admin_version": %s,\n' "$(json_escape "$SYGEN_MANIFEST_ADMIN_VERSION")"
         printf '  "installed_pkgs": ['
         local first=1 p
         for p in ${SYGEN_MANIFEST_INSTALLED_PKGS[@]+"${SYGEN_MANIFEST_INSTALLED_PKGS[@]}"}; do
@@ -338,13 +365,6 @@ manifest_write() {
             printf '%s' "$(json_escape "$p")"; first=0
         done
         printf '],\n'
-        if [ "$SYGEN_MANIFEST_COLIMA_CREATED" = "1" ]; then
-            printf '  "colima_profile_created": true,\n'
-            printf '  "colima_profile_name": %s,\n' "$(json_escape "$COLIMA_PROFILE_NAME")"
-        elif [ "$SYGEN_MANIFEST_COLIMA_CREATED" = "0" ]; then
-            printf '  "colima_profile_created": false,\n'
-            printf '  "colima_profile_name": %s,\n' "$(json_escape "$COLIMA_PROFILE_NAME")"
-        fi
         printf '  "plists_installed": ['
         first=1
         for p in ${SYGEN_MANIFEST_PLISTS[@]+"${SYGEN_MANIFEST_PLISTS[@]}"}; do
@@ -362,10 +382,6 @@ manifest_write() {
             printf '%s' "$p"; first=0
         done
         printf '],\n'
-        # v1.6.58+: post-reboot auto-start artifacts. macOS plists are
-        # also redundantly tracked via plists_installed (so existing
-        # uninstall paths keep working); the dedicated field here is
-        # for self-documenting manifests and the iOS preview UI.
         printf '  "autostart_macos_plists": ['
         first=1
         for p in ${SYGEN_MANIFEST_AUTOSTART_PLISTS[@]+"${SYGEN_MANIFEST_AUTOSTART_PLISTS[@]}"}; do
@@ -373,12 +389,13 @@ manifest_write() {
             printf '%s' "$(json_escape "$p")"; first=0
         done
         printf '],\n'
-        if [ -n "$SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT" ]; then
-            printf '  "autostart_linux_unit": %s\n' \
-                "$(json_escape "$SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT")"
-        else
-            printf '  "autostart_linux_unit": null\n'
-        fi
+        printf '  "autostart_linux_units": ['
+        first=1
+        for p in ${SYGEN_MANIFEST_AUTOSTART_LINUX_UNITS[@]+"${SYGEN_MANIFEST_AUTOSTART_LINUX_UNITS[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf ']\n'
         printf '}\n'
     } > "$tmp"
     chmod 0644 "$tmp" 2>/dev/null || true
@@ -432,9 +449,6 @@ for p in m.get('preexisting_pkgs') or []:
     if isinstance(p, str): print('P\t' + p)
 for p in m.get('plists_installed') or []:
     if isinstance(p, str): print('L\t' + p)
-v = m.get('colima_profile_created')
-if isinstance(v, bool):
-    print('C\t' + ('1' if v else '0'))
 for d in m.get('downloaded_files') or []:
     if not isinstance(d, dict): continue
     p = d.get('path')
@@ -446,9 +460,14 @@ for d in m.get('downloaded_files') or []:
     print('D\t' + json.dumps({'path': p, 'purpose': purpose, 'size_bytes': size}, separators=(',', ':')))
 for p in m.get('autostart_macos_plists') or []:
     if isinstance(p, str) and p: print('A\t' + p)
-u = m.get('autostart_linux_unit')
-if isinstance(u, str) and u:
-    print('U\t' + u)
+# v3+ multi-value; v2 had a single autostart_linux_unit string — accept both.
+units = m.get('autostart_linux_units')
+if isinstance(units, list):
+    for u in units:
+        if isinstance(u, str) and u: print('U\t' + u)
+else:
+    u = m.get('autostart_linux_unit')
+    if isinstance(u, str) and u: print('U\t' + u)
 PY
 )"
     [ -z "$out" ] && return 0
@@ -457,10 +476,9 @@ PY
             I) SYGEN_MANIFEST_INSTALLED_PKGS+=("$val") ;;
             P) SYGEN_MANIFEST_PREEXISTING_PKGS+=("$val") ;;
             L) SYGEN_MANIFEST_PLISTS+=("$val") ;;
-            C) SYGEN_MANIFEST_COLIMA_CREATED="$val" ;;
             D) SYGEN_MANIFEST_DOWNLOADED+=("$val") ;;
             A) SYGEN_MANIFEST_AUTOSTART_PLISTS+=("$val") ;;
-            U) SYGEN_MANIFEST_AUTOSTART_LINUX_UNIT="$val" ;;
+            U) SYGEN_MANIFEST_AUTOSTART_LINUX_UNITS+=("$val") ;;
         esac
     done <<< "$out"
 }
@@ -698,15 +716,23 @@ fi
 # ---------- Env parsing (conditional) ----------
 DOMAIN="${SYGEN_DOMAIN:-sygen.pro}"
 # Default to raw.githubusercontent.com so re-running install.sh always
-# fetches the current docker-compose.yml + nginx.conf.tmpl. The GitHub
+# fetches the current nginx.conf.tmpl + service templates. The GitHub
 # Pages CDN at install.sygen.pro caches for ~10 min, which causes
-# operators to silently install yesterday's compose file. Override
+# operators to silently install yesterday's templates. Override
 # SYGEN_INSTALL_BASE_URL when testing a fork.
 BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://raw.githubusercontent.com/alexeymorozua/sygen-install/main}"
-CORE_TAG="${SYGEN_CORE_TAG:-latest}"
-ADMIN_TAG="${SYGEN_ADMIN_TAG:-latest}"
-CORE_IMAGE="${SYGEN_CORE_IMAGE:-ghcr.io/alexeymorozua/sygen-core:${CORE_TAG}}"
-ADMIN_IMAGE="${SYGEN_ADMIN_IMAGE:-ghcr.io/alexeymorozua/sygen-admin:${ADMIN_TAG}}"
+# Default versions are pinned to the tags that exist as GitHub Releases.
+# Override SYGEN_CORE_VERSION / SYGEN_ADMIN_VERSION to install a different
+# release. SYGEN_RELEASE_SOURCE=source pulls from local checkouts
+# (SYGEN_CORE_SOURCE_DIR / SYGEN_ADMIN_SOURCE_DIR) — the transitional path
+# for a freshly-cut commit that isn't released yet.
+CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.74}"
+ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.54}"
+RELEASE_SOURCE="${SYGEN_RELEASE_SOURCE:-github}"
+CORE_SOURCE_DIR="${SYGEN_CORE_SOURCE_DIR:-}"
+ADMIN_SOURCE_DIR="${SYGEN_ADMIN_SOURCE_DIR:-}"
+CORE_GITHUB_REPO="${SYGEN_CORE_GITHUB_REPO:-alexeymorozua/sygen}"
+ADMIN_GITHUB_REPO="${SYGEN_ADMIN_GITHUB_REPO:-alexeymorozua/sygen-admin}"
 
 # AUTO_MODE=1 means "ask install.sygen.pro for a free <id>.sygen.pro".
 # The Worker also creates the A record (using CF-Connecting-IP). install.sh
@@ -913,54 +939,64 @@ manifest_load "$SYGEN_MANIFEST_PATH"
 # ---------- 1. System packages ----------
 STAGE="deps"
 if [ $LOCAL_MODE -eq 0 ]; then
-    log "Installing system packages"
+    log "Installing system packages (native install — no Docker)"
     export DEBIAN_FRONTEND=noninteractive
     apt_retry update -qq
+
     # Base packages always needed. nginx + certbot ONLY for paths that
     # terminate TLS themselves (auto-mode + custom-mode). Tailscale-mode
     # delegates TLS to `tailscale serve` so nginx + certbot are skipped.
-    # openssl: not in Debian-slim minimal images by default; we need
-    # `openssl rand -hex 32` later to generate API + JWT secrets.
+    # python3-venv: required for `python3 -m venv`. python3-pip: needed for
+    # `pip install` inside the venv (the venv inherits pip from the base).
+    BASE_PKGS="ca-certificates curl jq gnupg openssl python3 python3-venv python3-pip build-essential"
     if [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
-        apt_retry install -y -qq ca-certificates curl jq gnupg openssl
+        # shellcheck disable=SC2086
+        apt_retry install -y -qq $BASE_PKGS
     else
-        apt_retry install -y -qq \
-            ca-certificates curl jq gnupg openssl nginx \
-            certbot python3-certbot-dns-cloudflare
+        # shellcheck disable=SC2086
+        apt_retry install -y -qq $BASE_PKGS nginx certbot python3-certbot-dns-cloudflare
     fi
 
-    # Docker (official convenience script, idempotent).
-    if ! command -v docker >/dev/null 2>&1; then
-        log "Installing Docker via get.docker.com"
-        curl -fsSL https://get.docker.com | sh
+    # Node 22 LTS via NodeSource — Ubuntu 24.04 ships Node 18, which is
+    # too old for current Next.js. Idempotent: setup_22.x is a no-op if
+    # the apt source is already present.
+    if ! command -v node >/dev/null 2>&1 || ! node -v 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
+        log "Installing Node.js 22 LTS via NodeSource"
+        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        apt_retry install -y -qq nodejs
     fi
-    systemctl enable --now docker
 
-    # docker compose v2 plugin is bundled with docker-ce on Debian/Ubuntu; verify.
-    if ! docker compose version >/dev/null 2>&1; then
-        die "docker compose plugin missing — install manually and re-run"
+    # whisper-cli is best-effort on Linux (apt package is gated to
+    # trixie+/24.10+). Fall through quietly — sygen-core ships no longer
+    # ships whisper-cli with the package, so we install whisper.cpp via
+    # apt where available and download the model regardless (handled in
+    # the whisper section).
+    if ! command -v whisper-cli >/dev/null 2>&1 && ! command -v whisper-cpp >/dev/null 2>&1; then
+        apt_retry install -y -qq whisper-cpp 2>/dev/null \
+            || apt_retry install -y -qq whisper.cpp 2>/dev/null \
+            || warn "whisper.cpp not installable via apt on this distro — voice transcription disabled until installed manually"
     fi
+
+    # Host metrics (Linux): /proc reports real values directly, no
+    # need for a host-side daemon to bypass a VM (we no longer have one).
+    # Keep the env-file generation conditional on macOS only.
 else
-    # ---------- 1-macos. Brew deps + Colima ----------
+    # ---------- 1-macos. Brew deps (python@3.14 + node@22 + whisper-cpp) ----------
     log "macOS: checking Homebrew"
     if ! command -v brew >/dev/null 2>&1; then
         die "Homebrew required on macOS. Install from https://brew.sh then re-run."
     fi
 
-    log "macOS: installing Colima + docker CLI + jq (if missing)"
-    # jq is needed by the same code paths as on Linux (provision response
-    # parsing, .env edits) — install once up front so later sections can
-    # rely on it. nginx+certbot are publicdomain-only — adding them to a
-    # plain localhost install would be wasteful churn.
-    macos_pkgs=(colima docker docker-compose jq)
+    log "macOS: installing native runtime deps (python@3.14, node@22, jq, whisper-cpp)"
+    # Native install needs:
+    #   python@3.14  — runtime for sygen-core + sygen-updater venv
+    #   node@22      — runtime for sygen-admin (Next.js standalone)
+    #   jq           — used by provision response parsing, .env edits
+    #   whisper-cpp  — voice transcription binary (ggml model fetched separately)
+    # nginx + pipx (certbot) are publicdomain-only.
+    macos_pkgs=(python@3.14 node@22 jq whisper-cpp)
     if [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
-        # certbot deliberately NOT in this list — installing it via brew
-        # pulls cryptography/cffi/pycparser as Python deps, and on a Mac
-        # that already has a different version of those packages from a
-        # prior `pip install` (e.g. a developer running other Python
-        # projects in the brew prefix), brew's link step fails or the
-        # imports go to the wrong site-packages. We isolate certbot via
-        # pipx below — its own venv, zero conflicts with system pip.
+        # certbot via pipx (isolated venv) — see publicdomain block below.
         macos_pkgs+=(nginx pipx)
     fi
     for pkg in "${macos_pkgs[@]}"; do
@@ -972,8 +1008,6 @@ else
     # plugin we use for Worker-mediated DNS-01 (no provider key needed
     # at install time; the auth-hook script POSTs to install.sygen.pro).
     if [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
-        # pipx ensures its bin dir (~/.local/bin) is on PATH for THIS shell,
-        # so the certbot-bin resolution below sees it without re-login.
         pipx ensurepath >/dev/null 2>&1 || true
         export PATH="$HOME/.local/bin:$PATH"
         if ! pipx list 2>/dev/null | grep -q "package certbot "; then
@@ -981,157 +1015,69 @@ else
             pipx install certbot >/dev/null \
                 || die "pipx install certbot failed — see error above"
         fi
-        # Custom-mode juser provides their own CF token and we use the
-        # dns-cloudflare plugin; auto-mode goes through Worker-mediated
-        # manual hooks and doesn't need a plugin. Inject the plugin into
-        # the same venv so certbot can find it. Idempotent — pipx no-ops
-        # if the package is already injected.
         if [ -n "${CF_API_TOKEN:-}" ]; then
             pipx inject certbot certbot-dns-cloudflare >/dev/null 2>&1 \
                 || warn "pipx inject certbot-dns-cloudflare failed — custom-mode cert may fail"
         fi
     fi
 
-    # Homebrew installs the docker-compose binary into
-    # $(brew --prefix)/lib/docker/cli-plugins/, but Docker CLI only autodiscovers
-    # plugins from ~/.docker/cli-plugins/ or /usr/local/lib/docker/cli-plugins/.
-    # Without this symlink, `docker compose <verb>` fails with "unknown command"
-    # immediately after a fresh brew install, which used to make the next
-    # `docker compose version` check kill the install. Idempotent — `ln -sf`
-    # is fine on re-runs.
-    BREW_COMPOSE_PLUGIN="$(brew --prefix 2>/dev/null)/lib/docker/cli-plugins/docker-compose"
-    if [ -x "$BREW_COMPOSE_PLUGIN" ]; then
-        mkdir -p "$HOME/.docker/cli-plugins"
-        ln -sf "$BREW_COMPOSE_PLUGIN" "$HOME/.docker/cli-plugins/docker-compose"
+    # Resolve Python + Node binaries. brew installs python@3.14 as
+    # `python3.14` (not the default `python3`) and node@22 as `node` —
+    # but only after `brew link --force --overwrite node@22`. Resolve
+    # paths explicitly so we can hardcode them in the venv shebang and
+    # the launchd plists below.
+    PYTHON_BREW_BIN="$(brew --prefix python@3.14 2>/dev/null)/bin/python3.14"
+    if [ ! -x "$PYTHON_BREW_BIN" ]; then
+        PYTHON_BREW_BIN="$(command -v python3.14 || true)"
     fi
+    [ -x "$PYTHON_BREW_BIN" ] \
+        || die "python3.14 not found after brew install — try: brew link --overwrite python@3.14"
 
-    # Detect host CPU/RAM/disk so Colima can size itself to the box and
-    # so the core agent can report host-true metrics on the dashboard
-    # (psutil inside a container otherwise reports VM resources, e.g.
-    # "4 cores · aarch64 · 8 GB" on an M4 with 32 GB).
+    NODE_BREW_BIN="$(brew --prefix node@22 2>/dev/null)/bin/node"
+    if [ ! -x "$NODE_BREW_BIN" ]; then
+        NODE_BREW_BIN="$(command -v node || true)"
+    fi
+    [ -x "$NODE_BREW_BIN" ] \
+        || die "node not found after brew install — try: brew link --overwrite node@22"
+
+    # Detect host CPU/RAM/disk so the core agent can report host-true
+    # metrics on the dashboard. Native processes already see real host
+    # values via psutil, but we keep these env vars for parity with the
+    # cross-platform code path that consumes SYGEN_HOST_*.
     HOST_CPU="$(/usr/sbin/sysctl -n hw.ncpu 2>/dev/null || echo 4)"
     HOST_RAM_BYTES="$(/usr/sbin/sysctl -n hw.memsize 2>/dev/null || echo 0)"
     HOST_RAM_GB=$(( HOST_RAM_BYTES / 1024 / 1024 / 1024 ))
     HOST_CPU_MODEL="$(/usr/sbin/sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
-    # df -k returns 1024-byte blocks; convert to bytes via *1024.
     HOST_DISK_TOTAL_KB="$(df -k / 2>/dev/null | awk 'NR==2 {print $2}')"
     HOST_DISK_TOTAL_BYTES=$(( ${HOST_DISK_TOTAL_KB:-0} * 1024 ))
     HOST_DISK_TOTAL_GB=$(( HOST_DISK_TOTAL_BYTES / 1024 / 1024 / 1024 ))
 
-    # Colima sizing — generous allocation, agents need RAM to work.
-    # Apple Virtualization.Framework lazily commits memory pages, so the
-    # allocation here is a RESERVATION, not strict physical commitment —
-    # actual usage tracks workload. macOS idle uses 4-6 GB, so even at
-    # 85% on 32 GB we leave 5 GB free for the host UI, which Apple VF
-    # tops up dynamically when VM doesn't need its full allocation.
-    #
-    # Idle Linux+Docker+sygen baseline = ~10-13 GB (just to start).
-    # Active workloads (RAG indexing, video transcoding, music gen,
-    # heavy tool use) can push 20-40 GB. We want headroom for that.
-    #
-    #   <16 GB → die() (baseline alone won't fit)
-    #   16     → 65%  →  10 GB VM   (light tier, basic agents work)
-    #   24     → 75%  →  18 GB VM   (mid laptop tier)
-    #   32-47  → 85%  →  27-40 GB   (Mac mini M4 sweet spot)
-    #   48-63  → 87%  →  42-55 GB   (Pro tier)
-    #   64+    → 90%  →  58+ GB     (Studio/Ultra — agents have room)
-    #
-    # Disk cap stays at min(host/2, 500 GB), floor 50 GB.
-    COLIMA_CPU="${HOST_CPU}"
-    if [ "$HOST_RAM_GB" -gt 0 ] && [ "$HOST_RAM_GB" -lt 16 ]; then
-        die "host has only ${HOST_RAM_GB} GB RAM — sygen requires at least 16 GB (the idle Linux+Docker+sygen baseline is ~10-13 GB and would leave macOS starving). Upgrade hardware or use a remote VPS install."
-    fi
-    if [ "$HOST_RAM_GB" -ge 64 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 90 / 100 ))
-    elif [ "$HOST_RAM_GB" -ge 48 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 87 / 100 ))
-    elif [ "$HOST_RAM_GB" -ge 32 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 85 / 100 ))
-    elif [ "$HOST_RAM_GB" -ge 24 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 75 / 100 ))
-    elif [ "$HOST_RAM_GB" -ge 16 ]; then
-        COLIMA_RAM=$(( HOST_RAM_GB * 65 / 100 ))
-    else
-        # Detection failed (HOST_RAM_GB=0) — pick a safe middle.
-        COLIMA_RAM=12
-    fi
-    [ "$COLIMA_RAM" -lt 10 ] && COLIMA_RAM=10
-    if [ "$HOST_DISK_TOTAL_GB" -gt 0 ]; then
-        # Cap at half the host disk so we don't fill the SSD; minimum 50 GB.
-        COLIMA_DISK=$(( HOST_DISK_TOTAL_GB / 2 ))
-        [ "$COLIMA_DISK" -lt 50 ] && COLIMA_DISK=50
-        [ "$COLIMA_DISK" -gt 500 ] && COLIMA_DISK=500
-    else
-        COLIMA_DISK=50
+    if [ "$HOST_RAM_GB" -gt 0 ] && [ "$HOST_RAM_GB" -lt 8 ]; then
+        die "host has only ${HOST_RAM_GB} GB RAM — sygen requires at least 8 GB native (16 GB recommended for active workloads). Upgrade hardware or use a remote VPS install."
     fi
 
-    # Apple Silicon + macOS Ventura (13) or newer → use Apple's Virtualization
-    # framework instead of Colima's qemu default. Reasons:
-    #   - qemu has known startup failures on macOS 15.0–15.3 (Sequoia) that
-    #     surface as "VM did not start" with no clear remediation.
-    #   - vz boots ~5× faster and gets virtiofs for the host bind mounts,
-    #     which is significantly snappier than qemu's 9p shares.
-    # Intel macs / older macOS keep qemu (vz isn't available there).
-    COLIMA_EXTRA_ARGS=()
-    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
-        macos_major="$(/usr/bin/sw_vers -productVersion 2>/dev/null | cut -d. -f1 || echo 0)"
-        if [ "${macos_major:-0}" -ge 13 ]; then
-            COLIMA_EXTRA_ARGS+=(--vm-type=vz --mount-type=virtiofs)
-        fi
-    fi
-
-    # Detect whether the chosen Colima profile already existed BEFORE we
-    # (potentially) start it. Profile presence is the load-bearing
-    # signal for uninstall: if we created it, uninstall reclaims the VM
-    # image; if it pre-existed (user runs Colima for other projects),
-    # we leave it alone and only `colima stop`. `colima list` exits 0
-    # even when no profile exists, so grep is the actual check.
-    #
-    # Profile name is parameterised via $COLIMA_PROFILE_NAME so detection,
-    # `colima start --profile`, and the manifest record all agree. A
-    # bug here would let install.sh create profile "sygen" while
-    # uninstall.sh deletes profile "default" — a different user's VM.
-    COLIMA_PROFILE_PREEXISTED=0
-    if colima list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx -- "$COLIMA_PROFILE_NAME"; then
-        COLIMA_PROFILE_PREEXISTED=1
-    elif [ -d "$HOME/.colima/$COLIMA_PROFILE_NAME" ]; then
-        # Belt-and-suspenders for older colima versions whose `list` may
-        # not enumerate stopped profiles consistently.
-        COLIMA_PROFILE_PREEXISTED=1
-    fi
-
-    # `colima status` without --profile checks the active profile, which
-    # may not be the one we want. Use --profile so the start gate matches
-    # the profile we plan to start.
-    if ! colima status --profile "$COLIMA_PROFILE_NAME" >/dev/null 2>&1; then
-        log "macOS: starting Colima profile=$COLIMA_PROFILE_NAME (${COLIMA_CPU} CPU / ${COLIMA_RAM} GB RAM / ${COLIMA_DISK} GB disk; host: ${HOST_CPU_MODEL}, ${HOST_RAM_GB} GB, ${HOST_DISK_TOTAL_GB} GB)"
-        colima start --profile "$COLIMA_PROFILE_NAME" --cpu "$COLIMA_CPU" --memory "$COLIMA_RAM" --disk "$COLIMA_DISK" ${COLIMA_EXTRA_ARGS[@]+"${COLIMA_EXTRA_ARGS[@]}"}
-    else
-        log "macOS: Colima profile=$COLIMA_PROFILE_NAME already running"
-    fi
-
-    if [ $COLIMA_PROFILE_PREEXISTED -eq 1 ]; then
-        manifest_set_colima_created 0
-    else
-        manifest_set_colima_created 1
-    fi
-
-    # Persist host-true metrics in .env so docker-compose can pass them
-    # to sygen-core as env vars. Core's _get_cpu_count/_get_cpu_model/
-    # _get_*_bytes helpers prefer the SYGEN_HOST_* env vars over psutil
-    # so the dashboard shows "Apple M4 · 10 cores · 32 GB" (host) instead
-    # of "aarch64 · 10 cores · 27 GB" (VM after the colima sizing above).
     {
         printf 'SYGEN_HOST_CPU_COUNT=%s\n' "$HOST_CPU"
         printf 'SYGEN_HOST_CPU_MODEL=%s\n' "$HOST_CPU_MODEL"
         printf 'SYGEN_HOST_RAM_TOTAL_BYTES=%s\n' "$HOST_RAM_BYTES"
         printf 'SYGEN_HOST_DISK_TOTAL_BYTES=%s\n' "$HOST_DISK_TOTAL_BYTES"
     } > /tmp/sygen-host-metrics.env
-
-    if ! docker compose version >/dev/null 2>&1; then
-        die "docker compose plugin missing after brew install — try: ln -sf $(brew --prefix)/lib/docker/cli-plugins/docker-compose ~/.docker/cli-plugins/docker-compose"
-    fi
 fi
+
+# Resolve PYTHON_BIN + NODE_BIN once so install/autostart sections agree.
+# Linux: apt-installed python3 (3.12+ on Ubuntu 24.04 is fine — sygen
+# pyproject.toml requires >=3.11). macOS: the brew @3.14 paths set above.
+if [ $LOCAL_MODE -eq 1 ]; then
+    PYTHON_BIN="$PYTHON_BREW_BIN"
+    NODE_BIN="$NODE_BREW_BIN"
+else
+    PYTHON_BIN="$(command -v python3 || true)"
+    NODE_BIN="$(command -v node || true)"
+    [ -x "$PYTHON_BIN" ] || die "python3 not found after apt install"
+    [ -x "$NODE_BIN" ] || die "node not found after NodeSource install"
+fi
+log "  python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
+log "  node:   $NODE_BIN ($("$NODE_BIN" --version 2>&1))"
 
 # ---------- 1b. Unattended-upgrades (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
@@ -1716,18 +1662,10 @@ fi
 # the same syscall — no TOCTOU window where the dir is briefly 0755.
 install -d -m 0700 "$SYGEN_ROOT/data/_secrets"
 
-# Container runs as uid 1000 (sygen) — see core Dockerfile. Bind-mounted
-# host directories don't inherit the chown done inside the image, so without
-# this the container can't create /data/logs etc and crashes on first start
-# with PermissionError. Linux only — macOS Colima maps host user uid into
-# the VM transparently. `find ... -exec chown` with the default action does
-# not follow symlinks (POSIX find traverses without dereferencing for -exec
-# by default); we also pass `-h` to chown so even a symlink whose target is
-# outside the tree only has its own metadata changed, never the target's.
-if [ $LOCAL_MODE -eq 0 ]; then
-    find "$SYGEN_ROOT/data" "$SYGEN_ROOT/claude-auth" \
-        -xdev -exec chown -h 1000:1000 {} +
-fi
+# Native install: services run as the installing user (root on Linux,
+# $USER on macOS). No uid remap needed — the previous chown to 1000:1000
+# was for the in-container `sygen` user under Docker, which doesn't exist
+# anymore. Keep $SYGEN_ROOT readable by the service user and nothing else.
 
 # Pick a sensible default for instance_name. Auto-mode SUB is a meaningful
 # subdomain (e.g. yuqp3yqv.sygen.pro → "yuqp3yqv"); for everything else
@@ -1828,10 +1766,12 @@ get_env() {
     printf '%s' "$default"
 }
 
-# Image refs: env var > existing .env > computed default. Lets an operator
-# pin a tag in .env (or via SYGEN_*_IMAGE) and have it survive re-runs.
-EFFECTIVE_CORE_IMAGE=$(get_env SYGEN_CORE_IMAGE "$CORE_IMAGE")
-EFFECTIVE_ADMIN_IMAGE=$(get_env SYGEN_ADMIN_IMAGE "$ADMIN_IMAGE")
+# Version pins: env var > existing .env > computed default. Lets an operator
+# stay on a specific version across re-runs (and gives the updater a stable
+# "currently installed" reference). Stored in .env so launchd/systemd units
+# inherit them and the updater can trust them as ground truth.
+EFFECTIVE_CORE_VERSION=$(get_env SYGEN_CORE_VERSION "$CORE_VERSION")
+EFFECTIVE_ADMIN_VERSION=$(get_env SYGEN_ADMIN_VERSION "$ADMIN_VERSION")
 # Secrets: existing wins; otherwise generate or pull from process env.
 EFFECTIVE_UPDATER_TOKEN=$(get_env SYGEN_UPDATER_TOKEN "$(openssl rand -hex 32)")
 EFFECTIVE_ANTHROPIC_KEY=$(get_env ANTHROPIC_API_KEY "${ANTHROPIC_API_KEY:-}")
@@ -1876,27 +1816,30 @@ else
 fi
 [ -z "$HOST_TZ_VAL" ] && HOST_TZ_VAL=""
 
-# docker-compose .env grammar doesn't support multi-line values or quoted
-# strings reliably — drop control chars + quote/equals chars that would
-# break parsing or let a malicious hostname inject extra env vars.
-# Unicode (e.g. emoji in macOS ComputerName) is preserved.
+# Native .env is sourced by launchd plists / systemd units via EnvironmentFile=
+# (Linux) or by a small wrapper that exports vars before exec on macOS.
+# Multi-line values and quoted strings are unsupported; drop control chars +
+# quote/equals chars that could break the parser or smuggle extra vars.
 sanitize_env_value() {
     printf '%s' "$1" | tr -d '\n\r\t' | tr -d '"' | tr -d "'"
 }
 HOST_HOSTNAME_VAL="$(sanitize_env_value "$HOST_HOSTNAME_VAL")"
 HOST_TZ_VAL="$(sanitize_env_value "$HOST_TZ_VAL")"
 
-# docker-compose .env is auto-sourced by `docker compose`.
 umask 077
 {
-    echo "SYGEN_CORE_IMAGE=$EFFECTIVE_CORE_IMAGE"
-    echo "SYGEN_ADMIN_IMAGE=$EFFECTIVE_ADMIN_IMAGE"
+    echo "SYGEN_CORE_VERSION=$EFFECTIVE_CORE_VERSION"
+    echo "SYGEN_ADMIN_VERSION=$EFFECTIVE_ADMIN_VERSION"
     echo "ANTHROPIC_API_KEY=$EFFECTIVE_ANTHROPIC_KEY"
     echo "CLAUDE_CODE_OAUTH_TOKEN=$EFFECTIVE_OAUTH_TOKEN"
     echo "LOG_LEVEL=$EFFECTIVE_LOG_LEVEL"
-    # Shared secret for core ↔ updater-sidecar apply calls. Core authenticates
-    # its POST to http://sygen-updater:8082/apply with this bearer token.
+    # Shared secret for core ↔ updater apply calls. Core authenticates its
+    # POST to http://127.0.0.1:8082/apply with this bearer token.
     echo "SYGEN_UPDATER_TOKEN=$EFFECTIVE_UPDATER_TOKEN"
+    # GitHub repo coordinates so the updater can poll Releases without
+    # rediscovering them at runtime. Override via env to test forks.
+    echo "SYGEN_CORE_GITHUB_REPO=$CORE_GITHUB_REPO"
+    echo "SYGEN_ADMIN_GITHUB_REPO=$ADMIN_GITHUB_REPO"
     if [ -n "$EFFECTIVE_PUBLIC_API_URL" ]; then
         echo "NEXT_PUBLIC_SYGEN_API_URL=$EFFECTIVE_PUBLIC_API_URL"
     fi
@@ -1914,29 +1857,16 @@ umask 077
     if [ -n "$EFFECTIVE_DNS_CHALLENGE_URL" ]; then
         echo "SYGEN_DNS_CHALLENGE_URL=$EFFECTIVE_DNS_CHALLENGE_URL"
     fi
-    # macOS: pass host CPU/RAM/disk metadata into core so the dashboard
-    # reports host-true values instead of Colima VM resources. File was
-    # generated up in the Colima section. No-op on Linux (file absent
-    # because that branch never runs).
+    # macOS: pass host CPU/RAM/disk metadata into core. Native processes
+    # already see these via psutil, but the SYGEN_HOST_* env vars are the
+    # canonical override — kept for parity with the Linux branch.
     if [ -f /tmp/sygen-host-metrics.env ]; then
         cat /tmp/sygen-host-metrics.env
     fi
-    # Host-side install root, exposed to core so the legacy-install
-    # branch of /api/system/uninstall/preview can show the real path
-    # (~/.sygen-local on macOS, /srv/sygen on Linux) instead of "/" —
-    # which is what _HOST_UPDATES_DIR.parent.parent resolves to inside
-    # the container. Used only when the manifest is missing; manifest
-    # mode reads sygen_root from the manifest itself.
     echo "SYGEN_HOST_DATA_DIR=$SYGEN_ROOT"
-    # Host directory where install.sh (section 5e below) drops the
-    # whisper.cpp ggml-* model. docker-compose bind-mounts this path
-    # read-only at /home/sygen/.local/share/whisper-cpp/models so the
-    # container's whisper-cli (baked into the image since v1.6.48)
-    # finds the weights without re-downloading 466 MB inside the
-    # container layer. Path matches WHISPER_MODEL_DIR in section 5e —
-    # if the section is skipped (SKIP_WHISPER=1) the directory simply
-    # stays empty and /api/system/voice/config reports
-    # model_present=false until the operator drops a model in.
+    # Whisper.cpp model location. Native install: same path as before
+    # (~/.local/share/whisper-cpp/models). Core reads the model directly
+    # from this directory; no bind-mount indirection.
     echo "SYGEN_HOST_WHISPER_MODELS_DIR=$HOME/.local/share/whisper-cpp/models"
     # Host hostname + IANA timezone (resolved above). Read by core's
     # /api/system/status and /api/system/timezone as fallbacks before the
@@ -1948,31 +1878,150 @@ umask 077
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"
 
-# ---------- 5. docker-compose.yml ----------
-STAGE="compose"
-log "Fetching docker-compose.yml from $BASE_URL"
-curl -fsSL -o "$SYGEN_ROOT/docker-compose.yml" "$BASE_URL/docker-compose.yml" \
-    || die "could not fetch docker-compose.yml"
+# ---------- 5. Native install: Python venv + admin tarball ----------
+STAGE="install"
 
-if [ $LOCAL_MODE -eq 1 ]; then
-    # Rewrite hardcoded /srv/sygen paths to $SYGEN_ROOT (user-writable, no sudo)
-    # and remap the admin container's host port from 3000 to $SYGEN_ADMIN_PORT
-    # so it doesn't collide with typical local dev servers.
-    # `sed -i.bak` is the portable form that works on BSD (macOS) and GNU sed.
-    sed -i.bak \
-        -e "s|/srv/sygen|$SYGEN_ROOT|g" \
-        -e "s|127.0.0.1:3000:3000|127.0.0.1:${SYGEN_ADMIN_PORT}:3000|g" \
-        "$SYGEN_ROOT/docker-compose.yml"
-    rm -f "$SYGEN_ROOT/docker-compose.yml.bak"
-elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
-    # Linux+tailscale: no nginx, admin reached via `tailscale serve` →
-    # localhost:$SYGEN_ADMIN_PORT. Same port remap as macOS so the
-    # tailscale serve mountpoint matches.
-    sed -i.bak \
-        -e "s|127.0.0.1:3000:3000|127.0.0.1:${SYGEN_ADMIN_PORT}:3000|g" \
-        "$SYGEN_ROOT/docker-compose.yml"
-    rm -f "$SYGEN_ROOT/docker-compose.yml.bak"
+VENV_DIR="$SYGEN_ROOT/venv"
+ADMIN_DIR="$SYGEN_ROOT/admin"
+ADMIN_PREV_DIR="$SYGEN_ROOT/admin-prev"
+VENV_PIP="$VENV_DIR/bin/pip"
+VENV_SYGEN_BIN="$VENV_DIR/bin/sygen"
+VENV_UPDATER_BIN="$VENV_DIR/bin/sygen-updater"
+
+# Helper: GitHub Release artefact URL for a given repo + version + filename.
+gh_release_url() {
+    # $1=repo (owner/name), $2=version (no leading v), $3=asset filename
+    printf 'https://github.com/%s/releases/download/v%s/%s' "$1" "$2" "$3"
+}
+
+# Helper: download with HTTP error → die. -L follows redirects (GitHub
+# Release assets are 302 → S3-backed URL).
+fetch_release_asset() {
+    # $1=url, $2=dest
+    local url="$1" dest="$2"
+    log "  fetching $url"
+    curl -fL --retry 3 --retry-delay 5 --max-time 600 -o "$dest" "$url" \
+        || die "could not download $url (HTTP error or network failure)"
+}
+
+# ----- 5a. Core: pip install sygen into the venv -----
+log "Creating Python venv at $VENV_DIR (using $PYTHON_BIN)"
+# --clear nukes any prior venv contents on a re-run so we never end up
+# with a half-upgraded site-packages tree. Cheap on a small venv.
+"$PYTHON_BIN" -m venv --clear "$VENV_DIR" \
+    || die "python -m venv failed — check that python3-venv (Linux) or python@3.14 (macOS) is fully installed"
+
+log "Upgrading pip + wheel inside the venv"
+"$VENV_PIP" install --quiet --upgrade pip wheel \
+    || die "pip self-upgrade failed inside venv"
+
+if [ "$RELEASE_SOURCE" = "source" ]; then
+    [ -n "$CORE_SOURCE_DIR" ] && [ -d "$CORE_SOURCE_DIR" ] \
+        || die "SYGEN_RELEASE_SOURCE=source requires SYGEN_CORE_SOURCE_DIR=<path-to-sygen-checkout>"
+    log "Installing sygen from local checkout: $CORE_SOURCE_DIR"
+    "$VENV_PIP" install --quiet "$CORE_SOURCE_DIR" \
+        || die "pip install $CORE_SOURCE_DIR failed"
+else
+    CORE_WHEEL="sygen-${EFFECTIVE_CORE_VERSION}-py3-none-any.whl"
+    CORE_WHEEL_URL="$(gh_release_url "$CORE_GITHUB_REPO" "$EFFECTIVE_CORE_VERSION" "$CORE_WHEEL")"
+    CORE_WHEEL_DEST="/tmp/sygen-${EFFECTIVE_CORE_VERSION}-${$}.whl"
+    log "Downloading sygen wheel ${EFFECTIVE_CORE_VERSION} from GitHub Releases"
+    fetch_release_asset "$CORE_WHEEL_URL" "$CORE_WHEEL_DEST"
+    log "Installing sygen wheel into venv"
+    "$VENV_PIP" install --quiet "$CORE_WHEEL_DEST" \
+        || die "pip install of sygen wheel failed"
+    rm -f "$CORE_WHEEL_DEST"
 fi
+[ -x "$VENV_SYGEN_BIN" ] \
+    || die "sygen entry point missing at $VENV_SYGEN_BIN after install"
+
+# Updater shares the same venv. Installed from a separate wheel/tarball
+# but uses the same Python so we don't pay for two interpreters.
+if [ "$RELEASE_SOURCE" = "source" ]; then
+    UPDATER_SOURCE_DIR="${SYGEN_UPDATER_SOURCE_DIR:-${CORE_SOURCE_DIR%/sygen}/sygen-updater}"
+    if [ -d "$UPDATER_SOURCE_DIR" ]; then
+        log "Installing sygen-updater from local checkout: $UPDATER_SOURCE_DIR"
+        "$VENV_PIP" install --quiet "$UPDATER_SOURCE_DIR" \
+            || warn "pip install $UPDATER_SOURCE_DIR failed — updater service will be inactive"
+    else
+        warn "sygen-updater checkout not found at $UPDATER_SOURCE_DIR — set SYGEN_UPDATER_SOURCE_DIR to enable the updater"
+    fi
+else
+    # The updater is versioned alongside core for now — same git tag.
+    UPDATER_WHEEL="sygen_updater-${EFFECTIVE_CORE_VERSION}-py3-none-any.whl"
+    UPDATER_WHEEL_URL="$(gh_release_url "$CORE_GITHUB_REPO" "$EFFECTIVE_CORE_VERSION" "$UPDATER_WHEEL")"
+    UPDATER_WHEEL_DEST="/tmp/sygen-updater-${EFFECTIVE_CORE_VERSION}-${$}.whl"
+    if curl -fL --retry 2 --max-time 300 -o "$UPDATER_WHEEL_DEST" "$UPDATER_WHEEL_URL" 2>/dev/null; then
+        log "Installing sygen-updater wheel into venv"
+        "$VENV_PIP" install --quiet "$UPDATER_WHEEL_DEST" \
+            || warn "pip install sygen-updater failed — updater service inactive"
+        rm -f "$UPDATER_WHEEL_DEST"
+    else
+        warn "sygen-updater wheel not yet published at $UPDATER_WHEEL_URL — updater service will be inactive until next release"
+        rm -f "$UPDATER_WHEEL_DEST" 2>/dev/null || true
+    fi
+fi
+
+# ----- 5b. Admin: download tarball, extract Next.js standalone build -----
+log "Installing sygen-admin to $ADMIN_DIR"
+# Admin tarball ships the Next.js standalone output (server.js,
+# minimal node_modules, .next/static, public/) — runtime only, no build
+# step on the host.
+mkdir -p "$ADMIN_DIR" "$ADMIN_PREV_DIR"
+
+# Atomic swap: extract the new tarball into admin-staging, then mv-rename.
+# Keeps the previous admin around at admin-prev/ for one-step rollback.
+ADMIN_STAGING_DIR="$SYGEN_ROOT/admin-staging-$$"
+mkdir -p "$ADMIN_STAGING_DIR"
+trap 'rm -rf "$ADMIN_STAGING_DIR" 2>/dev/null || true' EXIT
+
+if [ "$RELEASE_SOURCE" = "source" ]; then
+    [ -n "$ADMIN_SOURCE_DIR" ] && [ -d "$ADMIN_SOURCE_DIR" ] \
+        || die "SYGEN_RELEASE_SOURCE=source requires SYGEN_ADMIN_SOURCE_DIR=<path-to-sygen-admin-checkout>"
+    log "Building sygen-admin from local checkout: $ADMIN_SOURCE_DIR (npm ci + npm run build)"
+    pushd "$ADMIN_SOURCE_DIR" >/dev/null \
+        || die "could not enter $ADMIN_SOURCE_DIR"
+    NEXT_PUBLIC_APP_VERSION="$EFFECTIVE_ADMIN_VERSION" \
+        "$NODE_BIN" "$(dirname "$NODE_BIN")/npm" ci --no-audit --no-fund \
+        || die "npm ci failed in $ADMIN_SOURCE_DIR"
+    NEXT_PUBLIC_APP_VERSION="$EFFECTIVE_ADMIN_VERSION" \
+        "$NODE_BIN" "$(dirname "$NODE_BIN")/npm" run build \
+        || die "npm run build failed in $ADMIN_SOURCE_DIR"
+    # Reproduce the tarball layout: standalone bundle + static + public.
+    mkdir -p "$ADMIN_STAGING_DIR/.next"
+    cp -R .next/standalone/. "$ADMIN_STAGING_DIR/"
+    cp -R .next/static "$ADMIN_STAGING_DIR/.next/static"
+    if [ -d public ]; then
+        cp -R public "$ADMIN_STAGING_DIR/public"
+    fi
+    popd >/dev/null
+else
+    ADMIN_TARBALL="sygen-admin-${EFFECTIVE_ADMIN_VERSION}.tar.gz"
+    ADMIN_TARBALL_URL="$(gh_release_url "$ADMIN_GITHUB_REPO" "$EFFECTIVE_ADMIN_VERSION" "$ADMIN_TARBALL")"
+    ADMIN_TARBALL_DEST="/tmp/sygen-admin-${EFFECTIVE_ADMIN_VERSION}-${$}.tar.gz"
+    log "Downloading sygen-admin tarball ${EFFECTIVE_ADMIN_VERSION} from GitHub Releases"
+    fetch_release_asset "$ADMIN_TARBALL_URL" "$ADMIN_TARBALL_DEST"
+    log "Extracting admin tarball into staging dir"
+    tar -xzf "$ADMIN_TARBALL_DEST" -C "$ADMIN_STAGING_DIR" \
+        || die "tar -xzf failed for admin tarball"
+    rm -f "$ADMIN_TARBALL_DEST"
+fi
+
+# Sanity-check: server.js must exist; otherwise the launchd/systemd
+# unit will fail-loop with no clear cause.
+[ -f "$ADMIN_STAGING_DIR/server.js" ] \
+    || die "admin tarball/build missing server.js — check release artefact layout"
+
+# Atomic swap: previous admin → admin-prev, staging → admin.
+if [ -d "$ADMIN_DIR" ] && [ -n "$(ls -A "$ADMIN_DIR" 2>/dev/null)" ]; then
+    rm -rf "$ADMIN_PREV_DIR"
+    mv "$ADMIN_DIR" "$ADMIN_PREV_DIR"
+fi
+mv "$ADMIN_STAGING_DIR" "$ADMIN_DIR"
+trap on_exit EXIT  # restore the install-wide trap
+
+manifest_set_native_paths "$VENV_DIR" "$ADMIN_DIR" \
+    "$EFFECTIVE_CORE_VERSION" "$EFFECTIVE_ADMIN_VERSION"
 
 # ---------- 5b. Host metrics daemon (macOS + Linux) ----------
 # Writes live host CPU/RAM/disk usage to $SYGEN_ROOT/host_metrics/state.json
@@ -2031,7 +2080,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
     # Idempotent reload: unload an old copy if present, then load fresh.
     launchctl unload "$PLIST_DST" >/dev/null 2>&1 || true
     launchctl load -w "$PLIST_DST" \
-        || warn "launchctl load failed — host metrics will fall back to Colima view"
+        || warn "launchctl load failed — host metrics daemon inactive"
     manifest_record_plist "com.sygen.host-metrics"
 else
     # Linux — systemd unit, system-wide.
@@ -2292,17 +2341,93 @@ elif [ "$OS" = "Linux" ]; then
     fi
 fi
 
-# ---------- 6. Start stack ----------
-log "Pulling images"
-docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env" pull
+# ---------- 6. Install + start native services ----------
+STAGE="services"
+log "Installing native services (core/admin/updater) and starting them"
 
-log "Starting Sygen stack"
-# --remove-orphans removes containers from prior compose files that are no
-# longer in this one (notably the legacy `sygen-watchtower` service that
-# was removed in compose v2 — without this flag, watchtower keeps polling
-# and fights with sygen-updater, surfacing as mysterious "image rolled
-# back" loops).
-docker compose -f "$SYGEN_ROOT/docker-compose.yml" --env-file "$SYGEN_ROOT/.env" up -d --remove-orphans
+# Resolve the system-wide python (needed for the launchd PYTHON_BIN spot
+# in plists, etc) — already done in deps stage.
+[ -x "$VENV_SYGEN_BIN" ] || die "internal: venv sygen binary missing — install stage failed silently"
+
+if [ $LOCAL_MODE -eq 1 ]; then
+    # ----- macOS: per-user LaunchAgents in $HOME/Library/LaunchAgents -----
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    install_native_plist() {
+        # $1=label (without .plist)  $2=template basename in scripts/
+        local label="$1"
+        local tmpl_name="$2"
+        local plist_dst="$HOME/Library/LaunchAgents/${label}.plist"
+        local tmpl="/tmp/${label}.plist.tmpl"
+        curl -fsSL -o "$tmpl" "$BASE_URL/scripts/${tmpl_name}" \
+            || die "could not fetch $tmpl_name template from $BASE_URL/scripts/"
+        sed \
+            -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
+            -e "s|__VENV_DIR__|$VENV_DIR|g" \
+            -e "s|__ADMIN_DIR__|$ADMIN_DIR|g" \
+            -e "s|__NODE_BIN__|$NODE_BIN|g" \
+            -e "s|__SYGEN_ADMIN_PORT__|$SYGEN_ADMIN_PORT|g" \
+            -e "s|__HOME__|$HOME|g" \
+            "$tmpl" > "$plist_dst"
+        rm -f "$tmpl"
+        # 0644 — launchd silently refuses 0600 plists (umask 077 from .env
+        # write would otherwise clip to 0600).
+        chmod 0644 "$plist_dst"
+        # Idempotent reload: unload prior copy, load+RunAtLoad fires the job.
+        launchctl unload "$plist_dst" >/dev/null 2>&1 || true
+        launchctl load -w "$plist_dst" \
+            || warn "launchctl load failed for $label — service inactive (re-run install.sh after fixing)"
+        manifest_record_autostart_plist "$label"
+    }
+
+    install_native_plist "pro.sygen.core"    "pro.sygen.core.plist"
+    install_native_plist "pro.sygen.admin"   "pro.sygen.admin.plist"
+    # Updater is best-effort — it may not be installed yet (wheel not
+    # published). Skip the plist if its binary is missing.
+    if [ -x "$VENV_UPDATER_BIN" ]; then
+        install_native_plist "pro.sygen.updater" "pro.sygen.updater.plist"
+    else
+        log "  skipping pro.sygen.updater plist — updater binary not installed yet"
+    fi
+else
+    # ----- Linux: systemd units, system-wide -----
+    install_native_unit() {
+        # $1=unit filename (e.g. sygen-core.service)
+        local unit="$1"
+        local unit_dst="/etc/systemd/system/$unit"
+        local tmpl="/tmp/$unit.tmpl"
+        curl -fsSL -o "$tmpl" "$BASE_URL/scripts/$unit" \
+            || die "could not fetch $unit template from $BASE_URL/scripts/"
+        sed \
+            -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
+            -e "s|__VENV_DIR__|$VENV_DIR|g" \
+            -e "s|__ADMIN_DIR__|$ADMIN_DIR|g" \
+            -e "s|__NODE_BIN__|$NODE_BIN|g" \
+            -e "s|__SYGEN_ADMIN_PORT__|$SYGEN_ADMIN_PORT|g" \
+            "$tmpl" > "$unit_dst"
+        rm -f "$tmpl"
+        chmod 0644 "$unit_dst"
+        manifest_record_autostart_linux_unit "$unit_dst"
+    }
+
+    install_native_unit "sygen-core.service"
+    install_native_unit "sygen-admin.service"
+    if [ -x "$VENV_UPDATER_BIN" ]; then
+        install_native_unit "sygen-updater.service"
+    else
+        log "  skipping sygen-updater.service — updater binary not installed yet"
+    fi
+
+    systemctl daemon-reload
+    systemctl enable --now sygen-core.service \
+        || warn "systemctl enable sygen-core failed — see: journalctl -u sygen-core -n 50"
+    systemctl enable --now sygen-admin.service \
+        || warn "systemctl enable sygen-admin failed — see: journalctl -u sygen-admin -n 50"
+    if [ -x "$VENV_UPDATER_BIN" ]; then
+        systemctl enable --now sygen-updater.service \
+            || warn "systemctl enable sygen-updater failed (non-fatal)"
+    fi
+fi
 
 # ---------- 6b. macOS smoke-test (Linux uses nginx + Let's Encrypt to verify) ----------
 if [ $LOCAL_MODE -eq 1 ]; then
@@ -2338,7 +2463,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
     done
     if [ "$smoke_ok" -ne 1 ]; then
         warn "Smoke test failed after 60s: admin=$admin_code core=$core_code."
-        warn "Check: 'colima status' and 'docker compose -f $SYGEN_ROOT/docker-compose.yml logs'"
+        warn "Check: 'launchctl list | grep pro.sygen' and tail $SYGEN_ROOT/logs/{core,admin}.log"
     fi
 fi
 
@@ -2566,11 +2691,11 @@ for i in $(seq 1 60); do
     sleep 2
 done
 
-# ---------- 9. Auto-updates & cert renewal (Linux only) ----------
+# ---------- 9. Cert renewal nginx reload hook (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
-    # Container image auto-updates run inside the stack via the Watchtower
-    # service defined in docker-compose.yml — it polls GHCR hourly and
-    # recreates any container labeled com.centurylinklabs.watchtower.enable.
+    # Sygen update polling runs inside sygen-updater.service (systemd unit
+    # we installed in stage 6). It polls GitHub Releases and atomically
+    # swaps the venv + admin tarball when an apply is requested.
     #
     # certbot's Debian/Ubuntu package installs certbot.timer (runs twice
     # daily), so cert renewals happen on their own. We just need nginx to
@@ -2667,111 +2792,11 @@ PLIST
     manifest_record_plist "com.sygen.cert-renew"
 fi
 
-# ---------- 9c. Auto-start on host reboot (macOS + Linux) ----------
-# v1.6.58+: brings the sygen Docker stack back up automatically after a
-# host reboot so operators don't have to ssh in / remember `colima start
-# && docker compose up -d` after a power blip or scheduled reboot.
-#
-# macOS — two LaunchAgents in $HOME/Library/LaunchAgents/:
-#   pro.sygen.colima.plist  → starts the chosen Colima profile at login.
-#   pro.sygen.compose.plist → invokes a wrapper that polls `docker info`
-#                             until the daemon answers, then `docker
-#                             compose up -d` from $SYGEN_ROOT. The
-#                             docker-info poll handles the Colima cold-
-#                             boot window (~5–15 s on Apple VF) without
-#                             racing the compose call.
-#
-# Linux — single systemd unit at /etc/systemd/system/sygen-compose.service.
-#   Native dockerd is already a systemd service, so we only need a
-#   one-shot oneshot service that runs `docker compose up -d`
-#   After=docker.service.
-#
-# Idempotency: `launchctl load -w` and `systemctl enable --now` both
-# fire the service immediately. Both `colima start` and `docker compose
-# up -d` are no-ops when state already matches what we set up earlier
-# in this run, so loading mid-install is safe.
-STAGE="autostart"
-log "Installing auto-start on host reboot"
-
-if [ $LOCAL_MODE -eq 1 ]; then
-    # ----- macOS: Colima LaunchAgent + compose-wrapper LaunchAgent -----
-    COLIMA_BIN="$(command -v colima || true)"
-    DOCKER_BIN="$(command -v docker || true)"
-    BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
-    if [ -z "$COLIMA_BIN" ] || [ -z "$DOCKER_BIN" ]; then
-        warn "colima or docker not on PATH — skipping autostart wiring (re-run install.sh after fixing)"
-    else
-        mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs" "$HOME/Library/LaunchAgents"
-
-        # Render the post-Colima compose wrapper ($SYGEN_ROOT/bin/sygen-startup.sh).
-        STARTUP_SCRIPT="$SYGEN_ROOT/bin/sygen-startup.sh"
-        curl -fsSL -o /tmp/sygen-startup.sh.tmpl \
-            "$BASE_URL/scripts/sygen-startup.sh" \
-            || die "could not fetch sygen-startup.sh template"
-        sed \
-            -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
-            -e "s|__DOCKER_BIN__|$DOCKER_BIN|g" \
-            /tmp/sygen-startup.sh.tmpl > "$STARTUP_SCRIPT"
-        rm -f /tmp/sygen-startup.sh.tmpl
-        chmod 0755 "$STARTUP_SCRIPT"
-
-        # Idempotent re-render helper for both LaunchAgents.
-        install_autostart_plist() {
-            local label="$1"
-            local plist_dst="$HOME/Library/LaunchAgents/${label}.plist"
-            local tmpl="/tmp/${label}.plist.tmpl"
-            curl -fsSL -o "$tmpl" "$BASE_URL/scripts/${label}.plist" \
-                || die "could not fetch ${label}.plist template"
-            sed \
-                -e "s|__COLIMA_BIN__|$COLIMA_BIN|g" \
-                -e "s|__COLIMA_PROFILE__|$COLIMA_PROFILE_NAME|g" \
-                -e "s|__BREW_PREFIX__|$BREW_PREFIX|g" \
-                -e "s|__HOME__|$HOME|g" \
-                -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
-                -e "s|__STARTUP_SCRIPT__|$STARTUP_SCRIPT|g" \
-                "$tmpl" > "$plist_dst"
-            rm -f "$tmpl"
-            # Same defensive 0644 chmod as the host-metrics path —
-            # 0600 plists silently fail to load under launchd.
-            chmod 0644 "$plist_dst"
-            launchctl unload "$plist_dst" >/dev/null 2>&1 || true
-            launchctl load -w "$plist_dst" \
-                || warn "launchctl load failed for ${label} — autostart will be inactive until reboot+manual fix"
-            manifest_record_autostart_plist "$label"
-        }
-
-        install_autostart_plist "pro.sygen.colima"
-        install_autostart_plist "pro.sygen.compose"
-    fi
-else
-    # ----- Linux: systemd unit, system-wide -----
-    DOCKER_BIN="$(command -v docker || true)"
-    if [ -z "$DOCKER_BIN" ]; then
-        warn "docker not on PATH — skipping autostart wiring"
-    elif ! command -v systemctl >/dev/null 2>&1; then
-        # Non-systemd distros (alpine, gentoo openrc, etc.) — out of
-        # scope. Leave a clear message; operator can wire up their own.
-        warn "systemctl not found — skipping autostart wiring (non-systemd init: configure your init system manually)"
-    else
-        UNIT_DST="/etc/systemd/system/sygen-compose.service"
-        curl -fsSL -o /tmp/sygen-compose.service.tmpl \
-            "$BASE_URL/scripts/sygen-compose.service" \
-            || die "could not fetch sygen-compose.service template"
-        sed \
-            -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
-            -e "s|__DOCKER_BIN__|$DOCKER_BIN|g" \
-            /tmp/sygen-compose.service.tmpl > "$UNIT_DST"
-        rm -f /tmp/sygen-compose.service.tmpl
-        chmod 0644 "$UNIT_DST"
-
-        systemctl daemon-reload
-        if systemctl enable --now sygen-compose.service; then
-            manifest_set_autostart_linux_unit "$UNIT_DST"
-        else
-            warn "systemctl enable --now sygen-compose.service failed — stack will not auto-start on reboot"
-        fi
-    fi
-fi
+# ---------- 9c. Auto-start on host reboot ----------
+# Native services installed in stage 6 ("services") are already wired for
+# autostart: macOS LaunchAgents have RunAtLoad+KeepAlive, systemd units
+# have WantedBy=multi-user.target. No additional work needed.
+log "Auto-start: services already enabled (sygen-core/admin/updater)"
 
 # ---------- 10. Nightly backups (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
@@ -2780,8 +2805,10 @@ if [ $LOCAL_MODE -eq 0 ]; then
     cat > /usr/local/sbin/sygen-backup.sh <<'BACKUP'
 #!/usr/bin/env bash
 # Sygen nightly backup — managed by install.sh (Phase 2.8).
-# Snapshots /srv/sygen/{data,.env,docker-compose.yml,claude-auth} into
+# Snapshots /srv/sygen/{data,.env,claude-auth} into
 # /var/backups/sygen/sygen-YYYY-MM-DD.tar.gz and prunes archives >7d old.
+# venv/ and admin/ are NOT backed up — they're reproducible from
+# install.sh given the version pins in .env.
 set -euo pipefail
 
 SRC=/srv/sygen
@@ -2793,16 +2820,11 @@ if [ ! -d "$SRC/data" ]; then
 fi
 
 mkdir -p "$DEST"
-# 0700 on the backup dir: defence-in-depth against regressions where an archive
-# later ends up 0644 — the dir itself should never be world-listable since it
-# names tarballs that contain .env + claude-auth + _secrets/.
 chmod 0700 "$DEST"
 STAMP=$(date -u +%Y-%m-%d)
 OUT="$DEST/sygen-${STAMP}.tar.gz"
 
-# .env / docker-compose.yml / claude-auth are optional on a partially
-# bootstrapped host — don't fail the run if any are missing.
-tar -czf "$OUT" -C "$SRC" data .env docker-compose.yml claude-auth 2>/dev/null || true
+tar -czf "$OUT" -C "$SRC" data .env claude-auth 2>/dev/null || true
 
 # Archive contains api token, jwt secret, and Claude OAuth creds.
 chmod 600 "$OUT"
@@ -2853,9 +2875,15 @@ manifest_write_all \
 
 if [ "$JSON_OUTPUT" = "1" ]; then
     if [ -z "$ADMIN_PASS" ]; then
-        emit_json_error \
-            "core did not write initial admin password within 2 min" \
-            "see: docker compose -f $SYGEN_ROOT/docker-compose.yml logs core"
+        if [ $LOCAL_MODE -eq 1 ]; then
+            emit_json_error \
+                "core did not write initial admin password within 2 min" \
+                "see: tail $SYGEN_ROOT/logs/core.log; launchctl list | grep pro.sygen.core"
+        else
+            emit_json_error \
+                "core did not write initial admin password within 2 min" \
+                "see: journalctl -u sygen-core -n 100"
+        fi
         exit 1
     fi
     JSON_DONE=1
@@ -2885,15 +2913,16 @@ if [ "$JSON_OUTPUT" = "1" ]; then
     else
         MODE="custom"
     fi
-    printf '{"ok":true,"mode":%s,"fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_image":%s,"admin_image":%s,"data_dir":%s,"compose_file":%s,"install_token":%s}\n' \
+    printf '{"ok":true,"mode":%s,"install_mode":"native","fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_version":%s,"admin_version":%s,"data_dir":%s,"venv_dir":%s,"admin_dir":%s,"install_token":%s}\n' \
         "$(json_escape "$MODE")" \
         "$(json_escape "$FQDN")" \
         "$(json_escape "$ADMIN_PASS")" \
         "$(json_escape "$ADMIN_URL")" \
-        "$(json_escape "$CORE_IMAGE")" \
-        "$(json_escape "$ADMIN_IMAGE")" \
+        "$(json_escape "$EFFECTIVE_CORE_VERSION")" \
+        "$(json_escape "$EFFECTIVE_ADMIN_VERSION")" \
         "$(json_escape "$SYGEN_ROOT/data")" \
-        "$(json_escape "$SYGEN_ROOT/docker-compose.yml")" \
+        "$(json_escape "$VENV_DIR")" \
+        "$(json_escape "$ADMIN_DIR")" \
         "$IT_JSON"
     exit 0
 fi
@@ -2911,8 +2940,12 @@ if [ -n "$ADMIN_PASS" ]; then
     echo "              delete that file after first login"
 else
     warn "  Admin pass: core did not write $PW_FILE within 2 min."
-    warn "              Check \`docker compose logs core\` and retry:"
-    warn "              cat $PW_FILE"
+    if [ $LOCAL_MODE -eq 1 ]; then
+        warn "              Check: tail $SYGEN_ROOT/logs/core.log"
+    else
+        warn "              Check: journalctl -u sygen-core -n 100"
+    fi
+    warn "              Then: cat $PW_FILE"
 fi
 
 # iOS deeplink — let users add the server to the Sygen iOS app in one tap.
@@ -2930,34 +2963,37 @@ fi
 
 cat <<DONE
 
-  Core image:  $CORE_IMAGE
-  Admin image: $ADMIN_IMAGE
+  Core:        sygen $EFFECTIVE_CORE_VERSION  ($VENV_DIR/bin/sygen)
+  Admin:       sygen-admin $EFFECTIVE_ADMIN_VERSION  ($ADMIN_DIR/server.js)
   Data dir:    $SYGEN_ROOT/data
-  Compose:     $SYGEN_ROOT/docker-compose.yml  (--env-file $SYGEN_ROOT/.env)
+  Env file:    $SYGEN_ROOT/.env
 DONE
 
 if [ $LOCAL_MODE -eq 0 ]; then
     cat <<DONE
   Backups:     /var/backups/sygen/sygen-*.tar.gz  (daily, 7-day retention)
-  Auto-start:  enabled — sygen-compose.service starts the stack on every boot
-               Disable: systemctl disable --now sygen-compose.service
+  Auto-start:  enabled — systemd units start core/admin/updater on every boot
+               Disable: systemctl disable --now sygen-core sygen-admin sygen-updater
 
-  Upgrade:     cd $SYGEN_ROOT && docker compose pull && docker compose up -d
-  Logs:        docker compose -f $SYGEN_ROOT/docker-compose.yml logs -f core
+  Status:      systemctl status sygen-core sygen-admin sygen-updater
+  Logs:        journalctl -u sygen-core -f
+  Restart:     systemctl restart sygen-core sygen-admin
+  Upgrade:     POST to the updater's /apply endpoint via the admin UI
+               (or manually: $VENV_PIP install --upgrade sygen==<new>)
 DONE
 else
     cat <<DONE
   Mode:        macOS / $SELF_HOSTED_SUBMODE
   Backups:     not configured on macOS (manual tar of $SYGEN_ROOT)
 
-  Auto-start:  enabled — Sygen will start automatically after reboot/login
-               (LaunchAgents: pro.sygen.colima, pro.sygen.compose)
-               Disable: launchctl unload ~/Library/LaunchAgents/pro.sygen.{colima,compose}.plist
+  Auto-start:  enabled — LaunchAgents pro.sygen.{core,admin,updater} start
+               at login and stay running (KeepAlive=true).
+               Disable: launchctl unload ~/Library/LaunchAgents/pro.sygen.{core,admin,updater}.plist
 
-  Stop:        colima stop
-  Start:       colima start && cd $SYGEN_ROOT && docker compose up -d
-  Upgrade:     cd $SYGEN_ROOT && docker compose pull && docker compose up -d
-  Logs:        docker compose -f $SYGEN_ROOT/docker-compose.yml logs -f core
+  Status:      launchctl list | grep pro.sygen
+  Logs:        tail -F $SYGEN_ROOT/logs/{core,admin,updater}.log
+  Restart:     launchctl kickstart -k gui/\$(id -u)/pro.sygen.core
+  Upgrade:     POST to the updater's /apply endpoint via the admin UI
 DONE
     case "$SELF_HOSTED_SUBMODE" in
         tailscale)
@@ -2993,10 +3029,11 @@ cat <<DONE
 
 Claude Code CLI auth
 ---------------------------------------------------------------------
-  Option 1 — API key:   add ANTHROPIC_API_KEY to $SYGEN_ROOT/.env and
-                        \`docker compose up -d\`.
-  Option 2 — OAuth:     \`docker compose -f $SYGEN_ROOT/docker-compose.yml \\
-                          exec core claude auth login\`
-                        (creds persist in $SYGEN_ROOT/claude-auth).
+  Option 1 — API key:   add ANTHROPIC_API_KEY to $SYGEN_ROOT/.env, then
+                        restart core (macOS: launchctl kickstart -k
+                        gui/\$(id -u)/pro.sygen.core; Linux: systemctl
+                        restart sygen-core).
+  Option 2 — OAuth:     run \`claude auth login\` once as the install user
+                        — creds persist in $SYGEN_ROOT/claude-auth.
 =====================================================================
 DONE

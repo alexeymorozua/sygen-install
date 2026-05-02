@@ -2,12 +2,20 @@
 
 One-shot installer for a single-node Sygen deployment.
 
-Supported: Linux (Debian 12+/Ubuntu 22+ VPS), macOS (local dev). Windows/WSL2
-is planned but not yet supported.
+**v1.7+ ships native processes — no Docker, no Colima.** Sygen runs as
+a Python venv (core + updater) and a Next.js standalone Node process
+(admin), managed by `launchctl` (macOS) or `systemd` (Linux). Sub-agents
+get direct access to host tools (Xcode, swiftc, iOS simulators on a Mac
+mini; native dev toolchains on Linux).
 
-Pulls the Sygen stack (core + admin web) from GHCR. On Linux it provisions
-DNS + TLS via Cloudflare and wires up an nginx reverse proxy; on macOS it
-runs everything inside Colima bound to `localhost` — no DNS/TLS/nginx.
+Supported: Linux (Debian 12+/Ubuntu 22+ VPS), macOS (local dev).
+Windows/WSL2 is planned but not yet supported.
+
+`install.sh` downloads the `sygen` Python wheel and `sygen-admin` Next.js
+tarball directly from GitHub Releases, creates a venv, extracts the
+admin tarball, writes service unit files, and starts everything. On
+Linux it also provisions DNS + TLS via Cloudflare and wires up an nginx
+reverse proxy.
 
 ## Usage — Linux (VPS)
 
@@ -50,8 +58,9 @@ curl -fsSL https://install.sygen.pro/install.sh | \
 ## Usage — macOS (self-hosted on your own Mac)
 
 The macOS branch has three sub-modes, selected via `SELF_HOSTED_MODE`. All
-share the same Colima + docker stack — the difference is only how the
-admin UI is exposed (and whether your iPhone can reach it).
+run the same native services (`pro.sygen.{core,admin,updater}` LaunchAgents)
+— the difference is only how the admin UI is exposed (and whether your
+iPhone can reach it).
 
 | Mode           | iPhone access     | TLS                  | Setup work             |
 |----------------|-------------------|----------------------|------------------------|
@@ -70,9 +79,11 @@ curl -fsSL https://install.sygen.pro/install.sh | bash
 ```
 
 Requires [Homebrew](https://brew.sh). The installer will `brew install`
-Colima + docker CLI, start a 4-CPU / 8 GB / 50 GB Colima VM, and run Sygen at
-`http://localhost:8080`. No root, no DNS, no TLS — and **no iPhone
-connectivity** (App Transport Security on iOS blocks plain HTTP).
+`python@3.14`, `node@22`, `jq`, and `whisper-cpp`, create a Python venv
+at `~/.sygen-local/venv`, extract the admin tarball at
+`~/.sygen-local/admin`, and run Sygen at `http://localhost:8080`. No
+root, no DNS, no TLS — and **no iPhone connectivity** (App Transport
+Security on iOS blocks plain HTTP).
 
 ### Sub-mode: `tailscale` (recommended)
 
@@ -90,9 +101,9 @@ curl -fsSL https://install.sygen.pro/install.sh | \
 
 The installer reads the Mac's MagicDNS name (e.g.
 `mac-mini.tail-abc123.ts.net`), then runs `tailscale serve` to terminate
-TLS at port 443 and proxy `/`, `/api/`, `/ws/`, `/upload` to the right
-container. The cert is issued and renewed by Tailscale; nothing is
-exposed to the public internet.
+TLS at port 443 and proxy `/`, `/api/`, `/ws/`, `/upload` to the
+matching native service. The cert is issued and renewed by Tailscale;
+nothing is exposed to the public internet.
 
 ```bash
 sudo tailscale serve status   # show current routes
@@ -131,8 +142,8 @@ Limitations vs. the Linux auto-mode:
 
 - **No nginx auto-start.** nginx is started with plain `sudo nginx`;
   after a reboot, run it again or wire up your own launchd plist. (The
-  Colima VM and the Sygen compose stack themselves do auto-start — see
-  [Auto-start on reboot](#auto-start-on-reboot) below.)
+  Sygen native services themselves do auto-start — see [Auto-start on
+  reboot](#auto-start-on-reboot) below.)
 
 For most self-hosted Mac users, **prefer `tailscale` mode** — it sidesteps
 the port-forwarding, cert-renewal, and reboot-recovery work above.
@@ -140,9 +151,12 @@ the port-forwarding, cert-renewal, and reboot-recovery work above.
 ### Lifecycle (all macOS sub-modes)
 
 ```
-Stop:       colima stop
-Start:      colima start && cd ~/.sygen-local && docker compose up -d
-Upgrade:    cd ~/.sygen-local && docker compose pull && docker compose up -d
+Status:     launchctl list | grep pro.sygen
+Logs:       tail -F ~/.sygen-local/logs/{core,admin,updater}.log
+Stop:       launchctl unload ~/Library/LaunchAgents/pro.sygen.{core,admin,updater}.plist
+Start:      launchctl load -w ~/Library/LaunchAgents/pro.sygen.{core,admin,updater}.plist
+Restart:    launchctl kickstart -k gui/$(id -u)/pro.sygen.core
+Upgrade:    POST to the updater /apply endpoint via the admin UI
 Uninstall:  curl -fsSL https://install.sygen.pro/uninstall.sh | bash
 ```
 
@@ -166,7 +180,7 @@ stderr so the operator can watch the install in real time.
 # success: one JSON line on stdout, ok=true (auto-mode shown — no env vars)
 curl -fsSL https://install.sygen.pro/install.sh | \
     SYGEN_JSON_OUTPUT=1 sudo bash
-# {"ok":true,"fqdn":"s3xk7f2p.sygen.pro","admin_user":"admin","admin_password":"...","admin_url":"https://s3xk7f2p.sygen.pro","core_image":"...","admin_image":"...","data_dir":"/srv/sygen/data","compose_file":"/srv/sygen/docker-compose.yml","install_token":"sit_..."}
+# {"ok":true,"mode":"auto","install_mode":"native","fqdn":"s3xk7f2p.sygen.pro","admin_user":"admin","admin_password":"...","admin_url":"https://s3xk7f2p.sygen.pro","core_version":"1.6.74","admin_version":"0.5.54","data_dir":"/srv/sygen/data","venv_dir":"/srv/sygen/venv","admin_dir":"/srv/sygen/admin","install_token":"sit_..."}
 ```
 
 `install_token` is `null` in custom mode and a `sit_...` string in auto-mode;
@@ -177,7 +191,7 @@ do not need to call `/api/heartbeat` themselves.
 On failure the script still emits a single JSON line and exits non-zero:
 
 ```json
-{"ok":false,"error":"<reason>","stage":"deps|dns|cert|data|compose|smoke|nginx|bootstrap","details":"<short>"}
+{"ok":false,"error":"<reason>","stage":"deps|dns|cert|data|install|services|smoke|nginx|bootstrap","details":"<short>"}
 ```
 
 The default (no flag, no env var) banner output is unchanged.
@@ -185,7 +199,11 @@ The default (no flag, no env var) banner output is unchanged.
 ## Files
 
 - [`install.sh`](./install.sh) — installer entry point
-- [`docker-compose.yml`](./docker-compose.yml) — the stack
+- [`uninstall.sh`](./uninstall.sh) — manifest-driven uninstaller
+- [`scripts/pro.sygen.{core,admin,updater}.plist`](./scripts/) — macOS
+  LaunchAgent templates
+- [`scripts/sygen-{core,admin,updater}.service`](./scripts/) — Linux
+  systemd unit templates
 - [`nginx.conf.tmpl`](./nginx.conf.tmpl) — nginx vhost template (`__FQDN__`
   is substituted by the installer)
 - [`providers.json`](./providers.json) — VPS provider catalogue consumed by
@@ -204,22 +222,31 @@ CNAME. Edits to `main` publish within a minute.
 
 ## Upgrade on a deployed host
 
+Trigger an upgrade via the admin UI's update banner — the `sygen-updater`
+service downloads the new wheel + admin tarball from GitHub Releases,
+performs an atomic mv-swap of the venv and admin dirs, and restarts
+core + admin. Manual fallback:
+
 ```bash
-cd /srv/sygen
-docker compose pull && docker compose up -d
+# macOS
+~/.sygen-local/venv/bin/pip install --upgrade sygen
+launchctl kickstart -k gui/$(id -u)/pro.sygen.core
+
+# Linux
+/srv/sygen/venv/bin/pip install --upgrade sygen
+systemctl restart sygen-core
 ```
 
 ## Auto-updates
 
 A fresh install keeps itself current without manual intervention:
 
-- **Container images** — Watchtower polls GHCR every 30 minutes for new
-  digests on labeled containers and writes a state file that the admin
-  UI reads via `/api/system/updates`. Watchtower itself runs in
-  `--monitor-only` mode — it **detects** updates but never applies them.
-  The actual `docker compose pull && up -d` is driven by the
-  `sygen-updater` sidecar from an admin click, so an in-flight Claude
-  session is never killed mid-work.
+- **sygen-core + sygen-admin** — the `sygen-updater` service polls
+  GitHub Releases every 30 minutes for new tags on `alexeymorozua/sygen`
+  and `alexeymorozua/sygen-admin` and writes a state file that the admin
+  UI reads via `/api/system/updates`. Updates are **detected**
+  automatically; **applying** them is driven by an admin click so an
+  in-flight Claude session is never killed mid-work.
 - **OS security patches** — `unattended-upgrades` is installed and
   enabled (`/etc/apt/apt.conf.d/20auto-upgrades`). The distro default
   `50unattended-upgrades` policy is security-only.
@@ -228,27 +255,19 @@ A fresh install keeps itself current without manual intervention:
   `/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh` reloads nginx
   after each successful renewal.
 
-### Updating the updater sidecar itself
+### Updating the updater itself
 
-The `sygen-updater` service is intentionally **not** labeled for
-Watchtower (and the apply path excludes it from its own service list)
-because a container cannot safely tear itself down mid-request. To
-upgrade the sidecar, run:
-
-```bash
-cd /srv/sygen
-docker compose pull updater
-docker compose up -d updater
-```
-
-This is a once-per-release operator action. The core + admin containers
-keep getting one-click updates from the admin UI as normal.
+The `sygen-updater` service can't safely tear itself down mid-request.
+The apply path skips restarting the updater; a manual `pip install
+--upgrade sygen-updater` (or a fresh `install.sh` run, which rebuilds
+the venv from scratch) is the path to update the updater binary itself.
 
 Opting out:
 
 ```bash
-# Stop container image updates
-cd /srv/sygen && docker compose rm -sf watchtower
+# Stop sygen update polling
+launchctl unload ~/Library/LaunchAgents/pro.sygen.updater.plist  # macOS
+systemctl disable --now sygen-updater                             # Linux
 
 # Stop OS security updates
 systemctl disable --now unattended-upgrades
@@ -259,28 +278,29 @@ rm /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 
 ## Auto-start on reboot
 
-A fresh install brings the Sygen stack back up automatically after every
-host reboot, so power blips and scheduled reboots don't require any
-manual recovery.
+A fresh install brings Sygen back up automatically after every host
+reboot, so power blips and scheduled reboots don't require any manual
+recovery.
 
-- **macOS** — two LaunchAgents in `~/Library/LaunchAgents/`:
-  - `pro.sygen.colima.plist` starts the Colima profile at user login.
-  - `pro.sygen.compose.plist` runs `~/.sygen-local/bin/sygen-startup.sh`,
-    which polls `docker info` until the daemon answers (Colima cold-boot
-    is ~5–15 s on Apple VF) and then runs `docker compose up -d` from
-    `~/.sygen-local`. Logs land in `~/.sygen-local/logs/colima-launchd.{log,err}`
-    and `~/.sygen-local/logs/sygen-startup.{out,err}`.
-- **Linux** — a single systemd unit at
-  `/etc/systemd/system/sygen-compose.service` ordered `After=docker.service`.
-  `Type=oneshot` + `RemainAfterExit=yes` runs `docker compose up -d` once
-  per boot.
+- **macOS** — three LaunchAgents in `~/Library/LaunchAgents/`:
+  - `pro.sygen.core.plist` runs `~/.sygen-local/venv/bin/sygen`.
+  - `pro.sygen.admin.plist` runs `node ~/.sygen-local/admin/server.js`.
+  - `pro.sygen.updater.plist` runs `~/.sygen-local/venv/bin/sygen-updater`.
+  All three have `RunAtLoad=true` and `KeepAlive=true`, so they restart
+  on crash and start at user login. Logs land in
+  `~/.sygen-local/logs/{core,admin,updater}.log`.
+- **Linux** — three systemd units at `/etc/systemd/system/`:
+  - `sygen-core.service`, `sygen-admin.service`, `sygen-updater.service`,
+    all `WantedBy=multi-user.target`, all `Restart=always` (or
+    `on-failure` for the updater).
 
 Disabling:
 
 ```bash
 # macOS
-launchctl unload ~/Library/LaunchAgents/pro.sygen.compose.plist
-launchctl unload ~/Library/LaunchAgents/pro.sygen.colima.plist
+launchctl unload ~/Library/LaunchAgents/pro.sygen.core.plist
+launchctl unload ~/Library/LaunchAgents/pro.sygen.admin.plist
+launchctl unload ~/Library/LaunchAgents/pro.sygen.updater.plist
 
 # Linux
 systemctl disable --now sygen-compose.service
@@ -295,23 +315,28 @@ serving 80/443 until you start it manually (or wire your own plist).
 ## Backups
 
 A `sygen-backup.timer` systemd unit runs daily and writes a compressed
-archive of `/srv/sygen/{data,.env,docker-compose.yml,claude-auth}` to
+archive of `/srv/sygen/{data,.env,claude-auth}` to
 `/var/backups/sygen/sygen-YYYY-MM-DD.tar.gz`. Archives older than 7 days
-are pruned automatically. Each archive is `chmod 600` because it contains
-the API token, JWT secret, and Claude OAuth credentials.
+are pruned automatically. Each archive is `chmod 600` because it
+contains the API token, JWT secret, and Claude OAuth credentials.
+
+`venv/` and `admin/` are intentionally NOT backed up — they're
+deterministically reproducible from `install.sh` given the version pins
+in `.env`.
 
 The first snapshot is taken at the end of the install run, so a fresh
 host has a usable backup right away.
 
 ### Restore on a new host
 
-After running `install.sh` on the replacement VPS (so DNS, certs, and the
-stack are wired up), drop a backup tarball into place:
+After running `install.sh` on the replacement VPS (so DNS, certs, the
+venv, and the admin tarball are wired up), drop a backup tarball over
+the data dir:
 
 ```bash
-cd /srv/sygen && docker compose down
+systemctl stop sygen-core sygen-admin
 tar -xzf /var/backups/sygen/sygen-YYYY-MM-DD.tar.gz -C /srv/sygen/
-docker compose up -d
+systemctl start sygen-core sygen-admin
 ```
 
 ### Off-site copy
@@ -364,15 +389,18 @@ curl -fsSL https://install.sygen.pro/uninstall.sh | \
     sudo bash
 ```
 
-On macOS the script stops Colima but does not delete the VM — Colima may
-be shared with other Docker projects. Run `colima delete` manually if
-nothing else is using it. The Let's Encrypt cert in `/etc/letsencrypt/`
-is left in place; remove it with `certbot delete --cert-name <fqdn>` if
-you don't plan to re-install.
+The script auto-routes between native (v1.7+) and legacy Docker
+manifests via `install_mode` in `.install_manifest.json`. On Linux, the
+Let's Encrypt cert in `/etc/letsencrypt/` is left in place; remove it
+with `certbot delete --cert-name <fqdn>` if you don't plan to re-install.
 
-## Image sources
+## Release sources
 
-- Core:  `ghcr.io/alexeymorozua/sygen-core:latest`
-  ([`alexeymorozua/sygen`](https://github.com/alexeymorozua/sygen))
-- Admin: `ghcr.io/alexeymorozua/sygen-admin:latest`
-  ([`alexeymorozua/sygen-admin`](https://github.com/alexeymorozua/sygen-admin))
+- Core:  Python wheels at
+  [`alexeymorozua/sygen` releases](https://github.com/alexeymorozua/sygen/releases)
+  (filename `sygen-<version>-py3-none-any.whl`)
+- Admin: Next.js standalone tarballs at
+  [`alexeymorozua/sygen-admin` releases](https://github.com/alexeymorozua/sygen-admin/releases)
+  (filename `sygen-admin-<version>.tar.gz`)
+- Updater: published alongside core wheels
+  (filename `sygen_updater-<version>-py3-none-any.whl`)

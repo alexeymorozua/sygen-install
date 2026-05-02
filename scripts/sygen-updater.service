@@ -1,0 +1,19 @@
+[Unit]
+Description=Sygen updater (GitHub Releases poll + atomic swap)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__SYGEN_ROOT__
+EnvironmentFile=__SYGEN_ROOT__/.env
+Environment=SYGEN_HOME=__SYGEN_ROOT__
+Environment=PATH=__VENV_DIR__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=__VENV_DIR__/bin/sygen-updater
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:__SYGEN_ROOT__/logs/updater.log
+StandardError=append:__SYGEN_ROOT__/logs/updater.log
+
+[Install]
+WantedBy=multi-user.target

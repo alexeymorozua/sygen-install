@@ -1,0 +1,19 @@
+[Unit]
+Description=Sygen core (FastAPI/aiohttp REST + WebSocket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__SYGEN_ROOT__
+EnvironmentFile=__SYGEN_ROOT__/.env
+Environment=SYGEN_HOME=__SYGEN_ROOT__
+Environment=PATH=__VENV_DIR__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=__VENV_DIR__/bin/sygen
+Restart=always
+RestartSec=5
+StandardOutput=append:__SYGEN_ROOT__/logs/core.log
+StandardError=append:__SYGEN_ROOT__/logs/core.log
+
+[Install]
+WantedBy=multi-user.target

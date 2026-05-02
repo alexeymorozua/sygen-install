@@ -2019,6 +2019,13 @@ umask 077
     # Empty string = no fallback; UI then renders its own default.
     echo "SYGEN_HOST_HOSTNAME=$HOST_HOSTNAME_VAL"
     echo "SYGEN_HOST_TZ=$HOST_TZ_VAL"
+    # Updater integration. Defaults baked into core point at the Docker
+    # bind-mount (`/data/_updates.json`) and compose hostname
+    # (`http://sygen-updater:8082`) — neither resolves on a native install.
+    # Without these overrides the admin /api/system/updates endpoint
+    # returns {supported: false} and the Update banner stays hidden.
+    echo "SYGEN_UPDATES_STATE=$SYGEN_ROOT/data/host_updates/_updates.json"
+    echo "SYGEN_UPDATER_URL=http://127.0.0.1:8082"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"

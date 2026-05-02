@@ -387,13 +387,19 @@ if [ $LOCAL_MODE -eq 0 ]; then
     # legacy Docker installs ship one (sygen-compose). Hardcoded by name
     # to cover the case where the manifest is missing.
     if [ "$INSTALL_MODE" = "native" ]; then
-        log "Removing systemd native service units (sygen-core/admin/updater)"
-        for unit in sygen-core sygen-admin sygen-updater; do
+        log "Removing systemd native service units (sygen-core/admin/updater + host-metrics + uninstall-runner)"
+        # sygen-host-uninstall-runner.service is THIS process's parent unit
+        # — disabling it would kill us mid-uninstall. We rm the unit file
+        # and rely on `systemctl daemon-reload` after the uninstall to
+        # forget it. The current systemd job tree dies when the binary
+        # under /srv/sygen disappears anyway.
+        for unit in sygen-core sygen-admin sygen-updater sygen-host-metrics; do
             if systemctl list-unit-files "${unit}.service" >/dev/null 2>&1; then
                 systemctl disable --now "${unit}.service" >/dev/null 2>&1 || true
             fi
             rm -f "/etc/systemd/system/${unit}.service"
         done
+        rm -f /etc/systemd/system/sygen-host-uninstall-runner.service
     else
         log "Removing systemd auto-start unit (sygen-compose.service)"
         if systemctl list-unit-files sygen-compose.service >/dev/null 2>&1; then

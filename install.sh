@@ -2449,6 +2449,41 @@ if [ $LOCAL_MODE -eq 1 ]; then
         "$SYGEN_ROOT/bin/host_uninstall_runner.sh"
 fi
 
+# ---------- 5d. Linux self-uninstall runner (native install) ----------
+# macOS gets the launchd-driven runner inside the LOCAL_MODE block above.
+# Linux native install needs a systemd-based equivalent so /api/system/uninstall
+# actually has a host-side process that picks up the trigger file and
+# invokes uninstall.sh --force. Without this the admin "Delete Server"
+# button writes the trigger but nothing acts on it.
+if [ $LOCAL_MODE -eq 0 ]; then
+    STAGE="self-uninstall-runner"
+    log "Installing self-uninstall runner (Linux/systemd)"
+
+    mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs" "$SYGEN_ROOT/host_updates"
+
+    curl -fsSL -o "$SYGEN_ROOT/uninstall.sh" \
+        "$BASE_URL/uninstall.sh" \
+        || warn "could not fetch uninstall.sh — admin/iOS Delete Server will fail until you re-run install.sh"
+    chmod 0755 "$SYGEN_ROOT/uninstall.sh" 2>/dev/null || true
+
+    curl -fsSL -o "$SYGEN_ROOT/bin/sygen-host-uninstall-runner.sh" \
+        "$BASE_URL/scripts/sygen-host-uninstall-runner.sh" \
+        || die "could not fetch sygen-host-uninstall-runner.sh"
+    chmod 0755 "$SYGEN_ROOT/bin/sygen-host-uninstall-runner.sh"
+
+    UNIT_DST="/etc/systemd/system/sygen-host-uninstall-runner.service"
+    curl -fsSL -o /tmp/sygen-host-uninstall-runner.service.tmpl \
+        "$BASE_URL/scripts/sygen-host-uninstall-runner.service" \
+        || die "could not fetch sygen-host-uninstall-runner.service"
+    sed -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
+        /tmp/sygen-host-uninstall-runner.service.tmpl > "$UNIT_DST"
+    rm -f /tmp/sygen-host-uninstall-runner.service.tmpl
+
+    systemctl daemon-reload
+    systemctl enable --now sygen-host-uninstall-runner.service \
+        || warn "systemd enable failed — admin/iOS Delete Server will not function"
+fi
+
 # ---------- 5e. Whisper.cpp (out-of-box voice transcription) ----------
 # Bundled so a fresh install can transcribe voice messages without any
 # additional setup. macOS uses brew (which carries upgrades through the

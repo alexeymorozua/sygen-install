@@ -1,0 +1,23 @@
+[Unit]
+Description=Sygen self-uninstall trigger runner (polls __SYGEN_ROOT__/host_updates/uninstall_requested)
+After=network-online.target sygen-core.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as root: must be able to stop/disable sygen-* services, remove unit
+# files in /etc/systemd/system, and tear down /srv/sygen via uninstall.sh.
+User=root
+Environment=SYGEN_ROOT=__SYGEN_ROOT__
+ExecStart=__SYGEN_ROOT__/bin/sygen-host-uninstall-runner.sh --interval 5
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:__SYGEN_ROOT__/logs/host-uninstall-runner.log
+StandardError=append:__SYGEN_ROOT__/logs/host-uninstall-runner.log
+# Conservative hardening: not as locked-down as the core/admin services
+# because this runner needs to invoke uninstall.sh which must touch
+# /etc/systemd/system, /usr/local/bin, etc.
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target

@@ -792,13 +792,19 @@ CORE_SOURCE_DIR="${SYGEN_CORE_SOURCE_DIR:-}"
 ADMIN_SOURCE_DIR="${SYGEN_ADMIN_SOURCE_DIR:-}"
 CORE_GITHUB_REPO="${SYGEN_CORE_GITHUB_REPO:-alexeymorozua/sygen}"
 ADMIN_GITHUB_REPO="${SYGEN_ADMIN_GITHUB_REPO:-alexeymorozua/sygen-admin}"
+# Public mirror repo holding wheel/tarball/sha256 artefacts for sygen-core,
+# sygen-updater, and sygen-admin. Source repos above stay private; only the
+# release artefacts are mirrored here so the installer can fetch them
+# anonymously. Tags use prefixed names: core-X.Y.Z, admin-X.Y.Z.
+RELEASES_GITHUB_REPO="${SYGEN_RELEASES_GITHUB_REPO:-alexeymorozua/sygen-releases}"
 
 # Surface non-default release sources loudly. An attacker with write
 # access to .env (or environment of the calling shell) could redirect
 # updates to a fork they control — silent override hides that pivot.
 if [ "$CORE_GITHUB_REPO" != "alexeymorozua/sygen" ] \
-        || [ "$ADMIN_GITHUB_REPO" != "alexeymorozua/sygen-admin" ]; then
-    warn "fetching from non-default repo: core=$CORE_GITHUB_REPO, admin=$ADMIN_GITHUB_REPO. proceed only if intentional."
+        || [ "$ADMIN_GITHUB_REPO" != "alexeymorozua/sygen-admin" ] \
+        || [ "$RELEASES_GITHUB_REPO" != "alexeymorozua/sygen-releases" ]; then
+    warn "fetching from non-default repo: core=$CORE_GITHUB_REPO, admin=$ADMIN_GITHUB_REPO, releases=$RELEASES_GITHUB_REPO. proceed only if intentional."
 fi
 
 # AUTO_MODE=1 means "ask install.sygen.pro for a free <id>.sygen.pro".
@@ -1986,10 +1992,12 @@ VENV_PIP="$VENV_DIR/bin/pip"
 VENV_SYGEN_BIN="$VENV_DIR/bin/sygen"
 VENV_UPDATER_BIN="$VENV_DIR/bin/sygen-updater"
 
-# Helper: GitHub Release artefact URL for a given repo + version + filename.
+# Helper: GitHub Release artefact URL for a given repo + tag + filename.
+# The tag is passed verbatim so we can use prefixed tags on the public
+# mirror (core-X.Y.Z, admin-X.Y.Z) without forcing a `v` prefix.
 gh_release_url() {
-    # $1=repo (owner/name), $2=version (no leading v), $3=asset filename
-    printf 'https://github.com/%s/releases/download/v%s/%s' "$1" "$2" "$3"
+    # $1=repo (owner/name), $2=full tag (e.g. core-1.6.75), $3=asset filename
+    printf 'https://github.com/%s/releases/download/%s/%s' "$1" "$2" "$3"
 }
 
 # Helper: download with HTTP error → die. -L follows redirects (GitHub
@@ -2076,7 +2084,7 @@ if [ "$RELEASE_SOURCE" = "source" ]; then
         || die "pip install $CORE_SOURCE_DIR failed"
 else
     CORE_WHEEL="sygen-${EFFECTIVE_CORE_VERSION}-py3-none-any.whl"
-    CORE_WHEEL_URL="$(gh_release_url "$CORE_GITHUB_REPO" "$EFFECTIVE_CORE_VERSION" "$CORE_WHEEL")"
+    CORE_WHEEL_URL="$(gh_release_url "$RELEASES_GITHUB_REPO" "core-${EFFECTIVE_CORE_VERSION}" "$CORE_WHEEL")"
     CORE_WHEEL_DEST="/tmp/sygen-${EFFECTIVE_CORE_VERSION}-${$}.whl"
     # P0-5: HEAD-probe before downloading. 404 → release not yet published;
     # surface an actionable error (or auto-switch to source mode if a local
@@ -2117,7 +2125,7 @@ if [ "$RELEASE_SOURCE" = "source" ]; then
 else
     # The updater is versioned alongside core for now — same git tag.
     UPDATER_WHEEL="sygen_updater-${EFFECTIVE_CORE_VERSION}-py3-none-any.whl"
-    UPDATER_WHEEL_URL="$(gh_release_url "$CORE_GITHUB_REPO" "$EFFECTIVE_CORE_VERSION" "$UPDATER_WHEEL")"
+    UPDATER_WHEEL_URL="$(gh_release_url "$RELEASES_GITHUB_REPO" "core-${EFFECTIVE_CORE_VERSION}" "$UPDATER_WHEEL")"
     UPDATER_WHEEL_DEST="/tmp/sygen-updater-${EFFECTIVE_CORE_VERSION}-${$}.whl"
     # P0-2 + P0-5: verify SHA256 if asset exists, else best-effort skip
     # (updater is non-critical for first install; admin still works
@@ -2183,7 +2191,7 @@ if [ "$RELEASE_SOURCE" = "source" ]; then
     popd >/dev/null
 else
     ADMIN_TARBALL="sygen-admin-${EFFECTIVE_ADMIN_VERSION}.tar.gz"
-    ADMIN_TARBALL_URL="$(gh_release_url "$ADMIN_GITHUB_REPO" "$EFFECTIVE_ADMIN_VERSION" "$ADMIN_TARBALL")"
+    ADMIN_TARBALL_URL="$(gh_release_url "$RELEASES_GITHUB_REPO" "admin-${EFFECTIVE_ADMIN_VERSION}" "$ADMIN_TARBALL")"
     ADMIN_TARBALL_DEST="/tmp/sygen-admin-${EFFECTIVE_ADMIN_VERSION}-${$}.tar.gz"
     # P0-5: probe before download so a missing release surfaces a
     # clear message (or auto-falls-back to source build).

@@ -209,7 +209,7 @@ if [ "$INSTALL_MODE" = "native" ]; then
 else
     log "  - Stop and remove all Sygen containers"
 fi
-log "  - Delete $SYGEN_ROOT including data, .env, venv, admin, secrets, claude-auth"
+log "  - Delete $SYGEN_ROOT including data, .env, venv, admin, secrets, .claude"
 if [ $LOCAL_MODE -eq 0 ]; then
     log "  - Delete /var/backups/sygen"
     if [ "$INSTALL_MODE" = "native" ]; then
@@ -640,7 +640,7 @@ if [ "$INSTALL_MODE" = "native" ]; then
 else
     echo "    - Containers (core, admin, updater, watchtower)"
 fi
-echo "    - $SYGEN_ROOT (data, .env, venv, admin, secrets, claude-auth)"
+echo "    - $SYGEN_ROOT (data, .env, venv, admin, secrets, .claude)"
 if [ $LOCAL_MODE -eq 0 ]; then
     echo "    - /var/backups/sygen (nightly backups)"
     if [ "$INSTALL_MODE" = "native" ]; then

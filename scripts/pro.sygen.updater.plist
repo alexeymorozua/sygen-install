@@ -20,7 +20,7 @@
     <key>WorkingDirectory</key> <string>__SYGEN_ROOT__</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>SYGEN_HOME</key>   <string>__SYGEN_ROOT__</string>
+        <key>SYGEN_HOME</key>   <string>__SYGEN_ROOT__/data</string>
         <key>HOME</key>         <string>__HOME__</string>
         <key>PATH</key>         <string>__VENV_DIR__/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>

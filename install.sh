@@ -1779,7 +1779,7 @@ fi
 # ---------- 4. Data dirs + bootstrap config ----------
 STAGE="data"
 log "Preparing $SYGEN_ROOT"
-mkdir -p "$SYGEN_ROOT"/{data,claude-auth}
+mkdir -p "$SYGEN_ROOT/data"
 mkdir -p "$SYGEN_ROOT/data/config"
 # Linux installer runs as root and SYGEN_ROOT lives under /srv/sygen — by
 # default mkdir creates 0755, which lets any local user list the directory
@@ -2024,7 +2024,7 @@ umask 077
     # (`http://sygen-updater:8082`) — neither resolves on a native install.
     # Without these overrides the admin /api/system/updates endpoint
     # returns {supported: false} and the Update banner stays hidden.
-    echo "SYGEN_UPDATES_STATE=$SYGEN_ROOT/data/host_updates/_updates.json"
+    echo "SYGEN_UPDATES_STATE=$SYGEN_ROOT/host_updates/_updates.json"
     echo "SYGEN_UPDATER_URL=http://127.0.0.1:8082"
     # Updater's atomic-swap targets. Default in updater.py is
     # SYGEN_HOME/{venv,admin} which resolves to /srv/sygen/data/{venv,admin}
@@ -2036,6 +2036,24 @@ umask 077
     # /srv/sygen/venv/bin/sygen and the UI banner would never clear.
     echo "SYGEN_VENV_DIR=$SYGEN_ROOT/venv"
     echo "SYGEN_ADMIN_DIR=$SYGEN_ROOT/admin"
+    # /api/system/uninstall trigger location + host_metrics output dir.
+    # Both default to /data/... (Docker bind-mount paths) inside
+    # rest_routes.py. Without overrides the admin "Delete Server" button
+    # writes the trigger to a non-existent path (OSError) and the
+    # CPU/RAM/disk widget on the dashboard falls back to placeholder
+    # values regardless of what the host_metrics daemon writes.
+    echo "SYGEN_HOST_UPDATES_DIR=$SYGEN_ROOT/host_updates"
+    echo "SYGEN_HOST_METRICS_DIR=$SYGEN_ROOT/host_metrics"
+    # sygen-updater also writes its state file under host_updates — pin
+    # the same canonical path so core and updater agree (they use the
+    # SAME file: updater writes, core reads). Without this updater
+    # writes to $SYGEN_HOME/host_updates/ (= $SYGEN_ROOT/data/...) but
+    # core reads from $SYGEN_ROOT/host_updates/ → mismatch.
+    echo "STATE_PATH=$SYGEN_ROOT/host_updates/_updates.json"
+    # admin internal URL for /api/system/status's _admin_version() fetch.
+    # Default `http://sygen-admin:3000` (compose hostname + Next.js dev
+    # port). Native admin binds 127.0.0.1:$SYGEN_ADMIN_PORT.
+    echo "ADMIN_INTERNAL_URL=http://127.0.0.1:$SYGEN_ADMIN_PORT"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"
@@ -2345,7 +2363,7 @@ manifest_set_native_paths "$VENV_DIR" "$ADMIN_DIR" \
 STAGE="host-metrics"
 log "Installing host_metrics_daemon → $SYGEN_ROOT/host_metrics/state.json"
 
-mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs" "$SYGEN_ROOT/host_metrics"
+mkdir -p "$SYGEN_ROOT/bin" "$SYGEN_ROOT/logs" "$SYGEN_ROOT/host_metrics" "$SYGEN_ROOT/host_updates"
 
 curl -fsSL -o "$SYGEN_ROOT/bin/host_metrics_daemon.py" \
     "$BASE_URL/scripts/host_metrics_daemon.py" \
@@ -3185,7 +3203,7 @@ if [ $LOCAL_MODE -eq 0 ]; then
     cat > /usr/local/sbin/sygen-backup.sh <<'BACKUP'
 #!/usr/bin/env bash
 # Sygen nightly backup — managed by install.sh (Phase 2.8).
-# Snapshots /srv/sygen/{data,.env,claude-auth} into
+# Snapshots /srv/sygen/{data,.env,.claude} into
 # /var/backups/sygen/sygen-YYYY-MM-DD.tar.gz and prunes archives >7d old.
 # venv/ and admin/ are NOT backed up — they're reproducible from
 # install.sh given the version pins in .env.
@@ -3204,7 +3222,7 @@ chmod 0700 "$DEST"
 STAMP=$(date -u +%Y-%m-%d)
 OUT="$DEST/sygen-${STAMP}.tar.gz"
 
-tar -czf "$OUT" -C "$SRC" data .env claude-auth 2>/dev/null || true
+tar -czf "$OUT" -C "$SRC" data .env .claude 2>/dev/null || true
 
 # Archive contains api token, jwt secret, and Claude OAuth creds.
 chmod 600 "$OUT"
@@ -3414,6 +3432,6 @@ Claude Code CLI auth
                         gui/\$(id -u)/pro.sygen.core; Linux: systemctl
                         restart sygen-core).
   Option 2 — OAuth:     run \`claude auth login\` once as the install user
-                        — creds persist in $SYGEN_ROOT/claude-auth.
+                        — creds persist in $SYGEN_ROOT/.claude/.
 =====================================================================
 DONE

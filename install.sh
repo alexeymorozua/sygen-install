@@ -734,6 +734,14 @@ ADMIN_SOURCE_DIR="${SYGEN_ADMIN_SOURCE_DIR:-}"
 CORE_GITHUB_REPO="${SYGEN_CORE_GITHUB_REPO:-alexeymorozua/sygen}"
 ADMIN_GITHUB_REPO="${SYGEN_ADMIN_GITHUB_REPO:-alexeymorozua/sygen-admin}"
 
+# Surface non-default release sources loudly. An attacker with write
+# access to .env (or environment of the calling shell) could redirect
+# updates to a fork they control — silent override hides that pivot.
+if [ "$CORE_GITHUB_REPO" != "alexeymorozua/sygen" ] \
+        || [ "$ADMIN_GITHUB_REPO" != "alexeymorozua/sygen-admin" ]; then
+    warn "fetching from non-default repo: core=$CORE_GITHUB_REPO, admin=$ADMIN_GITHUB_REPO. proceed only if intentional."
+fi
+
 # AUTO_MODE=1 means "ask install.sygen.pro for a free <id>.sygen.pro".
 # The Worker also creates the A record (using CF-Connecting-IP). install.sh
 # never holds a Cloudflare token in auto-mode — DNS-01 challenges are
@@ -936,12 +944,29 @@ fi
 SYGEN_MANIFEST_PATH="$SYGEN_ROOT/.install_manifest.json"
 manifest_load "$SYGEN_MANIFEST_PATH"
 
+# Ensure a dedicated unprivileged 'sygen' system user exists (Linux only).
+# sygen-core / sygen-admin systemd units run as this user so a process-level
+# RCE is contained to a non-login account that can write only $SYGEN_ROOT
+# (enforced via ProtectSystem=strict + ReadWritePaths=__SYGEN_ROOT__ in the
+# unit templates). Updater stays root — it needs systemctl + chown across
+# the swap. Idempotent: skips if the user already exists.
+setup_sygen_user() {
+    if id -u sygen >/dev/null 2>&1; then
+        return 0
+    fi
+    log "Creating system user 'sygen' (no shell, no home)"
+    useradd --system --no-create-home --shell /usr/sbin/nologin sygen \
+        || die "failed to create system user 'sygen'"
+}
+
 # ---------- 1. System packages ----------
 STAGE="deps"
 if [ $LOCAL_MODE -eq 0 ]; then
     log "Installing system packages (native install — no Docker)"
     export DEBIAN_FRONTEND=noninteractive
     apt_retry update -qq
+
+    setup_sygen_user
 
     # Base packages always needed. nginx + certbot ONLY for paths that
     # terminate TLS themselves (auto-mode + custom-mode). Tailscale-mode
@@ -2057,8 +2082,15 @@ mkdir -p "$ADMIN_DIR" "$ADMIN_PREV_DIR"
 
 # Atomic swap: extract the new tarball into admin-staging, then mv-rename.
 # Keeps the previous admin around at admin-prev/ for one-step rollback.
-ADMIN_STAGING_DIR="$SYGEN_ROOT/admin-staging-$$"
-mkdir -p "$ADMIN_STAGING_DIR"
+# mktemp -d gives us an unpredictable suffix so a same-user attacker can't
+# pre-create the path as a symlink to e.g. ~/.ssh and ride a chown into a
+# privesc. Belt+suspenders: refuse to proceed if the path is a symlink or
+# is no longer a real directory after creation.
+ADMIN_STAGING_DIR="$(mktemp -d "$SYGEN_ROOT/admin-staging-XXXXXX")" \
+    || die "mktemp failed for admin staging dir under $SYGEN_ROOT"
+if [ -L "$ADMIN_STAGING_DIR" ] || [ ! -d "$ADMIN_STAGING_DIR" ]; then
+    die "admin staging dir is not a regular directory: $ADMIN_STAGING_DIR"
+fi
 # P0-1 fix: stack the staging cleanup *and* on_exit so a die() between
 # here and the post-swap trap reset still flushes the manifest. Without
 # the on_exit call the partial install would orphan brew packages on
@@ -2118,7 +2150,12 @@ else
         log "Downloading sygen-admin tarball ${EFFECTIVE_ADMIN_VERSION} from GitHub Releases"
         fetch_release_asset_verified "$ADMIN_TARBALL_URL" "$ADMIN_TARBALL_DEST"
         log "Extracting admin tarball into staging dir"
-        tar -xzf "$ADMIN_TARBALL_DEST" -C "$ADMIN_STAGING_DIR" \
+        # --no-same-owner / --no-same-permissions: ignore uid/gid and mode
+        # bits embedded in the tarball. Defensive against a release artefact
+        # that accidentally preserved setuid/setgid bits or a non-root owner
+        # the install user can't replicate.
+        tar --no-same-owner --no-same-permissions \
+            -xzf "$ADMIN_TARBALL_DEST" -C "$ADMIN_STAGING_DIR" \
             || die "tar -xzf failed for admin tarball"
         rm -f "$ADMIN_TARBALL_DEST"
     fi
@@ -2525,6 +2562,16 @@ if [ $LOCAL_MODE -eq 1 ]; then
     fi
 else
     # ----- Linux: systemd units, system-wide -----
+    # Hand $SYGEN_ROOT to the unprivileged 'sygen' user so the core/admin
+    # services can write logs, sessions, host_metrics, etc. .env stays
+    # 0600; chown -R only changes ownership, not perms. The updater
+    # service stays root and writes /srv/sygen/host_updates/_updates.json
+    # into a sygen-owned dir — root can write there regardless.
+    setup_sygen_user
+    log "chown -R sygen:sygen $SYGEN_ROOT (so unprivileged services can write)"
+    chown -R sygen:sygen "$SYGEN_ROOT" \
+        || die "chown -R sygen:sygen $SYGEN_ROOT failed"
+
     install_native_unit() {
         # $1=unit filename (e.g. sygen-core.service)
         local unit="$1"

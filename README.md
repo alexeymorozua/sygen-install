@@ -318,6 +318,18 @@ recovery.
   - `sygen-core.service`, `sygen-admin.service`, `sygen-updater.service`,
     all `WantedBy=multi-user.target`, all `Restart=always` (or
     `on-failure` for the updater).
+  - `sygen-core` and `sygen-admin` run as a dedicated unprivileged
+    `sygen` system user (no shell, no home), with
+    `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=yes`,
+    `NoNewPrivileges=yes`, and `ReadWritePaths=/srv/sygen`. Process-level
+    RCE in either service is contained to `/srv/sygen` — it cannot escape
+    to `/etc`, `/home`, or other system paths.
+  - `sygen-updater` stays root because the apply path needs `systemctl
+    restart` and `chown` across the venv/admin swap. It still has
+    `NoNewPrivileges=yes` and only listens on loopback (`127.0.0.1:8082`,
+    bearer-authed); binding on a non-loopback address requires the
+    explicit `SYGEN_UPDATER_ALLOW_REMOTE=1` opt-in.
+  - `uninstall.sh` removes the `sygen` user along with `/srv/sygen`.
 
 Disabling:
 

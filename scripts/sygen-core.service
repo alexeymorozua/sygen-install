@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=sygen
+Group=sygen
 WorkingDirectory=__SYGEN_ROOT__
 EnvironmentFile=__SYGEN_ROOT__/.env
 Environment=SYGEN_HOME=__SYGEN_ROOT__
@@ -14,6 +16,11 @@ Restart=always
 RestartSec=5
 StandardOutput=append:__SYGEN_ROOT__/logs/core.log
 StandardError=append:__SYGEN_ROOT__/logs/core.log
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ReadWritePaths=__SYGEN_ROOT__
 
 [Install]
 WantedBy=multi-user.target

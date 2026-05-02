@@ -609,6 +609,20 @@ else
     log "$SYGEN_ROOT already absent"
 fi
 
+# ---------- 6b. Remove the dedicated 'sygen' system user (Linux native) ----------
+# Native installs since v1.6.75 ship a `sygen` system account that runs the
+# core/admin services. With $SYGEN_ROOT now gone the account has nothing
+# left to own, so remove it on uninstall. Best-effort — userdel can fail if
+# a stray process still holds the uid; we don't want to block the rest of
+# the cleanup on that.
+if [ $LOCAL_MODE -eq 0 ] && [ "$INSTALL_MODE" = "native" ]; then
+    if id -u sygen >/dev/null 2>&1; then
+        log "Removing system user 'sygen'"
+        userdel sygen 2>/dev/null \
+            || warn "userdel sygen failed — remove manually if needed (lingering process holding uid?)"
+    fi
+fi
+
 # ---------- 7. Final summary ----------
 echo ""
 echo "====================================================================="
@@ -625,6 +639,7 @@ if [ $LOCAL_MODE -eq 0 ]; then
     echo "    - /var/backups/sygen (nightly backups)"
     if [ "$INSTALL_MODE" = "native" ]; then
         echo "    - systemd units (sygen-backup, sygen-core, sygen-admin, sygen-updater)"
+        echo "    - System user 'sygen'"
     else
         echo "    - systemd units (sygen-backup, sygen-compose)"
     fi

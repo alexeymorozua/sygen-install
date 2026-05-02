@@ -1043,7 +1043,9 @@ if [ $LOCAL_MODE -eq 0 ]; then
     # P1-10: include `tar` defensively — stock Debian/Ubuntu has it but
     # minimal LXC/container images sometimes don't, and we extract the
     # admin tarball during install.
-    BASE_PKGS="ca-certificates curl jq gnupg openssl python3 python3-venv python3-pip build-essential tar"
+    # ffmpeg required by tools/media_tools/transcribe_audio.py to convert
+    # incoming OGG/Opus voice messages to WAV for whisper.cpp.
+    BASE_PKGS="ca-certificates curl jq gnupg openssl python3 python3-venv python3-pip build-essential tar ffmpeg"
     if [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
         # shellcheck disable=SC2086
         apt_retry install -y -qq $BASE_PKGS
@@ -1996,10 +1998,15 @@ umask 077
         cat /tmp/sygen-host-metrics.env
     fi
     echo "SYGEN_HOST_DATA_DIR=$SYGEN_ROOT"
-    # Whisper.cpp model location. Native install: same path as before
-    # (~/.local/share/whisper-cpp/models). Core reads the model directly
-    # from this directory; no bind-mount indirection.
-    echo "SYGEN_HOST_WHISPER_MODELS_DIR=$HOME/.local/share/whisper-cpp/models"
+    # Whisper.cpp model location. Linux installs put the model under
+    # /usr/local/share/whisper-cpp/models so the unprivileged `sygen` user
+    # can read it; macOS keeps it under the operator's HOME because the
+    # operator is the runtime user.
+    if [ "$OS" = "Linux" ]; then
+        echo "SYGEN_HOST_WHISPER_MODELS_DIR=/usr/local/share/whisper-cpp/models"
+    else
+        echo "SYGEN_HOST_WHISPER_MODELS_DIR=$HOME/.local/share/whisper-cpp/models"
+    fi
     # Host hostname + IANA timezone (resolved above). Read by core's
     # /api/system/status and /api/system/timezone as fallbacks before the
     # operator writes config["instance_name"] / config["user_timezone"].
@@ -2538,9 +2545,21 @@ fi
 STAGE="whisper"
 WHISPER_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 WHISPER_MODEL_SHA256="1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
-WHISPER_MODEL_DIR="$HOME/.local/share/whisper-cpp/models"
+# Linux native install runs sygen-core under the unprivileged `sygen` user
+# whose HOME points at SYGEN_ROOT (the user has --no-create-home). The
+# install script itself runs as root, so $HOME=/root — putting the model
+# under /root/.local/share/... made it unreadable to sygen (mode 0700 on
+# /root). Use a system-wide /usr/local/share path on Linux so any user
+# can read the model. macOS keeps the per-user path because the operator
+# *is* the runtime user there.
+if [ "$OS" = "Linux" ]; then
+    WHISPER_MODEL_DIR="/usr/local/share/whisper-cpp/models"
+    WHISPER_ERROR_FILE="/usr/local/share/whisper-cpp/.last_install_error"
+else
+    WHISPER_MODEL_DIR="$HOME/.local/share/whisper-cpp/models"
+    WHISPER_ERROR_FILE="$HOME/.local/share/whisper-cpp/.last_install_error"
+fi
 WHISPER_MODEL_PATH="$WHISPER_MODEL_DIR/ggml-small.bin"
-WHISPER_ERROR_FILE="$HOME/.local/share/whisper-cpp/.last_install_error"
 
 # Helpers — keep failures discoverable via /api/system/voice/config.
 _whisper_record_error() {

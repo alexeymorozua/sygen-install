@@ -967,6 +967,7 @@ elif [ -z "${SYGEN_SUBDOMAIN:-}" ] && [ -z "${CF_API_TOKEN:-}" ]; then
     # provision step below, after deps (jq) are installed.
     AUTO_MODE=1
     SYGEN_ROOT="/srv/sygen"
+    SYGEN_ADMIN_PORT="${SYGEN_ADMIN_PORT:-8080}"
     log "Linux detected — auto-mode (will provision <id>.${DOMAIN} from $PROVISION_URL)"
     if [ "$EUID" -ne 0 ]; then
         die "Run as root on Linux (sudo bash or ssh root@...)"
@@ -981,6 +982,7 @@ else
     CF_API_TOKEN="${CF_API_TOKEN:?CF_API_TOKEN required for custom-mode install}"
     CF_ZONE_ID="${CF_ZONE_ID:?CF_ZONE_ID required for custom-mode install}"
     SYGEN_ROOT="/srv/sygen"
+    SYGEN_ADMIN_PORT="${SYGEN_ADMIN_PORT:-8080}"
     ADMIN_URL="https://$FQDN"
     CORS_ORIGIN="https://$FQDN"
     log "Linux detected — custom mode (subdomain $FQDN supplied by operator)"

@@ -1061,6 +1061,16 @@ if [ $LOCAL_MODE -eq 0 ]; then
         apt_retry install -y -qq nodejs
     fi
 
+    # Claude Code CLI — required by sygen-core to spawn agent CLI sessions.
+    # Without it the admin/iOS Claude-setup flow fails with "claude CLI
+    # not found at 'claude'". Installed globally via npm so the binary
+    # lands at /usr/bin/claude regardless of which user invokes it.
+    if ! command -v claude >/dev/null 2>&1; then
+        log "Installing Claude Code CLI via npm (@anthropic-ai/claude-code)"
+        npm install -g @anthropic-ai/claude-code \
+            || warn "claude CLI install failed — admin/iOS Claude setup will fail until you run: npm install -g @anthropic-ai/claude-code"
+    fi
+
     # whisper-cli on Linux: always build from upstream source so every
     # Linux install runs the same whisper.cpp version regardless of distro.
     # apt packages exist on 24.10+/trixie+ but ship different versions and
@@ -1139,6 +1149,22 @@ else
     fi
     [ -x "$NODE_BREW_BIN" ] \
         || die "node not found after brew install — try: brew link --overwrite node@22"
+
+    # Claude Code CLI — required by sygen-core to spawn agent CLI sessions.
+    # Without it admin/iOS Claude-setup fails with "claude CLI not found".
+    if ! command -v claude >/dev/null 2>&1; then
+        log "macOS: installing Claude Code CLI via npm (@anthropic-ai/claude-code)"
+        # Use the brew-resolved npm so this works whether or not the user
+        # has node@22 linked into PATH.
+        NPM_BIN="$(dirname "$NODE_BREW_BIN")/npm"
+        [ -x "$NPM_BIN" ] || NPM_BIN="$(command -v npm || true)"
+        if [ -x "$NPM_BIN" ]; then
+            "$NPM_BIN" install -g @anthropic-ai/claude-code \
+                || warn "claude CLI install failed — admin/iOS Claude setup will fail until you run: npm install -g @anthropic-ai/claude-code"
+        else
+            warn "npm not found alongside node@22 — install Claude CLI manually: npm install -g @anthropic-ai/claude-code"
+        fi
+    fi
 
     # Detect host CPU/RAM/disk so the core agent can report host-true
     # metrics on the dashboard. Native processes already see real host

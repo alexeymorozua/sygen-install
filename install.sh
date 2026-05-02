@@ -1053,18 +1053,19 @@ if [ $LOCAL_MODE -eq 0 ]; then
         apt_retry install -y -qq nodejs
     fi
 
-    # whisper-cli on Linux: try apt first (24.10+/trixie+), fall back to a
-    # source build (~2-3 min with the gcc/g++ already pulled in via
-    # build-essential). Final fallback is a warn so a missing apt mirror or
-    # network glitch doesn't fail the whole install over a best-effort feature.
+    # whisper-cli on Linux: always build from upstream source so every
+    # Linux install runs the same whisper.cpp version regardless of distro.
+    # apt packages exist on 24.10+/trixie+ but ship different versions and
+    # different binary names — relying on them caused observable behavior
+    # drift between hosts. Source build adds ~2-3 min using the gcc/g++/cmake
+    # toolchain we already pull via build-essential. Final fallback is a
+    # warn so a transient git/network glitch doesn't fail the whole install
+    # over a best-effort feature.
     if ! command -v whisper-cli >/dev/null 2>&1 && ! command -v whisper-cpp >/dev/null 2>&1; then
-        if apt_retry install -y -qq whisper-cpp 2>/dev/null \
-                || apt_retry install -y -qq whisper.cpp 2>/dev/null; then
-            log "whisper-cpp installed from apt"
-        elif build_whisper_from_source; then
+        if build_whisper_from_source; then
             log "whisper.cpp built from source -> /usr/local/bin/whisper-cli"
         else
-            warn "whisper.cpp not installable on this host — voice transcription disabled until installed manually"
+            warn "whisper.cpp build failed — voice transcription disabled until installed manually (re-run install or build manually from github.com/ggerganov/whisper.cpp)"
         fi
     fi
 

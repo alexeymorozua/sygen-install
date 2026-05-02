@@ -2085,7 +2085,12 @@ if [ "$RELEASE_SOURCE" = "source" ]; then
 else
     CORE_WHEEL="sygen-${EFFECTIVE_CORE_VERSION}-py3-none-any.whl"
     CORE_WHEEL_URL="$(gh_release_url "$RELEASES_GITHUB_REPO" "core-${EFFECTIVE_CORE_VERSION}" "$CORE_WHEEL")"
-    CORE_WHEEL_DEST="/tmp/sygen-${EFFECTIVE_CORE_VERSION}-${$}.whl"
+    # pip parses the wheel filename to derive name+version+pythontag+abitag+platform.
+    # If we strip the canonical filename to a custom temp name, pip aborts with
+    # "Invalid wheel filename (wrong number of parts)". Stage in a per-process
+    # temp dir so the original filename survives end-to-end.
+    CORE_WHEEL_TMPDIR="$(mktemp -d -t sygen-wheel.XXXXXX)"
+    CORE_WHEEL_DEST="$CORE_WHEEL_TMPDIR/$CORE_WHEEL"
     # P0-5: HEAD-probe before downloading. 404 → release not yet published;
     # surface an actionable error (or auto-switch to source mode if a local
     # checkout is available).
@@ -2104,8 +2109,8 @@ else
         fetch_release_asset_verified "$CORE_WHEEL_URL" "$CORE_WHEEL_DEST"
         log "Installing sygen wheel into venv"
         "$VENV_PIP" install --quiet "$CORE_WHEEL_DEST" \
-            || die "pip install of sygen wheel failed"
-        rm -f "$CORE_WHEEL_DEST"
+            || { rm -rf "$CORE_WHEEL_TMPDIR"; die "pip install of sygen wheel failed"; }
+        rm -rf "$CORE_WHEEL_TMPDIR"
     fi
 fi
 [ -x "$VENV_SYGEN_BIN" ] \
@@ -2126,7 +2131,9 @@ else
     # The updater is versioned alongside core for now — same git tag.
     UPDATER_WHEEL="sygen_updater-${EFFECTIVE_CORE_VERSION}-py3-none-any.whl"
     UPDATER_WHEEL_URL="$(gh_release_url "$RELEASES_GITHUB_REPO" "core-${EFFECTIVE_CORE_VERSION}" "$UPDATER_WHEEL")"
-    UPDATER_WHEEL_DEST="/tmp/sygen-updater-${EFFECTIVE_CORE_VERSION}-${$}.whl"
+    # Same wheel-filename-survival concern as core wheel above.
+    UPDATER_WHEEL_TMPDIR="$(mktemp -d -t sygen-updater-wheel.XXXXXX)"
+    UPDATER_WHEEL_DEST="$UPDATER_WHEEL_TMPDIR/$UPDATER_WHEEL"
     # P0-2 + P0-5: verify SHA256 if asset exists, else best-effort skip
     # (updater is non-critical for first install; admin still works
     # without it). Skip path is unchanged from previous behaviour.
@@ -2138,10 +2145,10 @@ else
         log "Installing sygen-updater wheel into venv"
         "$VENV_PIP" install --quiet "$UPDATER_WHEEL_DEST" \
             || warn "pip install sygen-updater failed — updater service inactive"
-        rm -f "$UPDATER_WHEEL_DEST"
+        rm -rf "$UPDATER_WHEEL_TMPDIR"
     else
         warn "sygen-updater wheel not yet published at $UPDATER_WHEEL_URL — updater service will be inactive until next release"
-        rm -f "$UPDATER_WHEEL_DEST" 2>/dev/null || true
+        rm -rf "$UPDATER_WHEEL_TMPDIR" 2>/dev/null || true
     fi
 fi
 

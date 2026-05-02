@@ -2198,7 +2198,13 @@ log "Installing sygen-admin to $ADMIN_DIR"
 # Admin tarball ships the Next.js standalone output (server.js,
 # minimal node_modules, .next/static, public/) — runtime only, no build
 # step on the host.
-mkdir -p "$ADMIN_DIR" "$ADMIN_PREV_DIR"
+# Only mkdir admin-prev — pre-creating $ADMIN_DIR breaks the atomic-swap
+# `mv "$ADMIN_STAGING_DIR" "$ADMIN_DIR"` below: POSIX mv into an existing
+# directory moves source *inside* target rather than renaming, so a
+# fresh install ends up with /srv/sygen/admin/admin-staging-XXXXXX/server.js
+# instead of /srv/sygen/admin/server.js, and sygen-admin fail-loops on
+# "Cannot find module '/srv/sygen/admin/server.js'".
+mkdir -p "$ADMIN_PREV_DIR"
 
 # Atomic swap: extract the new tarball into admin-staging, then mv-rename.
 # Keeps the previous admin around at admin-prev/ for one-step rollback.
@@ -2299,6 +2305,10 @@ if [ -d "$ADMIN_DIR" ] && [ -n "$(ls -A "$ADMIN_DIR" 2>/dev/null)" ]; then
     rm -rf "$ADMIN_PREV_DIR"
     mv "$ADMIN_DIR" "$ADMIN_PREV_DIR"
 fi
+# Belt-and-suspenders: if $ADMIN_DIR exists as an empty dir at this point
+# (re-run after a failed install left a stub, or filesystem leftovers),
+# rmdir it so the next `mv` *renames* staging instead of *moving into*.
+rmdir "$ADMIN_DIR" 2>/dev/null || true
 mv "$ADMIN_STAGING_DIR" "$ADMIN_DIR"
 trap on_exit EXIT  # restore the install-wide trap (the post-swap
                    # service-install block re-loads/re-starts the unit)
@@ -2824,9 +2834,14 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$SELF_HOSTED_SUBMODE" != "tailscale" ]; then
     log "Configuring nginx vhost for $FQDN"
     curl -fsSL -o /tmp/sygen.nginx.tmpl "$BASE_URL/nginx.conf.tmpl" \
         || die "could not fetch nginx.conf.tmpl"
+    # Remap the admin upstream from the legacy :3000 (Docker default) to the
+    # native install port (default 8080). sygen-admin systemd unit binds
+    # PORT=$SYGEN_ADMIN_PORT, and skipping this substitution leaves nginx
+    # proxying to a dead :3000 — every page returns 502.
     sed \
         -e "s/__FQDN__/$FQDN/g" \
         -e "s|__CERT_DIR__|${CERTBOT_LIVE_DIR}|g" \
+        -e "s|http://127.0.0.1:3000|http://127.0.0.1:${SYGEN_ADMIN_PORT}|g" \
         /tmp/sygen.nginx.tmpl > "/etc/nginx/sites-available/sygen"
     ln -sf "/etc/nginx/sites-available/sygen" /etc/nginx/sites-enabled/sygen
     rm -f /etc/nginx/sites-enabled/default

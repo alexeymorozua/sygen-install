@@ -928,8 +928,8 @@ BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://raw.githubusercontent.com/alexeymoro
 # release. SYGEN_RELEASE_SOURCE=source pulls from local checkouts
 # (SYGEN_CORE_SOURCE_DIR / SYGEN_ADMIN_SOURCE_DIR) — the transitional path
 # for a freshly-cut commit that isn't released yet.
-CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.88}"
-ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.60}"
+CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.89}"
+ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.61}"
 RELEASE_SOURCE="${SYGEN_RELEASE_SOURCE:-github}"
 CORE_SOURCE_DIR="${SYGEN_CORE_SOURCE_DIR:-}"
 ADMIN_SOURCE_DIR="${SYGEN_ADMIN_SOURCE_DIR:-}"

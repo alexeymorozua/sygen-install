@@ -4,10 +4,12 @@
   service installed in __VENV_DIR__/bin/sygen.
 
   Placeholders substituted by install.sh:
-    __VENV_DIR__         absolute path to the Python venv (e.g.
-                         /Users/<user>/.sygen-local/venv)
-    __SYGEN_ROOT__       data/.env/logs root (e.g. ~/.sygen-local)
-    __HOME__             user's home dir (for $HOME-relative log paths)
+    __VENV_DIR__            absolute path to the Python venv (e.g.
+                            /Users/<user>/.sygen-local/venv)
+    __SYGEN_ROOT__          data/.env/logs root (e.g. ~/.sygen-local)
+    __SYGEN_ADMIN_PORT__    host port of pro.sygen.admin (Next.js)
+    __SYGEN_UPDATER_PORT__  host port of pro.sygen.updater
+    __HOME__                user's home dir (for $HOME-relative log paths)
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -20,9 +22,21 @@
     <key>WorkingDirectory</key> <string>__SYGEN_ROOT__</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>SYGEN_HOME</key>   <string>__SYGEN_ROOT__/data</string>
-        <key>HOME</key>         <string>__HOME__</string>
-        <key>PATH</key>         <string>__VENV_DIR__/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>SYGEN_HOME</key>              <string>__SYGEN_ROOT__/data</string>
+        <key>HOME</key>                    <string>__HOME__</string>
+        <key>PATH</key>                    <string>__VENV_DIR__/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!--
+          Mirror the SYGEN_* env vars that systemd's EnvironmentFile=.env
+          provides on Linux. launchd has no EnvironmentFile equivalent, so
+          without these the core process falls back to $SYGEN_HOME/...
+          (= $SYGEN_ROOT/data/...) and writes/reads diverge from the
+          host-side runners that watch $SYGEN_ROOT/host_updates etc.
+        -->
+        <key>SYGEN_HOST_UPDATES_DIR</key>  <string>__SYGEN_ROOT__/host_updates</string>
+        <key>SYGEN_HOST_METRICS_DIR</key>  <string>__SYGEN_ROOT__/host_metrics</string>
+        <key>SYGEN_UPDATES_STATE</key>     <string>__SYGEN_ROOT__/host_updates/_updates.json</string>
+        <key>SYGEN_UPDATER_URL</key>       <string>http://127.0.0.1:__SYGEN_UPDATER_PORT__</string>
+        <key>ADMIN_INTERNAL_URL</key>      <string>http://127.0.0.1:__SYGEN_ADMIN_PORT__</string>
     </dict>
     <key>RunAtLoad</key>        <true/>
     <key>KeepAlive</key>        <true/>

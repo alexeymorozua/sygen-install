@@ -6,6 +6,7 @@
 
   Placeholders substituted by install.sh:
     __VENV_DIR__            absolute path to the Python venv
+    __ADMIN_DIR__           absolute path to extracted admin tarball
     __SYGEN_ROOT__          data/.env/logs root
     __SYGEN_UPDATER_PORT__  port LISTEN_PORT binds to (default 8082;
                             multi-instance auto-shifts when occupied)
@@ -22,10 +23,23 @@
     <key>WorkingDirectory</key> <string>__SYGEN_ROOT__</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>SYGEN_HOME</key>          <string>__SYGEN_ROOT__/data</string>
-        <key>SYGEN_UPDATER_PORT</key>  <string>__SYGEN_UPDATER_PORT__</string>
-        <key>HOME</key>                <string>__HOME__</string>
-        <key>PATH</key>                <string>__VENV_DIR__/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>SYGEN_HOME</key>              <string>__SYGEN_ROOT__/data</string>
+        <key>SYGEN_UPDATER_PORT</key>      <string>__SYGEN_UPDATER_PORT__</string>
+        <key>HOME</key>                    <string>__HOME__</string>
+        <key>PATH</key>                    <string>__VENV_DIR__/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!--
+          Mirror the SYGEN_* env vars that systemd's EnvironmentFile=.env
+          provides on Linux. Without these the updater's atomic-swap
+          targets default to $SYGEN_HOME/{venv,admin} (= $SYGEN_ROOT/data/...)
+          while the live trees live at $SYGEN_ROOT/{venv,admin} → Apply
+          Update would mv-swap into a sibling dir and the banner never
+          clears. STATE_PATH must match SYGEN_UPDATES_STATE on the core
+          side (they share the same JSON file).
+        -->
+        <key>SYGEN_VENV_DIR</key>          <string>__VENV_DIR__</string>
+        <key>SYGEN_ADMIN_DIR</key>         <string>__ADMIN_DIR__</string>
+        <key>SYGEN_HOST_UPDATES_DIR</key>  <string>__SYGEN_ROOT__/host_updates</string>
+        <key>STATE_PATH</key>              <string>__SYGEN_ROOT__/host_updates/_updates.json</string>
     </dict>
     <key>RunAtLoad</key>        <true/>
     <key>KeepAlive</key>        <true/>

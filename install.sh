@@ -3111,6 +3111,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
             -e "s|__NODE_BIN__|$NODE_BIN|g" \
             -e "s|__SYGEN_ADMIN_PORT__|$SYGEN_ADMIN_PORT|g" \
             -e "s|__SYGEN_UPDATER_PORT__|$SYGEN_UPDATER_PORT|g" \
+            -e "s|__SYGEN_UPDATER_TOKEN__|$EFFECTIVE_UPDATER_TOKEN|g" \
             -e "s|__HOME__|$HOME|g" \
             "$tmpl" > "$plist_dst"
         rm -f "$tmpl"

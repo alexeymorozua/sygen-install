@@ -23,7 +23,15 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>SYGEN_HOME</key>              <string>__SYGEN_ROOT__/data</string>
-        <key>HOME</key>                    <string>__HOME__</string>
+        <!--
+          Sub-agent isolation: HOME points at SYGEN_ROOT/data so Claude
+          CLI auth (~/.claude/.credentials.json) lives inside the install
+          tree, not in the user's real $HOME. Otherwise every install on
+          this machine shares one credential file with the desktop Claude
+          app and any legacy Atlas/main install — multiple sygen instances
+          would fight over the same OAuth tokens.
+        -->
+        <key>HOME</key>                    <string>__SYGEN_ROOT__/data</string>
         <key>PATH</key>                    <string>__VENV_DIR__/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <!--
           Mirror the SYGEN_* env vars that systemd's EnvironmentFile=.env

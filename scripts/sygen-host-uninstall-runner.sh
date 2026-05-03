@@ -23,6 +23,7 @@ set -eu
 
 LOG_PREFIX="[sygen-host-uninstall-runner]"
 log() { printf '%s %s\n' "$LOG_PREFIX" "$*"; }
+warn() { printf '%s WARN: %s\n' "$LOG_PREFIX" "$*" >&2; }
 
 INTERVAL=5
 RUN_ONCE=0

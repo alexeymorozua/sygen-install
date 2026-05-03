@@ -40,7 +40,14 @@
 #                             a `sygen` checkout (pip install <dir>).
 #   SYGEN_ADMIN_SOURCE_DIR    when SYGEN_RELEASE_SOURCE=source: path to
 #                             a `sygen-admin` checkout (npm ci && build).
-#   SYGEN_ADMIN_PORT          host port for admin, default 8080
+#   SYGEN_ADMIN_PORT          host port for admin, default 8080.
+#   SYGEN_CORE_PORT           host port for core API, default 8081.
+#   SYGEN_INTERAGENT_PORT     localhost port for the inter-agent bus, default 8799.
+#   SYGEN_UPDATER_PORT        localhost port for the updater HTTP server, default 8082.
+#                             All four auto-shift to the next free port (default+1, +2, …)
+#                             when the default is occupied (multi-instance / coexistence
+#                             with Grafana/Postgres/dev sygen). Operator overrides win
+#                             verbatim; collisions on an explicit override are fatal.
 #   SELF_HOSTED_MODE          (macOS) localhost | tailscale | publicdomain.
 #                             (Linux) tailscale only.
 #                             If unset on macOS: auto-detect Tailscale and
@@ -54,10 +61,12 @@
 # The core service bootstraps its own "admin" user on first boot and writes the
 # one-time password to $SYGEN_ROOT/data/_secrets/.initial_admin_password. The
 # installer prints it at the end. $SYGEN_ROOT is /srv/sygen on Linux and
-# $HOME/.sygen-local on macOS. Native processes own these ports:
+# $HOME/.sygen-local on macOS. Native processes default to these ports
+# (auto-shifted to the next free port if any are already taken):
 #   localhost:8081 — sygen-core   (FastAPI/aiohttp REST + WebSocket)
 #   localhost:8080 — sygen-admin  (Next.js standalone, default SYGEN_ADMIN_PORT)
 #   localhost:8082 — sygen-updater (FastAPI, bound to 127.0.0.1, bearer-authed)
+#   localhost:8799 — interagent bus (used by the multi-agent CLI tools)
 #
 # Usage:
 #   # Linux (VPS, run as root):
@@ -148,6 +157,104 @@ json_escape() {
     s=${s//$'\r'/\\r}
     s=${s//$'\t'/\\t}
     printf '"%s"' "$s"
+}
+
+# ---------- Port detection (v1.6.84+) ----------
+# Multi-instance support: a Mac may already run a dev sygen / Grafana /
+# Postgres / etc. on our default ports. _port_in_use probes for a LISTEN
+# socket; _find_free_port walks +1, +2, ... up to start+100. Operator
+# overrides (SYGEN_*_PORT env vars) are captured BEFORE this point so they
+# can be honoured verbatim downstream — see PORT_*_OVERRIDE snapshot below.
+PORT_CORE_OVERRIDE="${SYGEN_CORE_PORT:-}"
+PORT_ADMIN_OVERRIDE="${SYGEN_ADMIN_PORT:-}"
+PORT_INTERAGENT_OVERRIDE="${SYGEN_INTERAGENT_PORT:-}"
+PORT_UPDATER_OVERRIDE="${SYGEN_UPDATER_PORT:-}"
+unset SYGEN_CORE_PORT SYGEN_ADMIN_PORT SYGEN_INTERAGENT_PORT SYGEN_UPDATER_PORT
+
+_port_in_use() {
+    local port="$1"
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+    elif command -v ss >/dev/null 2>&1; then
+        ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[.:]${port}\$"
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -an 2>/dev/null | grep -qE "[.:]${port}[[:space:]].*LISTEN"
+    else
+        # Fallback: try to bind via Python (in_use=cannot bind=non-zero exit)
+        python3 - "$port" >/dev/null 2>&1 <<'PY'
+import socket, sys
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", int(sys.argv[1])))
+finally:
+    s.close()
+PY
+        [ $? -ne 0 ]
+    fi
+}
+
+_find_free_port() {
+    local start="$1"
+    local port="$start"
+    local max=$((start + 100))
+    while [ "$port" -le "$max" ]; do
+        if ! _port_in_use "$port"; then
+            printf '%s' "$port"
+            return 0
+        fi
+        port=$((port + 1))
+    done
+    return 1
+}
+
+# Resolve a port honouring (in priority): operator env override → existing
+# install (config.json / .env) → default + auto-shift if occupied.
+# $1=label (CORE|ADMIN|INTERAGENT|UPDATER), $2=default port, $3=override value
+_resolve_port() {
+    local label="$1" default="$2" override="$3"
+    local port
+
+    if [ -n "$override" ]; then
+        if ! [[ "$override" =~ ^[0-9]+$ ]] || [ "$override" -lt 1 ] || [ "$override" -gt 65535 ]; then
+            die "SYGEN_${label}_PORT='$override' is not a valid port (1-65535)"
+        fi
+        if _port_in_use "$override"; then
+            die "SYGEN_${label}_PORT=$override is already in use — free that port or remove the env override"
+        fi
+        printf '%s' "$override"
+        return
+    fi
+
+    # Existing-install reuse: services may currently be binding the port,
+    # so we trust the recorded value and skip the in-use probe.
+    local claimed=""
+    case "$label" in
+        CORE)
+            if [ -f "$SYGEN_ROOT/data/config/config.json" ] && command -v jq >/dev/null 2>&1; then
+                claimed="$(jq -r '.api.port // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)"
+            fi
+            ;;
+        INTERAGENT)
+            if [ -f "$SYGEN_ROOT/data/config/config.json" ] && command -v jq >/dev/null 2>&1; then
+                claimed="$(jq -r '.interagent_port // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)"
+            fi
+            ;;
+        ADMIN|UPDATER)
+            if [ -f "$SYGEN_ROOT/.env" ]; then
+                claimed="$(grep -E "^SYGEN_${label}_PORT=" "$SYGEN_ROOT/.env" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+            fi
+            ;;
+    esac
+    if [ -n "$claimed" ] && [[ "$claimed" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$claimed"
+        return
+    fi
+
+    # Fresh install: walk for the first free port from default.
+    if ! port="$(_find_free_port "$default")"; then
+        die "no free port found for ${label} in range ${default}..$((default + 100))"
+    fi
+    printf '%s' "$port"
 }
 
 # ---------- Install manifest (v1.6.46+) ----------
@@ -969,14 +1076,16 @@ PROVISION_URL="${SYGEN_PROVISION_URL:-https://install.${DOMAIN}/api/provision}"
 
 if [ $LOCAL_MODE -eq 1 ]; then
     SYGEN_ROOT="$HOME/.sygen-local"
-    SYGEN_ADMIN_PORT="${SYGEN_ADMIN_PORT:-8080}"
+    # SYGEN_ADMIN_PORT is resolved later by _resolve_port (port-detection
+    # block). For localhost mode the ADMIN_URL/CORS_ORIGIN are recomputed
+    # post-resolution because they embed the port.
 
     case "$SELF_HOSTED_SUBMODE" in
         localhost)
             SUB="${SYGEN_SUBDOMAIN:-local}"
             FQDN="localhost"
-            ADMIN_URL="http://localhost:${SYGEN_ADMIN_PORT}"
-            CORS_ORIGIN="http://localhost:${SYGEN_ADMIN_PORT}"
+            ADMIN_URL=""    # filled in after _resolve_port
+            CORS_ORIGIN=""  # filled in after _resolve_port
             log "macOS detected — localhost mode (Colima + http://localhost, no TLS)"
             warn "  iPhone cannot reach http://localhost (App Transport Security blocks plain HTTP)."
             warn "  For iPhone access, re-run with SELF_HOSTED_MODE=tailscale or =publicdomain."
@@ -1051,7 +1160,6 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     # Tailscale auto-issues + auto-renews. iPhone must also be on the
     # same tailnet to reach the box.
     SYGEN_ROOT="/srv/sygen"
-    SYGEN_ADMIN_PORT="${SYGEN_ADMIN_PORT:-8080}"
     if [ "$EUID" -ne 0 ]; then
         die "Run as root on Linux (sudo bash or ssh root@...)"
     fi
@@ -1110,7 +1218,6 @@ elif [ -z "${SYGEN_SUBDOMAIN:-}" ] && [ -z "${CF_API_TOKEN:-}" ]; then
     # provision step below, after deps (jq) are installed.
     AUTO_MODE=1
     SYGEN_ROOT="/srv/sygen"
-    SYGEN_ADMIN_PORT="${SYGEN_ADMIN_PORT:-8080}"
     log "Linux detected — auto-mode (will provision <id>.${DOMAIN} from $PROVISION_URL)"
     if [ "$EUID" -ne 0 ]; then
         die "Run as root on Linux (sudo bash or ssh root@...)"
@@ -1125,7 +1232,6 @@ else
     CF_API_TOKEN="${CF_API_TOKEN:?CF_API_TOKEN required for custom-mode install}"
     CF_ZONE_ID="${CF_ZONE_ID:?CF_ZONE_ID required for custom-mode install}"
     SYGEN_ROOT="/srv/sygen"
-    SYGEN_ADMIN_PORT="${SYGEN_ADMIN_PORT:-8080}"
     ADMIN_URL="https://$FQDN"
     CORS_ORIGIN="https://$FQDN"
     log "Linux detected — custom mode (subdomain $FQDN supplied by operator)"
@@ -1153,6 +1259,43 @@ fi
 # disk thanks to the previous sygen install).
 SYGEN_MANIFEST_PATH="$SYGEN_ROOT/.install_manifest.json"
 manifest_load "$SYGEN_MANIFEST_PATH"
+
+# ---------- Port assignment (multi-instance support) ----------
+# Resolve the four host-bound ports BEFORE any service config is written.
+# Operator overrides (SYGEN_*_PORT env vars) win; otherwise we honour the
+# port already recorded by a prior install (config.json / .env), and only
+# fall back to defaults + auto-shift on a fresh install. _resolve_port
+# probes occupancy with lsof/ss/netstat/python so a second sygen instance
+# (or any unrelated daemon — Grafana, Postgres, dev sygen) doesn't
+# silently collide on the default ports.
+SYGEN_CORE_PORT="$(_resolve_port CORE       8081 "$PORT_CORE_OVERRIDE")"
+SYGEN_ADMIN_PORT="$(_resolve_port ADMIN     8080 "$PORT_ADMIN_OVERRIDE")"
+SYGEN_INTERAGENT_PORT="$(_resolve_port INTERAGENT 8799 "$PORT_INTERAGENT_OVERRIDE")"
+SYGEN_UPDATER_PORT="$(_resolve_port UPDATER  8082 "$PORT_UPDATER_OVERRIDE")"
+
+_port_note() {
+    # $1=label, $2=resolved, $3=default, $4=override
+    if [ -n "$4" ]; then
+        printf '%s (operator override)' "$2"
+    elif [ "$2" = "$3" ]; then
+        printf '%s (default)' "$2"
+    else
+        printf '%s (%s occupied → auto-shifted)' "$2" "$3"
+    fi
+}
+log "Port assignment:"
+log "  core:       $(_port_note CORE       "$SYGEN_CORE_PORT"       8081 "$PORT_CORE_OVERRIDE")"
+log "  admin:      $(_port_note ADMIN      "$SYGEN_ADMIN_PORT"      8080 "$PORT_ADMIN_OVERRIDE")"
+log "  interagent: $(_port_note INTERAGENT "$SYGEN_INTERAGENT_PORT" 8799 "$PORT_INTERAGENT_OVERRIDE")"
+log "  updater:    $(_port_note UPDATER    "$SYGEN_UPDATER_PORT"    8082 "$PORT_UPDATER_OVERRIDE")"
+
+# localhost mode embeds the admin port in ADMIN_URL/CORS_ORIGIN; recompute
+# now that the resolved value is known. Tailscale / publicdomain / custom
+# modes use https://$FQDN with no port and stay untouched.
+if [ "$LOCAL_MODE" -eq 1 ] && [ "$SELF_HOSTED_SUBMODE" = "localhost" ]; then
+    ADMIN_URL="http://localhost:${SYGEN_ADMIN_PORT}"
+    CORS_ORIGIN="http://localhost:${SYGEN_ADMIN_PORT}"
+fi
 
 # Ensure a dedicated unprivileged 'sygen' system user exists (Linux only).
 # sygen-core / sygen-admin systemd units run as this user so a process-level
@@ -1966,7 +2109,7 @@ else
 fi
 
 if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
-    log "Bootstrapping config.json (api on, host 0.0.0.0, port 8081)"
+    log "Bootstrapping config.json (api on, host 0.0.0.0, port $SYGEN_CORE_PORT, interagent_port $SYGEN_INTERAGENT_PORT)"
     # `openssl rand -hex 32` outputs 64 hex chars on one line — no SIGPIPE
     # issues the way `tr -dc ... </dev/urandom | head -c N` has under pipefail.
     API_TOKEN=$(openssl rand -hex 32)
@@ -1976,11 +2119,17 @@ if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
     # letting a tampered FQDN inject extra keys (e.g. flip allow_public,
     # override jwt_secret) into the bootstrap config. The inputs are
     # already validated above; this is defence in depth.
+    #
+    # api.port + interagent_port are baked in from _resolve_port output so
+    # a fresh install on a host with the defaults already taken (dev sygen,
+    # Grafana, ...) lands on free ports automatically.
     jq -n \
         --arg name "$DEFAULT_INSTANCE_NAME" \
         --arg token "$API_TOKEN" \
         --arg jwt "$JWT_SECRET" \
         --arg cors "$CORS_ORIGIN" \
+        --argjson core_port "$SYGEN_CORE_PORT" \
+        --argjson interagent_port "$SYGEN_INTERAGENT_PORT" \
         '{
             instance_name: $name,
             language: "en",
@@ -1988,10 +2137,11 @@ if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
             transport: "api",
             transports: ["api"],
             allowed_user_ids: [],
+            interagent_port: $interagent_port,
             api: {
                 enabled: true,
                 host: "0.0.0.0",
-                port: 8081,
+                port: $core_port,
                 token: $token,
                 jwt_secret: $jwt,
                 chat_id: 0,
@@ -2020,6 +2170,21 @@ else
             rm -f "$tmp_config"
             warn "Failed to patch instance_name into config.json (jq error) — leaving as-is"
         fi
+    fi
+    # Honour an operator-supplied SYGEN_CORE_PORT / SYGEN_INTERAGENT_PORT
+    # override on re-run by patching the existing config.json. Without an
+    # override _resolve_port already returned the previously-claimed value,
+    # so the patch is a no-op (jq writes the same numbers back).
+    tmp_config="$SYGEN_ROOT/data/config/config.json.tmp.$$"
+    if jq --argjson core_port "$SYGEN_CORE_PORT" \
+          --argjson interagent_port "$SYGEN_INTERAGENT_PORT" \
+          '.api = ((.api // {}) + {port: $core_port}) | .interagent_port = $interagent_port' \
+          "$SYGEN_ROOT/data/config/config.json" > "$tmp_config"; then
+        chmod 600 "$tmp_config"
+        mv "$tmp_config" "$SYGEN_ROOT/data/config/config.json"
+    else
+        rm -f "$tmp_config"
+        warn "Failed to sync ports into config.json (jq error) — leaving as-is"
     fi
 fi
 
@@ -2074,7 +2239,7 @@ EFFECTIVE_DNS_CHALLENGE_URL=$(get_env SYGEN_DNS_CHALLENGE_URL "${SYGEN_DNS_CHALL
 # the API same-origin via the proxy, exactly like Linux. Empty string =
 # same-origin in the admin runtime.
 if [ $LOCAL_MODE -eq 1 ] && [ "$SELF_HOSTED_SUBMODE" = "localhost" ]; then
-    EFFECTIVE_PUBLIC_API_URL="http://localhost:8081"
+    EFFECTIVE_PUBLIC_API_URL="http://localhost:${SYGEN_CORE_PORT}"
 else
     EFFECTIVE_PUBLIC_API_URL=$(get_env NEXT_PUBLIC_SYGEN_API_URL "")
 fi
@@ -2175,8 +2340,20 @@ umask 077
     # (`http://sygen-updater:8082`) — neither resolves on a native install.
     # Without these overrides the admin /api/system/updates endpoint
     # returns {supported: false} and the Update banner stays hidden.
+    # Multi-instance: SYGEN_UPDATER_PORT is read by sygen-updater's
+    # entrypoint to bind LISTEN_PORT; SYGEN_UPDATER_URL must match.
     echo "SYGEN_UPDATES_STATE=$SYGEN_ROOT/host_updates/_updates.json"
-    echo "SYGEN_UPDATER_URL=http://127.0.0.1:8082"
+    echo "SYGEN_UPDATER_PORT=$SYGEN_UPDATER_PORT"
+    echo "SYGEN_UPDATER_URL=http://127.0.0.1:$SYGEN_UPDATER_PORT"
+    # Resolved host port for sygen-admin (Next.js standalone). Read by
+    # the systemd unit / launchd plist via __SYGEN_ADMIN_PORT__ token; we
+    # also persist into .env so updater + tools can pick it up at runtime.
+    echo "SYGEN_ADMIN_PORT=$SYGEN_ADMIN_PORT"
+    # Resolved core port + interagent port — kept in .env for diagnostics
+    # and so re-runs of install.sh can read the previously-claimed values
+    # via _resolve_port (otherwise we'd auto-shift again on re-run).
+    echo "SYGEN_CORE_PORT=$SYGEN_CORE_PORT"
+    echo "SYGEN_INTERAGENT_PORT=$SYGEN_INTERAGENT_PORT"
     # Updater's atomic-swap targets. Default in updater.py is
     # SYGEN_HOME/{venv,admin} which resolves to /srv/sygen/data/{venv,admin}
     # on native (because SYGEN_HOME=$SYGEN_ROOT/data per the systemd unit
@@ -2933,6 +3110,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
             -e "s|__ADMIN_DIR__|$ADMIN_DIR|g" \
             -e "s|__NODE_BIN__|$NODE_BIN|g" \
             -e "s|__SYGEN_ADMIN_PORT__|$SYGEN_ADMIN_PORT|g" \
+            -e "s|__SYGEN_UPDATER_PORT__|$SYGEN_UPDATER_PORT|g" \
             -e "s|__HOME__|$HOME|g" \
             "$tmpl" > "$plist_dst"
         rm -f "$tmpl"
@@ -3008,7 +3186,7 @@ fi
 # ---------- 6b. macOS smoke-test (Linux uses nginx + Let's Encrypt to verify) ----------
 if [ $LOCAL_MODE -eq 1 ]; then
     STAGE="smoke"
-    log "macOS: smoke-testing endpoints (admin :${SYGEN_ADMIN_PORT}, core :8081)"
+    log "macOS: smoke-testing endpoints (admin :${SYGEN_ADMIN_PORT}, core :${SYGEN_CORE_PORT})"
     smoke_ok=0
     # NOTE: -f turns 4xx/5xx into curl-exit-1, which then triggers the
     # `|| echo 000` branch — and curl has ALREADY printed the status code
@@ -3028,7 +3206,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
         # 200 if you have a token, 401 otherwise. Both prove the server
         # is up and routing — only a connect failure is a smoke-test fail.
         core_code=$(curl -sS -o /dev/null -w '%{http_code}' \
-            "http://localhost:8081/api/system/status" 2>/dev/null || echo "000")
+            "http://localhost:${SYGEN_CORE_PORT}/api/system/status" 2>/dev/null || echo "000")
         case "$core_code" in 200|401|403) core_ok=1 ;; esac
         if [ "$admin_ok" -eq 1 ] && [ "$core_ok" -eq 1 ]; then
             log "  endpoints responding (admin=$admin_code core=$core_code)"
@@ -3056,10 +3234,13 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$SELF_HOSTED_SUBMODE" != "tailscale" ]; then
     # native install port (default 8080). sygen-admin systemd unit binds
     # PORT=$SYGEN_ADMIN_PORT, and skipping this substitution leaves nginx
     # proxying to a dead :3000 — every page returns 502.
+    # Core upstream stays on :8081 by default; multi-instance support
+    # rewrites it to $SYGEN_CORE_PORT when auto-shifted.
     sed \
         -e "s/__FQDN__/$FQDN/g" \
         -e "s|__CERT_DIR__|${CERTBOT_LIVE_DIR}|g" \
         -e "s|http://127.0.0.1:3000|http://127.0.0.1:${SYGEN_ADMIN_PORT}|g" \
+        -e "s|http://127.0.0.1:8081|http://127.0.0.1:${SYGEN_CORE_PORT}|g" \
         /tmp/sygen.nginx.tmpl > "/etc/nginx/sites-available/sygen"
     ln -sf "/etc/nginx/sites-available/sygen" /etc/nginx/sites-enabled/sygen
     rm -f /etc/nginx/sites-enabled/default
@@ -3085,11 +3266,13 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     # Substitute __FQDN__, the cert dir (Linux: /etc/letsencrypt;
     # macOS-publicdomain: $SYGEN_ROOT/letsencrypt), and remap the admin
     # upstream from :3000 to the mac-side host port chosen earlier
-    # (default 8080). Core stays on :8081.
+    # (default 8080). Core defaults to :8081 but is rewritten when
+    # _resolve_port auto-shifted onto a different free port.
     sed \
         -e "s/__FQDN__/$FQDN/g" \
         -e "s|__CERT_DIR__|${CERTBOT_LIVE_DIR}|g" \
         -e "s|http://127.0.0.1:3000|http://127.0.0.1:${SYGEN_ADMIN_PORT}|g" \
+        -e "s|http://127.0.0.1:8081|http://127.0.0.1:${SYGEN_CORE_PORT}|g" \
         /tmp/sygen.nginx.tmpl \
         | $SUDO tee "$NGINX_CONF_DIR/sygen.conf" >/dev/null
 
@@ -3253,9 +3436,9 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     # core expects /api/auth/login etc., not /auth/login, so without the
     # trailing path the proxy returns 404 on every mobile login request.
     # The catch-all "/" mapping has no path to preserve and is fine bare.
-    _ts_run "serve /api/"   1 serve --bg --set-path=/api/   "http://127.0.0.1:8081/api/"
-    _ts_run "serve /ws/"    1 serve --bg --set-path=/ws/    "http://127.0.0.1:8081/ws/"
-    _ts_run "serve /upload" 0 serve --bg --set-path=/upload "http://127.0.0.1:8081/upload"
+    _ts_run "serve /api/"   1 serve --bg --set-path=/api/   "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
+    _ts_run "serve /ws/"    1 serve --bg --set-path=/ws/    "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
+    _ts_run "serve /upload" 0 serve --bg --set-path=/upload "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
     _ts_run "serve /"       1 serve --bg "http://127.0.0.1:${SYGEN_ADMIN_PORT}"
 fi
 

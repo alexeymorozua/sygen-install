@@ -166,6 +166,19 @@ json_escape() {
 # as "preexisting" and uninstall would orphan them on the host.
 SYGEN_MANIFEST_INSTALLED_PKGS=()
 SYGEN_MANIFEST_PREEXISTING_PKGS=()
+# v1.6.81+: npm packages installed globally by install.sh (today: only
+# @anthropic-ai/claude-code). Same preexisting/installed split as brew
+# packages — a CLI the user already had before sygen must NOT be
+# uninstalled. uninstall.sh runs `npm uninstall -g <pkg>` only for the
+# installed_npm bucket.
+SYGEN_MANIFEST_INSTALLED_NPM=()
+SYGEN_MANIFEST_PREEXISTING_NPM=()
+# v1.6.81+: arbitrary binaries install.sh dropped on the host outside
+# the package manager (today: /usr/local/bin/whisper-cli + the
+# whisper-cpp symlink built from source on Linux). Each entry is an
+# absolute path. uninstall.sh `rm -f`s every path on this list.
+SYGEN_MANIFEST_INSTALLED_BINARIES=()
+SYGEN_MANIFEST_PREEXISTING_BINARIES=()
 SYGEN_MANIFEST_PLISTS=()
 # v1.6.49+: files install.sh downloaded to host paths OUTSIDE $SYGEN_ROOT
 # (today: whisper ggml model under ~/.local/share/whisper-cpp/models). Only
@@ -217,6 +230,50 @@ manifest_record_pkg_preexisting() {
     fi
     log "manifest: recording $pkg as preexisting"
     SYGEN_MANIFEST_PREEXISTING_PKGS+=("$pkg")
+}
+
+manifest_record_npm_installed() {
+    local pkg="$1"
+    if _manifest_has_item "$pkg" \
+            ${SYGEN_MANIFEST_INSTALLED_NPM[@]+"${SYGEN_MANIFEST_INSTALLED_NPM[@]}"} \
+            ${SYGEN_MANIFEST_PREEXISTING_NPM[@]+"${SYGEN_MANIFEST_PREEXISTING_NPM[@]}"}; then
+        return 0
+    fi
+    log "manifest: recording npm $pkg as installed_by_sygen"
+    SYGEN_MANIFEST_INSTALLED_NPM+=("$pkg")
+}
+
+manifest_record_npm_preexisting() {
+    local pkg="$1"
+    if _manifest_has_item "$pkg" \
+            ${SYGEN_MANIFEST_INSTALLED_NPM[@]+"${SYGEN_MANIFEST_INSTALLED_NPM[@]}"} \
+            ${SYGEN_MANIFEST_PREEXISTING_NPM[@]+"${SYGEN_MANIFEST_PREEXISTING_NPM[@]}"}; then
+        return 0
+    fi
+    log "manifest: recording npm $pkg as preexisting"
+    SYGEN_MANIFEST_PREEXISTING_NPM+=("$pkg")
+}
+
+manifest_record_binary_installed() {
+    local path="$1"
+    if _manifest_has_item "$path" \
+            ${SYGEN_MANIFEST_INSTALLED_BINARIES[@]+"${SYGEN_MANIFEST_INSTALLED_BINARIES[@]}"} \
+            ${SYGEN_MANIFEST_PREEXISTING_BINARIES[@]+"${SYGEN_MANIFEST_PREEXISTING_BINARIES[@]}"}; then
+        return 0
+    fi
+    log "manifest: recording binary $path as installed_by_sygen"
+    SYGEN_MANIFEST_INSTALLED_BINARIES+=("$path")
+}
+
+manifest_record_binary_preexisting() {
+    local path="$1"
+    if _manifest_has_item "$path" \
+            ${SYGEN_MANIFEST_INSTALLED_BINARIES[@]+"${SYGEN_MANIFEST_INSTALLED_BINARIES[@]}"} \
+            ${SYGEN_MANIFEST_PREEXISTING_BINARIES[@]+"${SYGEN_MANIFEST_PREEXISTING_BINARIES[@]}"}; then
+        return 0
+    fi
+    log "manifest: recording binary $path as preexisting"
+    SYGEN_MANIFEST_PREEXISTING_BINARIES+=("$path")
 }
 
 manifest_record_plist() {
@@ -302,6 +359,31 @@ manifest_brew_install() {
     fi
 }
 
+# Wrap `npm install -g <pkg>` so each call lands in the right manifest
+# bucket. Detection is by `command -v <bin>` rather than `npm list -g`
+# because the bin name differs from the package name (e.g.
+# @anthropic-ai/claude-code installs `claude`). Caller passes both.
+#
+# $1 = npm package name (e.g. @anthropic-ai/claude-code)
+# $2 = binary name to probe (e.g. claude)
+# $3 = optional npm path (default: command -v npm)
+manifest_npm_install() {
+    local pkg="$1"
+    local bin="$2"
+    local npm_bin="${3:-}"
+    [ -z "$npm_bin" ] && npm_bin="$(command -v npm 2>/dev/null || true)"
+    if [ ! -x "$npm_bin" ]; then
+        warn "npm not found — cannot install $pkg ($bin)"
+        return 1
+    fi
+    if command -v "$bin" >/dev/null 2>&1; then
+        manifest_record_npm_preexisting "$pkg"
+        return 0
+    fi
+    manifest_record_npm_installed "$pkg"
+    "$npm_bin" install -g "$pkg"
+}
+
 # Atomic JSON writer. Schema is consumed by uninstall.sh AND by the
 # /api/system/uninstall/preview endpoint — see CONTRACT_admin_api.md.
 #
@@ -361,6 +443,34 @@ manifest_write() {
         printf '  "preexisting_pkgs": ['
         first=1
         for p in ${SYGEN_MANIFEST_PREEXISTING_PKGS[@]+"${SYGEN_MANIFEST_PREEXISTING_PKGS[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf '],\n'
+        printf '  "installed_npm": ['
+        first=1
+        for p in ${SYGEN_MANIFEST_INSTALLED_NPM[@]+"${SYGEN_MANIFEST_INSTALLED_NPM[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf '],\n'
+        printf '  "preexisting_npm": ['
+        first=1
+        for p in ${SYGEN_MANIFEST_PREEXISTING_NPM[@]+"${SYGEN_MANIFEST_PREEXISTING_NPM[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf '],\n'
+        printf '  "installed_binaries": ['
+        first=1
+        for p in ${SYGEN_MANIFEST_INSTALLED_BINARIES[@]+"${SYGEN_MANIFEST_INSTALLED_BINARIES[@]}"}; do
+            [ $first -eq 0 ] && printf ', '
+            printf '%s' "$(json_escape "$p")"; first=0
+        done
+        printf '],\n'
+        printf '  "preexisting_binaries": ['
+        first=1
+        for p in ${SYGEN_MANIFEST_PREEXISTING_BINARIES[@]+"${SYGEN_MANIFEST_PREEXISTING_BINARIES[@]}"}; do
             [ $first -eq 0 ] && printf ', '
             printf '%s' "$(json_escape "$p")"; first=0
         done
@@ -447,6 +557,14 @@ for p in m.get('installed_pkgs') or []:
     if isinstance(p, str): print('I\t' + p)
 for p in m.get('preexisting_pkgs') or []:
     if isinstance(p, str): print('P\t' + p)
+for p in m.get('installed_npm') or []:
+    if isinstance(p, str): print('NI\t' + p)
+for p in m.get('preexisting_npm') or []:
+    if isinstance(p, str): print('NP\t' + p)
+for p in m.get('installed_binaries') or []:
+    if isinstance(p, str): print('BI\t' + p)
+for p in m.get('preexisting_binaries') or []:
+    if isinstance(p, str): print('BP\t' + p)
 for p in m.get('plists_installed') or []:
     if isinstance(p, str): print('L\t' + p)
 for d in m.get('downloaded_files') or []:
@@ -475,6 +593,10 @@ PY
         case "$kind" in
             I) SYGEN_MANIFEST_INSTALLED_PKGS+=("$val") ;;
             P) SYGEN_MANIFEST_PREEXISTING_PKGS+=("$val") ;;
+            NI) SYGEN_MANIFEST_INSTALLED_NPM+=("$val") ;;
+            NP) SYGEN_MANIFEST_PREEXISTING_NPM+=("$val") ;;
+            BI) SYGEN_MANIFEST_INSTALLED_BINARIES+=("$val") ;;
+            BP) SYGEN_MANIFEST_PREEXISTING_BINARIES+=("$val") ;;
             L) SYGEN_MANIFEST_PLISTS+=("$val") ;;
             D) SYGEN_MANIFEST_DOWNLOADED+=("$val") ;;
             A) SYGEN_MANIFEST_AUTOSTART_PLISTS+=("$val") ;;
@@ -623,6 +745,14 @@ apt_retry() {
 # present, returns 0 without rebuilding.
 build_whisper_from_source() {
     if command -v whisper-cli >/dev/null 2>&1 || command -v whisper-cpp >/dev/null 2>&1; then
+        # Pre-existing binary — never delete on uninstall. Record both
+        # canonical paths if they're present so the manifest reflects the
+        # real on-disk state.
+        for _existing in /usr/local/bin/whisper-cli /usr/local/bin/whisper-cpp; do
+            if [ -e "$_existing" ] || [ -L "$_existing" ]; then
+                manifest_record_binary_preexisting "$_existing"
+            fi
+        done
         return 0
     fi
     log "Building whisper.cpp from source (Ubuntu 24.04 has no apt package)"
@@ -649,6 +779,13 @@ build_whisper_from_source() {
     )
     local rc=$?
     rm -rf "$build_dir"
+    if [ $rc -eq 0 ]; then
+        # Record what we just dropped on the host so uninstall.sh can rm
+        # exactly these paths (and not a user-supplied whisper-cli that
+        # might have arrived via a different package manager later).
+        manifest_record_binary_installed /usr/local/bin/whisper-cli
+        manifest_record_binary_installed /usr/local/bin/whisper-cpp
+    fi
     return $rc
 }
 
@@ -1073,10 +1210,17 @@ if [ $LOCAL_MODE -eq 0 ]; then
     # Without it the admin/iOS Claude-setup flow fails with "claude CLI
     # not found at 'claude'". Installed globally via npm so the binary
     # lands at /usr/bin/claude regardless of which user invokes it.
-    if ! command -v claude >/dev/null 2>&1; then
+    # Manifest-tracked so uninstall.sh can `npm uninstall -g` only when
+    # we're the ones who put it there.
+    if command -v claude >/dev/null 2>&1; then
+        manifest_record_npm_preexisting "@anthropic-ai/claude-code"
+    else
         log "Installing Claude Code CLI via npm (@anthropic-ai/claude-code)"
-        npm install -g @anthropic-ai/claude-code \
-            || warn "claude CLI install failed — admin/iOS Claude setup will fail until you run: npm install -g @anthropic-ai/claude-code"
+        if manifest_npm_install "@anthropic-ai/claude-code" claude; then
+            :
+        else
+            warn "claude CLI install failed — admin/iOS Claude setup will fail until you run: npm install -g @anthropic-ai/claude-code"
+        fi
     fi
 
     # whisper-cli on Linux: always build from upstream source so every
@@ -1160,15 +1304,22 @@ else
 
     # Claude Code CLI — required by sygen-core to spawn agent CLI sessions.
     # Without it admin/iOS Claude-setup fails with "claude CLI not found".
-    if ! command -v claude >/dev/null 2>&1; then
+    # Manifest-tracked so uninstall.sh can `npm uninstall -g` only when
+    # we're the ones who put it there.
+    if command -v claude >/dev/null 2>&1; then
+        manifest_record_npm_preexisting "@anthropic-ai/claude-code"
+    else
         log "macOS: installing Claude Code CLI via npm (@anthropic-ai/claude-code)"
         # Use the brew-resolved npm so this works whether or not the user
         # has node@22 linked into PATH.
         NPM_BIN="$(dirname "$NODE_BREW_BIN")/npm"
         [ -x "$NPM_BIN" ] || NPM_BIN="$(command -v npm || true)"
         if [ -x "$NPM_BIN" ]; then
-            "$NPM_BIN" install -g @anthropic-ai/claude-code \
-                || warn "claude CLI install failed — admin/iOS Claude setup will fail until you run: npm install -g @anthropic-ai/claude-code"
+            if manifest_npm_install "@anthropic-ai/claude-code" claude "$NPM_BIN"; then
+                :
+            else
+                warn "claude CLI install failed — admin/iOS Claude setup will fail until you run: npm install -g @anthropic-ai/claude-code"
+            fi
         else
             warn "npm not found alongside node@22 — install Claude CLI manually: npm install -g @anthropic-ai/claude-code"
         fi

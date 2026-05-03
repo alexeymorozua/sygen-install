@@ -70,17 +70,61 @@ process_trigger() {
     local log_file="$SYGEN_ROOT/logs/uninstall.log"
     log "Spawning detached uninstall: bash $UNINSTALL_SCRIPT --force (log: $log_file)"
 
-    # setsid + nohup + & to fully detach. The uninstall script will
-    # `systemctl disable --now sygen-host-uninstall-runner.service`
-    # mid-run, which kills *us*, but the detached uninstall.sh keeps
-    # running because it's in a new session group and not parented by
-    # our systemd unit anymore.
-    setsid nohup bash "$UNINSTALL_SCRIPT" --force \
-        >> "$log_file" 2>&1 < /dev/null &
-    disown || true
+    # Detach from our systemd cgroup. setsid+nohup+disown was not
+    # enough on production VPS: when sygen-host-uninstall-runner.service
+    # exited (or got cleaned up by the uninstall.sh's `systemctl disable
+    # --now`), systemd cgroup cleanup killed the descendant uninstall.sh
+    # too, leaving uninstall.log empty (0 bytes) and the host half-clean.
+    #
+    # Preferred: systemd-run --scope --no-block puts the child in its
+    # own transient unit / cgroup so it survives our death entirely.
+    # Fallback: setsid double-fork — re-fork from a detached subshell so
+    # the grandchild has init (PID 1) as its parent. Standard daemonise
+    # trick; works without systemd-run.
+    local unit_name="sygen-uninstall-$$-${RANDOM}"
+    if command -v systemd-run >/dev/null 2>&1; then
+        log "Using systemd-run --scope (unit: ${unit_name}) — output in journal + $log_file"
+        # --collect = drop the unit immediately when uninstall.sh exits.
+        # --property=KillMode=process so we don't kill children that
+        #   uninstall.sh itself spawns (apt, systemctl, etc.) when the
+        #   unit eventually closes.
+        # Tee output to log_file so existing log-tailing tooling (admin
+        # uninstall progress UI) keeps working in parallel with journal.
+        systemd-run \
+            --unit="$unit_name" \
+            --scope \
+            --no-block \
+            --collect \
+            --property=KillMode=process \
+            bash -c "exec bash '$UNINSTALL_SCRIPT' --force >>'$log_file' 2>&1 </dev/null" \
+            >/dev/null 2>&1 \
+            || {
+                warn "systemd-run dispatch failed — falling back to setsid double-fork"
+                _spawn_setsid_double_fork "$log_file"
+            }
+    else
+        log "systemd-run unavailable — using setsid double-fork"
+        _spawn_setsid_double_fork "$log_file"
+    fi
 
     log "Uninstall dispatched — runner exiting (will be torn down by uninstall.sh)"
     exit 0
+}
+
+# Double-fork detach. Outer subshell forks the inner setsid bash and
+# exits, so the grandchild gets reparented to init (PID 1) and is no
+# longer in our systemd cgroup. Used as a fallback when systemd-run is
+# not available.
+_spawn_setsid_double_fork() {
+    local log_file="$1"
+    (
+        setsid bash -c "
+            exec </dev/null
+            exec >>'$log_file' 2>&1
+            bash '$UNINSTALL_SCRIPT' --force
+        " &
+        disown || true
+    )
 }
 
 log "Starting (SYGEN_ROOT=$SYGEN_ROOT, interval=${INTERVAL}s, once=$RUN_ONCE)"

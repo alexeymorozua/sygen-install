@@ -111,6 +111,8 @@ MANIFEST="$SYGEN_ROOT/.install_manifest.json"
 USE_MANIFEST=0
 INSTALL_MODE=""           # "native" (v1.7+) or "docker" (legacy/v1/v2)
 MANIFEST_INSTALLED_PKGS=()
+MANIFEST_INSTALLED_NPM=()
+MANIFEST_INSTALLED_BINARIES=()
 MANIFEST_PLISTS=()
 MANIFEST_DOWNLOADED_PATHS=()
 MANIFEST_DOWNLOADED_TOTAL_BYTES=0
@@ -139,6 +141,10 @@ else:
     print('M\tdocker')
 for p in m.get('installed_pkgs') or []:
     if isinstance(p, str): print('I\t' + p)
+for p in m.get('installed_npm') or []:
+    if isinstance(p, str): print('NI\t' + p)
+for p in m.get('installed_binaries') or []:
+    if isinstance(p, str): print('BI\t' + p)
 for p in m.get('plists_installed') or []:
     if isinstance(p, str): print('L\t' + p)
 v = m.get('colima_profile_created')
@@ -176,6 +182,8 @@ PY
             case "$kind" in
                 M) INSTALL_MODE="$val" ;;
                 I) MANIFEST_INSTALLED_PKGS+=("$val") ;;
+                NI) MANIFEST_INSTALLED_NPM+=("$val") ;;
+                BI) MANIFEST_INSTALLED_BINARIES+=("$val") ;;
                 L) MANIFEST_PLISTS+=("$val") ;;
                 C) MANIFEST_COLIMA_CREATED="$val" ;;
                 N) MANIFEST_COLIMA_PROFILE="$val" ;;
@@ -234,6 +242,9 @@ if [ $LOCAL_MODE -eq 1 ]; then
         else
             log "  - No sygen-owned brew packages to remove (manifest is empty)"
         fi
+        if [ ${#MANIFEST_INSTALLED_NPM[@]} -gt 0 ]; then
+            log "  - npm uninstall -g packages installed by sygen: ${MANIFEST_INSTALLED_NPM[*]}"
+        fi
         if [ "$INSTALL_MODE" = "docker" ]; then
             if [ "$MANIFEST_COLIMA_CREATED" = "1" ]; then
                 log "  - Stop Colima AND delete profile '$MANIFEST_COLIMA_PROFILE' (~27 GB VM image — sygen created it)"
@@ -253,6 +264,14 @@ if [ $LOCAL_MODE -eq 1 ]; then
             log "  - Will NOT remove brew packages — legacy install, no manifest"
         fi
         log "  - Remove known launchd agents (host-updates-check / host-update-runner / host-uninstall-runner / host-metrics / cert-renew / pro.sygen.{core,admin,updater})"
+    fi
+fi
+if [ $LOCAL_MODE -eq 0 ] && [ $USE_MANIFEST -eq 1 ]; then
+    if [ ${#MANIFEST_INSTALLED_NPM[@]} -gt 0 ]; then
+        log "  - npm uninstall -g packages installed by sygen: ${MANIFEST_INSTALLED_NPM[*]}"
+    fi
+    if [ ${#MANIFEST_INSTALLED_BINARIES[@]} -gt 0 ]; then
+        log "  - Remove binaries installed by sygen: ${MANIFEST_INSTALLED_BINARIES[*]}"
     fi
 fi
 log "  - Release the install.sygen.pro subdomain slot (if .env has SYGEN_INSTALL_TOKEN)"
@@ -536,6 +555,57 @@ if [ $LOCAL_MODE -eq 1 ]; then
     fi
 fi
 
+# ---------- 4b. npm globals + standalone binaries (manifest-driven) ----------
+# Cross-platform: claude CLI is npm-installed on both macOS and Linux,
+# whisper-cli is a source-built binary on Linux only. Both are tracked
+# in their own manifest buckets so we never `npm uninstall` or `rm` a
+# binary the user owned before sygen.
+if [ $USE_MANIFEST -eq 1 ]; then
+    if [ ${#MANIFEST_INSTALLED_NPM[@]} -gt 0 ]; then
+        if command -v npm >/dev/null 2>&1; then
+            log "npm uninstall -g (sygen-owned npm globals from manifest)"
+            for pkg in "${MANIFEST_INSTALLED_NPM[@]}"; do
+                # Best-effort. npm exits non-zero if the package is
+                # already gone, which is fine — we just want it gone.
+                if npm uninstall -g "$pkg" >/dev/null 2>&1; then
+                    log "  removed npm global: $pkg"
+                else
+                    warn "  npm uninstall -g $pkg failed or already gone (ignored)"
+                fi
+            done
+        else
+            warn "npm not found — cannot uninstall manifest npm globals: ${MANIFEST_INSTALLED_NPM[*]}"
+        fi
+    fi
+
+    if [ ${#MANIFEST_INSTALLED_BINARIES[@]} -gt 0 ]; then
+        log "Removing binaries installed by sygen (manifest's installed_binaries)"
+        for bpath in "${MANIFEST_INSTALLED_BINARIES[@]}"; do
+            # Same defence-in-depth filters as downloaded_files: reject
+            # root/empty/.. and require an absolute path under one of the
+            # two directories install.sh actually drops binaries into.
+            case "$bpath" in
+                ''|/) warn "  refusing to remove root/empty binary path"; continue ;;
+                *..*) warn "  refusing binary path with .. components: $bpath"; continue ;;
+            esac
+            case "$bpath" in
+                /usr/local/bin/*|/usr/local/sbin/*) ;;
+                *)
+                    warn "  binary path is not under /usr/local/{bin,sbin}, skipping: $bpath"
+                    continue
+                    ;;
+            esac
+            if [ -e "$bpath" ] || [ -L "$bpath" ]; then
+                log "  removing $bpath"
+                rm -f "$bpath" 2>/dev/null \
+                    || warn "    failed to remove $bpath (ignored)"
+            else
+                log "  $bpath already gone, skipping"
+            fi
+        done
+    fi
+fi
+
 # ---------- 5. Optional Cloudflare DNS cleanup ----------
 # Only relevant for installs that reserved DNS directly with CF_* env vars
 # (custom domain or pre-Phase 3). For subdomain-service installs, /api/release
@@ -685,6 +755,14 @@ elif [ $USE_MANIFEST -eq 1 ]; then
     fi
     if [ ${#MANIFEST_DOWNLOADED_PATHS[@]} -gt 0 ]; then
         echo "    - Files downloaded by install.sh (${#MANIFEST_DOWNLOADED_PATHS[@]}, ~$((MANIFEST_DOWNLOADED_TOTAL_BYTES / 1024 / 1024)) MB)"
+    fi
+fi
+if [ $USE_MANIFEST -eq 1 ]; then
+    if [ ${#MANIFEST_INSTALLED_NPM[@]} -gt 0 ]; then
+        echo "    - npm globals installed by sygen: ${MANIFEST_INSTALLED_NPM[*]}"
+    fi
+    if [ ${#MANIFEST_INSTALLED_BINARIES[@]} -gt 0 ]; then
+        echo "    - Binaries installed by sygen: ${MANIFEST_INSTALLED_BINARIES[*]}"
     fi
 fi
 echo ""

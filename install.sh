@@ -27,10 +27,10 @@
 #   ANTHROPIC_API_KEY         injected into core process env
 #   SYGEN_INSTALL_BASE_URL    default: https://install.sygen.pro
 #                             (source of nginx.conf.tmpl + service templates)
-#   SYGEN_CORE_VERSION        default: 1.6.91 — version of `sygen` Python
+#   SYGEN_CORE_VERSION        default: 1.6.93 — version of `sygen` Python
 #                             package to install (or "latest" to query
 #                             GitHub Releases for the latest tag).
-#   SYGEN_ADMIN_VERSION       default: 0.5.62 — version of sygen-admin
+#   SYGEN_ADMIN_VERSION       default: 0.5.64 — version of sygen-admin
 #                             tarball to download from GitHub Releases.
 #   SYGEN_RELEASE_SOURCE      default: github (download wheel + tarball
 #                             from GitHub Releases). "source" = build from
@@ -1035,8 +1035,8 @@ BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://raw.githubusercontent.com/alexeymoro
 # release. SYGEN_RELEASE_SOURCE=source pulls from local checkouts
 # (SYGEN_CORE_SOURCE_DIR / SYGEN_ADMIN_SOURCE_DIR) — the transitional path
 # for a freshly-cut commit that isn't released yet.
-CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.91}"
-ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.62}"
+CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.93}"
+ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.64}"
 RELEASE_SOURCE="${SYGEN_RELEASE_SOURCE:-github}"
 CORE_SOURCE_DIR="${SYGEN_CORE_SOURCE_DIR:-}"
 ADMIN_SOURCE_DIR="${SYGEN_ADMIN_SOURCE_DIR:-}"

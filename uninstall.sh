@@ -400,6 +400,28 @@ if [ $LOCAL_MODE -eq 0 ]; then
             rm -f "/etc/systemd/system/${unit}.service"
         done
         rm -f /etc/systemd/system/sygen-host-uninstall-runner.service
+        # Sweep multi-user.target.wants symlinks pointing at our (now-deleted)
+        # unit files. Without this `systemctl enable` leaves a broken symlink
+        # behind, visible as a `systemctl list-unit-files` warning forever.
+        for unit in sygen-core sygen-admin sygen-updater sygen-host-metrics \
+                    sygen-host-uninstall-runner sygen-backup; do
+            rm -f "/etc/systemd/system/multi-user.target.wants/${unit}.service" \
+                  "/etc/systemd/system/timers.target.wants/${unit}.timer"
+        done
+        # ACME hooks (publicdomain mode only — auto-mode uses Worker-mediated
+        # DNS-01 with the same hooks). install.sh writes them to
+        # /usr/local/sbin/sygen-acme-{auth,cleanup}-hook.sh.
+        rm -f /usr/local/sbin/sygen-acme-auth-hook.sh \
+              /usr/local/sbin/sygen-acme-cleanup-hook.sh
+        # install.sh staging artefacts left behind in /tmp (best-effort).
+        rm -f /tmp/sygen.nginx.tmpl /tmp/sygen-install.log \
+              /tmp/sygen.host-metrics.plist.tmpl \
+              /tmp/sygen-host-metrics.service.tmpl \
+              /tmp/sygen-host-uninstall-runner.service.tmpl \
+              /tmp/sygen-host-metrics.env \
+              /tmp/sygen-heartbeat-probe.json
+        # Drop leftover dangling symlinks systemd may have for these names.
+        systemctl daemon-reload >/dev/null 2>&1 || true
     else
         log "Removing systemd auto-start unit (sygen-compose.service)"
         if systemctl list-unit-files sygen-compose.service >/dev/null 2>&1; then

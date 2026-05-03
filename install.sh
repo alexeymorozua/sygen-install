@@ -27,7 +27,7 @@
 #   ANTHROPIC_API_KEY         injected into core process env
 #   SYGEN_INSTALL_BASE_URL    default: https://install.sygen.pro
 #                             (source of nginx.conf.tmpl + service templates)
-#   SYGEN_CORE_VERSION        default: 1.6.86 — version of `sygen` Python
+#   SYGEN_CORE_VERSION        default: 1.6.87 — version of `sygen` Python
 #                             package to install (or "latest" to query
 #                             GitHub Releases for the latest tag).
 #   SYGEN_ADMIN_VERSION       default: 0.5.60 — version of sygen-admin
@@ -928,7 +928,7 @@ BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://raw.githubusercontent.com/alexeymoro
 # release. SYGEN_RELEASE_SOURCE=source pulls from local checkouts
 # (SYGEN_CORE_SOURCE_DIR / SYGEN_ADMIN_SOURCE_DIR) — the transitional path
 # for a freshly-cut commit that isn't released yet.
-CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.86}"
+CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.87}"
 ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.60}"
 RELEASE_SOURCE="${SYGEN_RELEASE_SOURCE:-github}"
 CORE_SOURCE_DIR="${SYGEN_CORE_SOURCE_DIR:-}"
@@ -2377,6 +2377,38 @@ else
         warn "sygen-updater wheel not yet published at $UPDATER_WHEEL_URL — updater service will be inactive until next release"
         rm -rf "$UPDATER_WHEEL_TMPDIR" 2>/dev/null || true
     fi
+fi
+
+# ----- 5a-bis. Pre-download the multilingual embedding model -----
+# fastembed pulls the ONNX model from HuggingFace on first use; the
+# download is ~220 MB. Doing it here means the first chat after install
+# does not stall on a cold-cache fetch. Failure is non-fatal — the bot
+# falls back to module-dump injection until the cache is warm.
+log "Warming up the multilingual embedding model (~220 MB ONNX cache)"
+# At runtime the bot resolves SYGEN_HOME=$SYGEN_ROOT/data, so the cache
+# lives under <data>/embeddings/model_cache. Pre-create it here so the
+# first chat does not stall on a HuggingFace fetch.
+EMBED_CACHE_DIR="$SYGEN_ROOT/data/embeddings/model_cache"
+mkdir -p "$EMBED_CACHE_DIR"
+SYGEN_EMBED_CACHE="$EMBED_CACHE_DIR" "$VENV_DIR/bin/python" - <<'PYEOF' || warn "embedding model warmup failed — first chat will pay the download cost"
+import os, sys
+try:
+    from fastembed import TextEmbedding
+    cache = os.environ["SYGEN_EMBED_CACHE"]
+    model = TextEmbedding(
+        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        cache_dir=cache,
+    )
+    list(model.embed(["warmup"]))
+    print(f"embedding model cached at {cache}")
+except Exception as exc:
+    print(f"warmup error: {exc}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+# chown so the runtime sygen user owns the cache (otherwise it'd refetch
+# under its own home on first use).
+if [ $LOCAL_MODE -eq 0 ] && id -u sygen >/dev/null 2>&1; then
+    chown -R sygen:sygen "$SYGEN_ROOT/data" 2>/dev/null || true
 fi
 
 # ----- 5b. Admin: download tarball, extract Next.js standalone build -----

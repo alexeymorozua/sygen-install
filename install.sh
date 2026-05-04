@@ -908,6 +908,18 @@ on_exit() {
     if [ -n "${SYGEN_ROOT:-}" ] && [ -d "$SYGEN_ROOT" ]; then
         manifest_write_all || true
     fi
+    # Clean install-time /tmp scratch files on every exit (success or
+    # interrupted). An interrupted install previously left these for
+    # uninstall.sh to clean, but if uninstall ran in degraded mode
+    # (manifest absent / corrupt) the tmp files persisted between
+    # install attempts. install.log is left in place so the operator
+    # has a debug trail — uninstall.sh wipes it explicitly.
+    rm -f /tmp/sygen.nginx.tmpl \
+          /tmp/sygen.host-metrics.plist.tmpl \
+          /tmp/sygen-host-metrics.service.tmpl \
+          /tmp/sygen-host-uninstall-runner.service.tmpl \
+          /tmp/sygen-host-metrics.env \
+          /tmp/sygen-heartbeat-probe.json 2>/dev/null || true
     if [ "$JSON_OUTPUT" = "1" ] && [ "$JSON_DONE" = "0" ] && [ "$code" -ne 0 ]; then
         emit_json_error "install script exited with code $code" "stage=$STAGE"
     fi

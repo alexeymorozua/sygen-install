@@ -553,6 +553,15 @@ if [ $LOCAL_MODE -eq 1 ]; then
             unload_plist "$label"
         done
     fi
+
+    # macOS: install.sh staging artefacts in /tmp (best-effort safety net
+    # for interrupted-install orphans + parity with the Linux branch).
+    rm -f /tmp/sygen.nginx.tmpl /tmp/sygen-install.log \
+          /tmp/sygen.host-metrics.plist.tmpl \
+          /tmp/sygen-host-metrics.service.tmpl \
+          /tmp/sygen-host-uninstall-runner.service.tmpl \
+          /tmp/sygen-host-metrics.env \
+          /tmp/sygen-heartbeat-probe.json 2>/dev/null || true
 fi
 
 # ---------- 4b. npm globals + standalone binaries (manifest-driven) ----------

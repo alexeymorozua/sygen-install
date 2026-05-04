@@ -45,6 +45,7 @@
         <key>SYGEN_UPDATES_STATE</key>     <string>__SYGEN_ROOT__/host_updates/_updates.json</string>
         <key>SYGEN_UPDATER_URL</key>       <string>http://127.0.0.1:__SYGEN_UPDATER_PORT__</string>
         <key>SYGEN_UPDATER_TOKEN</key>     <string>__SYGEN_UPDATER_TOKEN__</string>
+        <key>SYGEN_HOST_TZ</key>           <string>__SYGEN_HOST_TZ__</string>
         <key>ADMIN_INTERNAL_URL</key>      <string>http://127.0.0.1:__SYGEN_ADMIN_PORT__</string>
     </dict>
     <key>RunAtLoad</key>        <true/>

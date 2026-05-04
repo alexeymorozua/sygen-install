@@ -46,6 +46,14 @@
         <key>SYGEN_UPDATER_URL</key>       <string>http://127.0.0.1:__SYGEN_UPDATER_PORT__</string>
         <key>SYGEN_UPDATER_TOKEN</key>     <string>__SYGEN_UPDATER_TOKEN__</string>
         <key>SYGEN_HOST_TZ</key>           <string>__SYGEN_HOST_TZ__</string>
+        <!--
+          Whisper model dir lives under the operator's real $HOME (where
+          deploy_whisper.sh + install.sh's section 5e write it). Since the
+          HOME override above redirects Path.home() into SYGEN_ROOT/data,
+          transcription.py would otherwise fail with "model not found"
+          even after a successful whisper deploy.
+        -->
+        <key>SYGEN_HOST_WHISPER_MODELS_DIR</key> <string>__HOME__/.local/share/whisper-cpp/models</string>
         <key>ADMIN_INTERNAL_URL</key>      <string>http://127.0.0.1:__SYGEN_ADMIN_PORT__</string>
     </dict>
     <key>RunAtLoad</key>        <true/>

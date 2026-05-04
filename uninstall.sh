@@ -562,6 +562,18 @@ if [ $LOCAL_MODE -eq 1 ]; then
           /tmp/sygen-host-uninstall-runner.service.tmpl \
           /tmp/sygen-host-metrics.env \
           /tmp/sygen-heartbeat-probe.json 2>/dev/null || true
+
+    # macOS Tailscale serve cleanup. install.sh in tailscale mode wires
+    # `tailscale serve` mappings (HTTPS via tailnet) that survive the
+    # main uninstall and keep returning 404 for probes against the
+    # tailnet hostname. `tailscale serve --reset` drops ALL serve
+    # mappings on this node — sygen is the only consumer in our
+    # native install, so blanket reset is safe. Best-effort: skip if
+    # tailscale isn't installed or the user isn't logged in.
+    if command -v tailscale >/dev/null 2>&1; then
+        log "Resetting tailscale serve mappings (best-effort)"
+        tailscale serve --reset >/dev/null 2>&1 || true
+    fi
 fi
 
 # ---------- 4b. npm globals + standalone binaries (manifest-driven) ----------

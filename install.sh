@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Sygen install script — NATIVE install (no Docker, no Colima).
 #
-# Linux  (Debian 12+/Ubuntu 22+ VPS): apt, Python 3.14 venv, Node 22, systemd
-#        units (sygen-core, sygen-admin, sygen-updater), nginx vhost + cert
-#        via certbot DNS-01.
+# Since 1.6.105: admin web is no longer installed (frozen sygen-admin
+# repo kept for emergency recovery). Workflow is iOS-app-only with a
+# desktop client in development. Templates pro.sygen.admin.plist /
+# sygen-admin.service still ship in scripts/ for hand-recovery only.
+#
+# Linux  (Debian 12+/Ubuntu 22+ VPS): apt, Python 3.14 venv, Node 22 (for
+#        the Claude CLI only), systemd units (sygen-core, sygen-updater),
+#        nginx vhost + cert via certbot DNS-01.
 # macOS  (Darwin): Homebrew (python@3.14 + node@22 + whisper-cpp), per-user
-#        Python venv at $SYGEN_ROOT/venv, admin tarball at $SYGEN_ROOT/admin,
-#        launchd LaunchAgents (pro.sygen.core, pro.sygen.admin,
-#        pro.sygen.updater). Three sub-modes (selected via SELF_HOSTED_MODE):
+#        Python venv at $SYGEN_ROOT/venv, launchd LaunchAgents
+#        (pro.sygen.core, pro.sygen.updater). Three sub-modes (selected
+#        via SELF_HOSTED_MODE):
 #          - localhost     (default w/o Tailscale) — http://localhost only,
 #                          iPhone cannot reach it (App Transport Security).
 #          - tailscale     (recommended)           — HTTPS on the tailnet via
@@ -30,17 +35,18 @@
 #   SYGEN_CORE_VERSION        default: 1.6.97 — version of `sygen` Python
 #                             package to install (or "latest" to query
 #                             GitHub Releases for the latest tag).
-#   SYGEN_ADMIN_VERSION       default: 0.5.66 — version of sygen-admin
-#                             tarball to download from GitHub Releases.
-#   SYGEN_RELEASE_SOURCE      default: github (download wheel + tarball
-#                             from GitHub Releases). "source" = build from
-#                             a local checkout in SYGEN_CORE_SOURCE_DIR /
-#                             SYGEN_ADMIN_SOURCE_DIR (transitional / dev).
+#   SYGEN_ADMIN_VERSION       default: 0.5.66 — UNUSED since 1.6.105
+#                             (admin web removed); the env stub stays
+#                             so older callers don't error out.
+#   SYGEN_RELEASE_SOURCE      default: github (download wheel from GitHub
+#                             Releases). "source" = build from a local
+#                             checkout in SYGEN_CORE_SOURCE_DIR.
 #   SYGEN_CORE_SOURCE_DIR     when SYGEN_RELEASE_SOURCE=source: path to
 #                             a `sygen` checkout (pip install <dir>).
-#   SYGEN_ADMIN_SOURCE_DIR    when SYGEN_RELEASE_SOURCE=source: path to
-#                             a `sygen-admin` checkout (npm ci && build).
-#   SYGEN_ADMIN_PORT          host port for admin, default 8080.
+#   SYGEN_ADMIN_SOURCE_DIR    UNUSED since 1.6.105 (admin web removed).
+#   SYGEN_ADMIN_PORT          UNUSED since 1.6.105 (admin web removed);
+#                             the placeholder stays in .env so older
+#                             tooling doesn't break, default 8080.
 #   SYGEN_CORE_PORT           host port for core API, default 8081.
 #   SYGEN_INTERAGENT_PORT     localhost port for the inter-agent bus, default 8799.
 #   SYGEN_UPDATER_PORT        localhost port for the updater HTTP server, default 8082.
@@ -64,7 +70,7 @@
 # $HOME/.sygen-local on macOS. Native processes default to these ports
 # (auto-shifted to the next free port if any are already taken):
 #   localhost:8081 — sygen-core   (FastAPI/aiohttp REST + WebSocket)
-#   localhost:8080 — sygen-admin  (Next.js standalone, default SYGEN_ADMIN_PORT)
+#   localhost:8080 — UNUSED since 1.6.105 (was sygen-admin Next.js)
 #   localhost:8082 — sygen-updater (FastAPI, bound to 127.0.0.1, bearer-authed)
 #   localhost:8799 — interagent bus (used by the multi-agent CLI tools)
 #
@@ -1047,7 +1053,9 @@ BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://raw.githubusercontent.com/alexeymoro
 # release. SYGEN_RELEASE_SOURCE=source pulls from local checkouts
 # (SYGEN_CORE_SOURCE_DIR / SYGEN_ADMIN_SOURCE_DIR) — the transitional path
 # for a freshly-cut commit that isn't released yet.
-CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.97}"
+CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.105}"
+# ADMIN_VERSION is unused since 1.6.105 (admin web removed); the var
+# stays so older callers passing SYGEN_ADMIN_VERSION don't error.
 ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.66}"
 RELEASE_SOURCE="${SYGEN_RELEASE_SOURCE:-github}"
 CORE_SOURCE_DIR="${SYGEN_CORE_SOURCE_DIR:-}"
@@ -1407,7 +1415,9 @@ else
     log "macOS: installing native runtime deps (python@3.14, node@22, jq, whisper-cpp)"
     # Native install needs:
     #   python@3.14  — runtime for sygen-core + sygen-updater venv
-    #   node@22      — runtime for sygen-admin (Next.js standalone)
+    #   node@22      — npm runtime for the Claude Code CLI install below
+    #                  (admin web was the prior consumer; removed in 1.6.105
+    #                  but Claude CLI still needs npm)
     #   jq           — used by provision response parsing, .env edits
     #   whisper-cpp  — voice transcription binary (ggml model fetched separately)
     # nginx + pipx (certbot) are publicdomain-only.
@@ -2402,8 +2412,9 @@ chmod 600 "$SYGEN_ROOT/.env"
 STAGE="install"
 
 VENV_DIR="$SYGEN_ROOT/venv"
+# ADMIN_DIR retained as a path constant for plist substitution + uninstall
+# manifest paths; admin web is no longer installed since 1.6.105.
 ADMIN_DIR="$SYGEN_ROOT/admin"
-ADMIN_PREV_DIR="$SYGEN_ROOT/admin-prev"
 VENV_PIP="$VENV_DIR/bin/pip"
 VENV_SYGEN_BIN="$VENV_DIR/bin/sygen"
 VENV_UPDATER_BIN="$VENV_DIR/bin/sygen-updater"
@@ -2600,128 +2611,20 @@ if [ $LOCAL_MODE -eq 0 ] && id -u sygen >/dev/null 2>&1; then
     chown -R sygen:sygen "$SYGEN_ROOT/data" 2>/dev/null || true
 fi
 
-# ----- 5b. Admin: download tarball, extract Next.js standalone build -----
-log "Installing sygen-admin to $ADMIN_DIR"
-# Admin tarball ships the Next.js standalone output (server.js,
-# minimal node_modules, .next/static, public/) — runtime only, no build
-# step on the host.
-# Only mkdir admin-prev — pre-creating $ADMIN_DIR breaks the atomic-swap
-# `mv "$ADMIN_STAGING_DIR" "$ADMIN_DIR"` below: POSIX mv into an existing
-# directory moves source *inside* target rather than renaming, so a
-# fresh install ends up with /srv/sygen/admin/admin-staging-XXXXXX/server.js
-# instead of /srv/sygen/admin/server.js, and sygen-admin fail-loops on
-# "Cannot find module '/srv/sygen/admin/server.js'".
-mkdir -p "$ADMIN_PREV_DIR"
+# ----- 5b. Admin web: REMOVED in 1.6.105 -----
+# Admin web (sygen-admin Next.js) is no longer installed. The user
+# workflow is iOS-app-only (with a desktop client in development); see
+# sygen CHANGELOG 1.6.105 and sygen-admin repo (frozen but kept for
+# emergency recovery). Templates pro.sygen.admin.plist /
+# sygen-admin.service still ship in scripts/ for hand-recovery only.
+#
+# We deliberately do NOT touch an existing $ADMIN_DIR on disk: users
+# upgrading from <1.6.105 keep their running admin until they
+# explicitly remove it (uninstall.sh still cleans it up).
+log "Skipping sygen-admin install (removed from pipeline in 1.6.105 — iOS-app-only workflow)"
 
-# Atomic swap: extract the new tarball into admin-staging, then mv-rename.
-# Keeps the previous admin around at admin-prev/ for one-step rollback.
-# mktemp -d gives us an unpredictable suffix so a same-user attacker can't
-# pre-create the path as a symlink to e.g. ~/.ssh and ride a chown into a
-# privesc. Belt+suspenders: refuse to proceed if the path is a symlink or
-# is no longer a real directory after creation.
-ADMIN_STAGING_DIR="$(mktemp -d "$SYGEN_ROOT/admin-staging-XXXXXX")" \
-    || die "mktemp failed for admin staging dir under $SYGEN_ROOT"
-if [ -L "$ADMIN_STAGING_DIR" ] || [ ! -d "$ADMIN_STAGING_DIR" ]; then
-    die "admin staging dir is not a regular directory: $ADMIN_STAGING_DIR"
-fi
-# P0-1 fix: stack the staging cleanup *and* on_exit so a die() between
-# here and the post-swap trap reset still flushes the manifest. Without
-# the on_exit call the partial install would orphan brew packages on
-# the next re-run (see manifest_load classification logic).
-trap 'rm -rf "$ADMIN_STAGING_DIR" 2>/dev/null || true; on_exit' EXIT
-
-if [ "$RELEASE_SOURCE" = "source" ]; then
-    [ -n "$ADMIN_SOURCE_DIR" ] && [ -d "$ADMIN_SOURCE_DIR" ] \
-        || die "SYGEN_RELEASE_SOURCE=source requires SYGEN_ADMIN_SOURCE_DIR=<path-to-sygen-admin-checkout>"
-    log "Building sygen-admin from local checkout: $ADMIN_SOURCE_DIR (npm ci + npm run build)"
-    pushd "$ADMIN_SOURCE_DIR" >/dev/null \
-        || die "could not enter $ADMIN_SOURCE_DIR"
-    NEXT_PUBLIC_APP_VERSION="$EFFECTIVE_ADMIN_VERSION" \
-        "$NODE_BIN" "$(dirname "$NODE_BIN")/npm" ci --no-audit --no-fund \
-        || die "npm ci failed in $ADMIN_SOURCE_DIR"
-    NEXT_PUBLIC_APP_VERSION="$EFFECTIVE_ADMIN_VERSION" \
-        "$NODE_BIN" "$(dirname "$NODE_BIN")/npm" run build \
-        || die "npm run build failed in $ADMIN_SOURCE_DIR"
-    # Reproduce the tarball layout: standalone bundle + static + public.
-    mkdir -p "$ADMIN_STAGING_DIR/.next"
-    cp -R .next/standalone/. "$ADMIN_STAGING_DIR/"
-    cp -R .next/static "$ADMIN_STAGING_DIR/.next/static"
-    if [ -d public ]; then
-        cp -R public "$ADMIN_STAGING_DIR/public"
-    fi
-    popd >/dev/null
-else
-    ADMIN_TARBALL="sygen-admin-${EFFECTIVE_ADMIN_VERSION}.tar.gz"
-    ADMIN_TARBALL_URL="$(gh_release_url "$RELEASES_GITHUB_REPO" "admin-${EFFECTIVE_ADMIN_VERSION}" "$ADMIN_TARBALL")"
-    ADMIN_TARBALL_DEST="/tmp/sygen-admin-${EFFECTIVE_ADMIN_VERSION}-${$}.tar.gz"
-    # P0-5: probe before download so a missing release surfaces a
-    # clear message (or auto-falls-back to source build).
-    _probe=0
-    gh_release_asset_exists "$ADMIN_TARBALL_URL" || _probe=$?
-    if [ "$_probe" = "1" ]; then
-        if [ -n "$ADMIN_SOURCE_DIR" ] && [ -d "$ADMIN_SOURCE_DIR" ]; then
-            warn "sygen-admin tarball ${EFFECTIVE_ADMIN_VERSION} not published yet — falling back to local checkout at $ADMIN_SOURCE_DIR"
-            pushd "$ADMIN_SOURCE_DIR" >/dev/null \
-                || die "could not enter $ADMIN_SOURCE_DIR"
-            NEXT_PUBLIC_APP_VERSION="$EFFECTIVE_ADMIN_VERSION" \
-                "$NODE_BIN" "$(dirname "$NODE_BIN")/npm" ci --no-audit --no-fund \
-                || die "npm ci failed in $ADMIN_SOURCE_DIR (fallback after missing release)"
-            NEXT_PUBLIC_APP_VERSION="$EFFECTIVE_ADMIN_VERSION" \
-                "$NODE_BIN" "$(dirname "$NODE_BIN")/npm" run build \
-                || die "npm run build failed in $ADMIN_SOURCE_DIR (fallback after missing release)"
-            mkdir -p "$ADMIN_STAGING_DIR/.next"
-            cp -R .next/standalone/. "$ADMIN_STAGING_DIR/"
-            cp -R .next/static "$ADMIN_STAGING_DIR/.next/static"
-            if [ -d public ]; then
-                cp -R public "$ADMIN_STAGING_DIR/public"
-            fi
-            popd >/dev/null
-        else
-            die "sygen-admin tarball not yet published at $ADMIN_TARBALL_URL. Either wait for the release, set SYGEN_ADMIN_VERSION=<existing-tag>, or re-run with SYGEN_RELEASE_SOURCE=source SYGEN_ADMIN_SOURCE_DIR=<path-to-sygen-admin-checkout>"
-        fi
-    else
-        log "Downloading sygen-admin tarball ${EFFECTIVE_ADMIN_VERSION} from GitHub Releases"
-        fetch_release_asset_verified "$ADMIN_TARBALL_URL" "$ADMIN_TARBALL_DEST"
-        log "Extracting admin tarball into staging dir"
-        # --no-same-owner / --no-same-permissions: ignore uid/gid and mode
-        # bits embedded in the tarball. Defensive against a release artefact
-        # that accidentally preserved setuid/setgid bits or a non-root owner
-        # the install user can't replicate.
-        tar --no-same-owner --no-same-permissions \
-            -xzf "$ADMIN_TARBALL_DEST" -C "$ADMIN_STAGING_DIR" \
-            || die "tar -xzf failed for admin tarball"
-        rm -f "$ADMIN_TARBALL_DEST"
-    fi
-fi
-
-# Sanity-check: server.js must exist; otherwise the launchd/systemd
-# unit will fail-loop with no clear cause.
-[ -f "$ADMIN_STAGING_DIR/server.js" ] \
-    || die "admin tarball/build missing server.js — check release artefact layout"
-
-# P1-6 fix: stop-before-swap so launchd's KeepAlive doesn't respawn into
-# the empty $ADMIN_DIR window between the two `mv` calls. Best-effort —
-# on a fresh install the service isn't running yet, so unload/disable
-# silently no-ops. Linux uses systemctl; macOS uses launchctl.
-if [ -d "$ADMIN_DIR" ] && [ -n "$(ls -A "$ADMIN_DIR" 2>/dev/null)" ]; then
-    if [ $LOCAL_MODE -eq 1 ]; then
-        launchctl unload "$HOME/Library/LaunchAgents/pro.sygen.admin.plist" >/dev/null 2>&1 || true
-    else
-        systemctl stop sygen-admin.service >/dev/null 2>&1 || true
-    fi
-    rm -rf "$ADMIN_PREV_DIR"
-    mv "$ADMIN_DIR" "$ADMIN_PREV_DIR"
-fi
-# Belt-and-suspenders: if $ADMIN_DIR exists as an empty dir at this point
-# (re-run after a failed install left a stub, or filesystem leftovers),
-# rmdir it so the next `mv` *renames* staging instead of *moving into*.
-rmdir "$ADMIN_DIR" 2>/dev/null || true
-mv "$ADMIN_STAGING_DIR" "$ADMIN_DIR"
-trap on_exit EXIT  # restore the install-wide trap (the post-swap
-                   # service-install block re-loads/re-starts the unit)
-
-manifest_set_native_paths "$VENV_DIR" "$ADMIN_DIR" \
-    "$EFFECTIVE_CORE_VERSION" "$EFFECTIVE_ADMIN_VERSION"
+manifest_set_native_paths "$VENV_DIR" "" \
+    "$EFFECTIVE_CORE_VERSION" ""
 
 # ---------- 5b. Host metrics daemon (macOS + Linux) ----------
 # Writes live host CPU/RAM/disk usage to $SYGEN_ROOT/host_metrics/state.json
@@ -3139,7 +3042,8 @@ if [ $LOCAL_MODE -eq 1 ]; then
     }
 
     install_native_plist "pro.sygen.core"    "pro.sygen.core.plist"
-    install_native_plist "pro.sygen.admin"   "pro.sygen.admin.plist"
+    # pro.sygen.admin.plist no longer loaded (admin web removed in
+    # 1.6.105). Template stays in scripts/ for hand-recovery.
     # Updater is best-effort — it may not be installed yet (wheel not
     # published). Skip the plist if its binary is missing.
     if [ -x "$VENV_UPDATER_BIN" ]; then
@@ -3179,7 +3083,8 @@ else
     }
 
     install_native_unit "sygen-core.service"
-    install_native_unit "sygen-admin.service"
+    # sygen-admin.service no longer installed (admin web removed in
+    # 1.6.105). Template stays in scripts/ for hand-recovery.
     if [ -x "$VENV_UPDATER_BIN" ]; then
         install_native_unit "sygen-updater.service"
     else
@@ -3189,8 +3094,6 @@ else
     systemctl daemon-reload
     systemctl enable --now sygen-core.service \
         || warn "systemctl enable sygen-core failed — see: journalctl -u sygen-core -n 50"
-    systemctl enable --now sygen-admin.service \
-        || warn "systemctl enable sygen-admin failed — see: journalctl -u sygen-admin -n 50"
     if [ -x "$VENV_UPDATER_BIN" ]; then
         systemctl enable --now sygen-updater.service \
             || warn "systemctl enable sygen-updater failed (non-fatal)"
@@ -3200,7 +3103,7 @@ fi
 # ---------- 6b. macOS smoke-test (Linux uses nginx + Let's Encrypt to verify) ----------
 if [ $LOCAL_MODE -eq 1 ]; then
     STAGE="smoke"
-    log "macOS: smoke-testing endpoints (admin :${SYGEN_ADMIN_PORT}, core :${SYGEN_CORE_PORT})"
+    log "macOS: smoke-testing core :${SYGEN_CORE_PORT}"
     smoke_ok=0
     # NOTE: -f turns 4xx/5xx into curl-exit-1, which then triggers the
     # `|| echo 000` branch — and curl has ALREADY printed the status code
@@ -3208,30 +3111,25 @@ if [ $LOCAL_MODE -eq 1 ]; then
     # That broke the case-match on perfectly healthy services. Drop -f
     # so HTTP statuses go through unchanged; the OR-fallback only fires
     # on actual connect failures (where -w produces nothing).
+    core_code=000
     for i in $(seq 1 30); do
-        admin_ok=0
-        core_ok=0
-        # Admin Next server returns 200 on /, but during boot it may 404
-        # /_next assets — accept any non-5xx as "alive".
-        admin_code=$(curl -sS -o /dev/null -w '%{http_code}' \
-            "http://localhost:${SYGEN_ADMIN_PORT}" 2>/dev/null || echo "000")
-        case "$admin_code" in 200|301|302|404) admin_ok=1 ;; esac
         # Core /api/system/status is unauthenticated-discoverable: returns
         # 200 if you have a token, 401 otherwise. Both prove the server
         # is up and routing — only a connect failure is a smoke-test fail.
         core_code=$(curl -sS -o /dev/null -w '%{http_code}' \
             "http://localhost:${SYGEN_CORE_PORT}/api/system/status" 2>/dev/null || echo "000")
-        case "$core_code" in 200|401|403) core_ok=1 ;; esac
-        if [ "$admin_ok" -eq 1 ] && [ "$core_ok" -eq 1 ]; then
-            log "  endpoints responding (admin=$admin_code core=$core_code)"
-            smoke_ok=1
-            break
-        fi
+        case "$core_code" in
+            200|401|403)
+                log "  core endpoint responding (core=$core_code)"
+                smoke_ok=1
+                break
+                ;;
+        esac
         sleep 2
     done
     if [ "$smoke_ok" -ne 1 ]; then
-        warn "Smoke test failed after 60s: admin=$admin_code core=$core_code."
-        warn "Check: 'launchctl list | grep pro.sygen' and tail $SYGEN_ROOT/logs/{core,admin}.log"
+        warn "Smoke test failed after 60s: core=$core_code."
+        warn "Check: 'launchctl list | grep pro.sygen.core' and tail $SYGEN_ROOT/logs/core.log"
     fi
 fi
 
@@ -3449,11 +3347,14 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     # Tailscale Serve strips the prefix on the way to the backend. Sygen
     # core expects /api/auth/login etc., not /auth/login, so without the
     # trailing path the proxy returns 404 on every mobile login request.
-    # The catch-all "/" mapping has no path to preserve and is fine bare.
+    # Pre-1.6.105 a catch-all "/" mapping forwarded the bare URL to admin
+    # web on port 8080. Admin is no longer installed, so we skip the
+    # catch-all — hitting the bare tailnet URL now returns 404 from
+    # tailscale serve. iOS / desktop clients hit only /api/, /ws/,
+    # /upload so they're unaffected.
     _ts_run "serve /api/"   1 serve --bg --set-path=/api/   "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
     _ts_run "serve /ws/"    1 serve --bg --set-path=/ws/    "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
     _ts_run "serve /upload" 0 serve --bg --set-path=/upload "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
-    _ts_run "serve /"       1 serve --bg "http://127.0.0.1:${SYGEN_ADMIN_PORT}"
 fi
 
 # ---------- 8. Wait for admin bootstrap ----------
@@ -3574,7 +3475,7 @@ fi
 # Native services installed in stage 6 ("services") are already wired for
 # autostart: macOS LaunchAgents have RunAtLoad+KeepAlive, systemd units
 # have WantedBy=multi-user.target. No additional work needed.
-log "Auto-start: services already enabled (sygen-core/admin/updater)"
+log "Auto-start: services already enabled (sygen-core/updater)"
 
 # ---------- 10. Nightly backups (Linux only) ----------
 if [ $LOCAL_MODE -eq 0 ]; then
@@ -3691,16 +3592,17 @@ if [ "$JSON_OUTPUT" = "1" ]; then
     else
         MODE="custom"
     fi
-    printf '{"ok":true,"mode":%s,"install_mode":"native","fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_version":%s,"admin_version":%s,"data_dir":%s,"venv_dir":%s,"admin_dir":%s,"install_token":%s}\n' \
+    # admin_version / admin_dir kept as empty strings for backward
+    # compat with the iOS deploy wizard (CONTRACT_ios_vps_deploy_wizard.md
+    # still names the keys); admin web is not installed since 1.6.105.
+    printf '{"ok":true,"mode":%s,"install_mode":"native","fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_version":%s,"admin_version":"","data_dir":%s,"venv_dir":%s,"admin_dir":"","install_token":%s}\n' \
         "$(json_escape "$MODE")" \
         "$(json_escape "$FQDN")" \
         "$(json_escape "$ADMIN_PASS")" \
         "$(json_escape "$ADMIN_URL")" \
         "$(json_escape "$EFFECTIVE_CORE_VERSION")" \
-        "$(json_escape "$EFFECTIVE_ADMIN_VERSION")" \
         "$(json_escape "$SYGEN_ROOT/data")" \
         "$(json_escape "$VENV_DIR")" \
-        "$(json_escape "$ADMIN_DIR")" \
         "$IT_JSON"
     exit 0
 fi
@@ -3742,7 +3644,6 @@ fi
 cat <<DONE
 
   Core:        sygen $EFFECTIVE_CORE_VERSION  ($VENV_DIR/bin/sygen)
-  Admin:       sygen-admin $EFFECTIVE_ADMIN_VERSION  ($ADMIN_DIR/server.js)
   Data dir:    $SYGEN_ROOT/data
   Env file:    $SYGEN_ROOT/.env
 DONE
@@ -3750,13 +3651,13 @@ DONE
 if [ $LOCAL_MODE -eq 0 ]; then
     cat <<DONE
   Backups:     /var/backups/sygen/sygen-*.tar.gz  (daily, 7-day retention)
-  Auto-start:  enabled — systemd units start core/admin/updater on every boot
-               Disable: systemctl disable --now sygen-core sygen-admin sygen-updater
+  Auto-start:  enabled — systemd units start core/updater on every boot
+               Disable: systemctl disable --now sygen-core sygen-updater
 
-  Status:      systemctl status sygen-core sygen-admin sygen-updater
+  Status:      systemctl status sygen-core sygen-updater
   Logs:        journalctl -u sygen-core -f
-  Restart:     systemctl restart sygen-core sygen-admin
-  Upgrade:     POST to the updater's /apply endpoint via the admin UI
+  Restart:     systemctl restart sygen-core
+  Upgrade:     POST to the updater's /apply endpoint from the iOS app
                (or manually: $VENV_PIP install --upgrade sygen==<new>)
 DONE
 else
@@ -3764,14 +3665,14 @@ else
   Mode:        macOS / $SELF_HOSTED_SUBMODE
   Backups:     not configured on macOS (manual tar of $SYGEN_ROOT)
 
-  Auto-start:  enabled — LaunchAgents pro.sygen.{core,admin,updater} start
+  Auto-start:  enabled — LaunchAgents pro.sygen.{core,updater} start
                at login and stay running (KeepAlive=true).
-               Disable: launchctl unload ~/Library/LaunchAgents/pro.sygen.{core,admin,updater}.plist
+               Disable: launchctl unload ~/Library/LaunchAgents/pro.sygen.{core,updater}.plist
 
   Status:      launchctl list | grep pro.sygen
-  Logs:        tail -F $SYGEN_ROOT/logs/{core,admin,updater}.log
+  Logs:        tail -F $SYGEN_ROOT/logs/{core,updater}.log
   Restart:     launchctl kickstart -k gui/\$(id -u)/pro.sygen.core
-  Upgrade:     POST to the updater's /apply endpoint via the admin UI
+  Upgrade:     POST to the updater's /apply endpoint from the iOS app
 DONE
     case "$SELF_HOSTED_SUBMODE" in
         tailscale)

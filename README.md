@@ -262,25 +262,30 @@ The apply path skips restarting the updater; a manual `pip install
 --upgrade sygen-updater` (or a fresh `install.sh` run, which rebuilds
 the venv from scratch) is the path to update the updater binary itself.
 
-### When the pinned release is not yet published
+### Picking a release
 
-The defaults in `install.sh` (`SYGEN_CORE_VERSION` /
-`SYGEN_ADMIN_VERSION`) point at the version the next git tag will
-produce. If you run `install.sh` *before* that tag is created, GitHub
-returns 404 for the wheel/tarball download and the installer dies with
-a clear message. Two ways to recover:
+The default for `SYGEN_CORE_VERSION` is `latest` — `install.sh` queries
+the public mirror at `alexeymorozua/sygen-releases` and resolves to the
+newest `core-X.Y.Z` tag at install time. The resolved version is
+written to `.env`, so re-runs are stable until the operator wipes the
+file or explicitly re-passes `SYGEN_CORE_VERSION=latest`.
+
+To pin a specific version (e.g. for reproducible deployments or to
+roll back), set `SYGEN_CORE_VERSION` explicitly:
 
 ```bash
-# 1) pin to the most recent published tag
-SYGEN_CORE_VERSION=1.6.74 SYGEN_ADMIN_VERSION=0.5.54 \
-    bash install.sh
+# pin to a specific published tag
+SYGEN_CORE_VERSION=1.6.127 bash install.sh
 
-# 2) build from a local checkout (transitional / dev)
+# build from a local checkout (transitional / dev)
 SYGEN_RELEASE_SOURCE=source \
     SYGEN_CORE_SOURCE_DIR=$HOME/Agents/sygen \
-    SYGEN_ADMIN_SOURCE_DIR=$HOME/sygen-admin \
     bash install.sh
 ```
+
+If the GitHub API is unreachable while resolving `latest`, the
+installer aborts with a workaround message pointing at the explicit-pin
+escape hatch above.
 
 Every wheel and tarball pulled from GitHub Releases is SHA256-verified
 against an `.sha256` sidecar published alongside the asset. A missing

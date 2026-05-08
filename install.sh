@@ -32,9 +32,9 @@
 #   ANTHROPIC_API_KEY         injected into core process env
 #   SYGEN_INSTALL_BASE_URL    default: https://install.sygen.pro
 #                             (source of nginx.conf.tmpl + service templates)
-#   SYGEN_CORE_VERSION        default: 1.6.97 — version of `sygen` Python
-#                             package to install (or "latest" to query
-#                             GitHub Releases for the latest tag).
+#   SYGEN_CORE_VERSION        default: latest — query GitHub Releases for
+#                             the newest core-X.Y.Z tag. Pin to a specific
+#                             version (e.g. 1.6.127) to freeze installs.
 #   SYGEN_ADMIN_VERSION       default: 0.5.66 — UNUSED since 1.6.105
 #                             (admin web removed); the env stub stays
 #                             so older callers don't error out.
@@ -1053,7 +1053,7 @@ BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://raw.githubusercontent.com/alexeymoro
 # release. SYGEN_RELEASE_SOURCE=source pulls from local checkouts
 # (SYGEN_CORE_SOURCE_DIR / SYGEN_ADMIN_SOURCE_DIR) — the transitional path
 # for a freshly-cut commit that isn't released yet.
-CORE_VERSION="${SYGEN_CORE_VERSION:-1.6.105}"
+CORE_VERSION="${SYGEN_CORE_VERSION:-latest}"
 # ADMIN_VERSION is unused since 1.6.105 (admin web removed); the var
 # stays so older callers passing SYGEN_ADMIN_VERSION don't error.
 ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.66}"
@@ -2238,12 +2238,60 @@ get_env() {
     printf '%s' "$default"
 }
 
+# Resolve "latest" → newest core-X.Y.Z tag from the public mirror repo.
+# Output: bare X.Y.Z on stdout (no "core-" prefix). Returns non-zero on
+# network/parse failure so callers can surface an actionable error
+# instead of attempting to download core-latest (which 404s).
+#
+# We hit the /releases collection (not /releases/latest) because the
+# mirror holds tags for both core-X.Y.Z and admin-X.Y.Z; /latest may
+# point at an admin tag. Filter by the core- prefix and pick max
+# semver. Python is required by sygen anyway, so it's safe to assume
+# python3 is available (the venv setup later requires it explicitly).
+resolve_latest_core_version() {
+    local api_url='https://api.github.com/repos/alexeymorozua/sygen-releases/releases?per_page=100'
+    local response
+    response=$(curl -fsSL --max-time 15 "$api_url" 2>/dev/null) || return 1
+    printf '%s' "$response" | python3 -c '
+import json, re, sys
+try:
+    releases = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+versions = []
+for r in releases:
+    tag = r.get("tag_name", "")
+    m = re.match(r"^core-(\d+)\.(\d+)\.(\d+)$", tag)
+    if m:
+        versions.append((tuple(int(x) for x in m.groups()), tag[5:]))
+if not versions:
+    sys.exit(3)
+versions.sort(reverse=True)
+print(versions[0][1])
+' 2>/dev/null || return 1
+}
+
 # Version pins: env var > existing .env > computed default. Lets an operator
 # stay on a specific version across re-runs (and gives the updater a stable
 # "currently installed" reference). Stored in .env so launchd/systemd units
 # inherit them and the updater can trust them as ground truth.
 EFFECTIVE_CORE_VERSION=$(get_env SYGEN_CORE_VERSION "$CORE_VERSION")
 EFFECTIVE_ADMIN_VERSION=$(get_env SYGEN_ADMIN_VERSION "$ADMIN_VERSION")
+
+# Resolve the "latest" sentinel to a concrete version. Done before the
+# .env write below so the resolved value is what gets stored — once
+# installed, re-runs see a numeric pin in .env and the resolution
+# only re-fires when the operator explicitly passes
+# SYGEN_CORE_VERSION=latest in process env (or wipes .env).
+if [ "$EFFECTIVE_CORE_VERSION" = "latest" ]; then
+    log "Resolving 'latest' against alexeymorozua/sygen-releases..."
+    _resolved_core=$(resolve_latest_core_version) || _resolved_core=""
+    if [ -z "$_resolved_core" ]; then
+        die "could not resolve 'latest' core version (network/GitHub API failure or no core-X.Y.Z tags found). Workaround: set SYGEN_CORE_VERSION=<version> explicitly (see https://github.com/alexeymorozua/sygen-releases/releases for available tags)"
+    fi
+    EFFECTIVE_CORE_VERSION="$_resolved_core"
+    log "Resolved 'latest' → core $EFFECTIVE_CORE_VERSION"
+fi
 # Secrets: existing wins; otherwise generate or pull from process env.
 EFFECTIVE_UPDATER_TOKEN=$(get_env SYGEN_UPDATER_TOKEN "$(openssl rand -hex 32)")
 EFFECTIVE_ANTHROPIC_KEY=$(get_env ANTHROPIC_API_KEY "${ANTHROPIC_API_KEY:-}")

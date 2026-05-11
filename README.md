@@ -230,7 +230,9 @@ to `UNKNOWN_ERROR`.
 | `APT_LOCK_HELD`              | `deps`    | Linux: `apt-get` couldn't acquire dpkg lock after 10 min              |
 | `TAILSCALE_OFFLINE`          | `network` | `tailscale` CLI missing OR daemon not running OR device not logged in |
 | `TAILSCALE_SERVE_FAILED`     | `network` | `tailscale serve` setup commands returned 0 but the resulting `serve status` shows no port 443 binding — daemon silently dropped the config (re-run install.sh after `tailscale serve reset`) |
-| `PORT_IN_USE`                | `bind`    | Operator-overridden port already in use, OR no free port in range     |
+| `TAILSCALE_HTTPS_DISABLED`   | `network` | Tailnet HTTPS Certificates feature is off — detected proactively via `tailscale cert <fqdn>` before serve setup. Fix: open <https://login.tailscale.com/admin/dns> and toggle on `HTTPS Certificates` under MagicDNS |
+| `PORT_IN_USE`                | `bind`    | Operator-overridden port already in use, OR override collides with another sygen service that already claimed it in this install |
+| `PORT_RANGE_EXHAUSTED`       | `bind`    | No free port in `default..default+100` for a service — every port is either occupied by an unrelated process or already claimed by another sygen service in this install (rare; usually means an unrelated daemon is squatting the range) |
 | `CERT_FAILED`                | `cert`    | TLS cert issuance failed — default for `_release_and_die` (Worker subdomain reservation released; `retry_after_hours` populated) |
 | `INSTALLER_MISCONFIGURED`    | `cert`    | certbot rejected its own arguments before reaching any CA (install.sh bug, not a CA issue) |
 | `TLS_RATE_LIMITED`           | `cert`    | All three CAs (Let's Encrypt / ZeroSSL / Google Trust Services) refused issuance — likely rate-limited everywhere |

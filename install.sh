@@ -245,6 +245,14 @@ PORT_INTERAGENT_OVERRIDE="${SYGEN_INTERAGENT_PORT:-}"
 PORT_UPDATER_OVERRIDE="${SYGEN_UPDATER_PORT:-}"
 unset SYGEN_CORE_PORT SYGEN_ADMIN_PORT SYGEN_INTERAGENT_PORT SYGEN_UPDATER_PORT
 
+# Ports already handed out in this install run. _resolve_port reads this
+# (from the parent shell, since it runs in a $(...) subshell) and never
+# returns a port that's already on the list. Without this, two services
+# whose defaults are both occupied would auto-shift onto the same free
+# port — exactly the silent collision that wedged core + updater on 8083
+# in Алексей's mom 2026-05-11 install.
+SYGEN_ASSIGNED_PORTS=()
+
 _port_in_use() {
     local port="$1"
     if command -v lsof >/dev/null 2>&1; then
@@ -267,12 +275,24 @@ PY
     fi
 }
 
+_port_already_assigned() {
+    local needle="$1"
+    local p
+    if [ "${#SYGEN_ASSIGNED_PORTS[@]:-0}" -eq 0 ]; then
+        return 1
+    fi
+    for p in "${SYGEN_ASSIGNED_PORTS[@]}"; do
+        [ "$p" = "$needle" ] && return 0
+    done
+    return 1
+}
+
 _find_free_port() {
     local start="$1"
     local port="$start"
     local max=$((start + 100))
     while [ "$port" -le "$max" ]; do
-        if ! _port_in_use "$port"; then
+        if ! _port_already_assigned "$port" && ! _port_in_use "$port"; then
             printf '%s' "$port"
             return 0
         fi
@@ -291,6 +311,12 @@ _resolve_port() {
     if [ -n "$override" ]; then
         if ! [[ "$override" =~ ^[0-9]+$ ]] || [ "$override" -lt 1 ] || [ "$override" -gt 65535 ]; then
             die "SYGEN_${label}_PORT='$override' is not a valid port (1-65535)"
+        fi
+        if _port_already_assigned "$override"; then
+            emit_error "PORT_IN_USE" "bind" \
+                "SYGEN_${label}_PORT=$override collides with another sygen service that already claimed that port in this install — pick a different value for the override" \
+                "" \
+                ""
         fi
         if _port_in_use "$override"; then
             emit_error "PORT_IN_USE" "bind" \
@@ -323,14 +349,21 @@ _resolve_port() {
             ;;
     esac
     if [ -n "$claimed" ] && [[ "$claimed" =~ ^[0-9]+$ ]]; then
-        printf '%s' "$claimed"
-        return
+        # Self-heal: a prior broken install may have recorded the same
+        # port for two services (the pre-fix collision we're guarding
+        # against). If another service in this run already grabbed the
+        # recorded value, drop it and fall through to a fresh walk so
+        # the second service moves to a unique port.
+        if ! _port_already_assigned "$claimed"; then
+            printf '%s' "$claimed"
+            return
+        fi
     fi
 
     # Fresh install: walk for the first free port from default.
     if ! port="$(_find_free_port "$default")"; then
-        emit_error "PORT_IN_USE" "bind" \
-            "no free port found for ${label} in range ${default}..$((default + 100))" \
+        emit_error "PORT_RANGE_EXHAUSTED" "bind" \
+            "no free port found for ${label} in range ${default}..$((default + 100)) — every port in the range is either occupied by another process or already claimed by a sygen service in this install" \
             "" \
             ""
     fi
@@ -1418,9 +1451,13 @@ manifest_load "$SYGEN_MANIFEST_PATH"
 # (or any unrelated daemon — Grafana, Postgres, dev sygen) doesn't
 # silently collide on the default ports.
 SYGEN_CORE_PORT="$(_resolve_port CORE       8081 "$PORT_CORE_OVERRIDE")"
+SYGEN_ASSIGNED_PORTS+=("$SYGEN_CORE_PORT")
 SYGEN_ADMIN_PORT="$(_resolve_port ADMIN     8080 "$PORT_ADMIN_OVERRIDE")"
+SYGEN_ASSIGNED_PORTS+=("$SYGEN_ADMIN_PORT")
 SYGEN_INTERAGENT_PORT="$(_resolve_port INTERAGENT 8799 "$PORT_INTERAGENT_OVERRIDE")"
+SYGEN_ASSIGNED_PORTS+=("$SYGEN_INTERAGENT_PORT")
 SYGEN_UPDATER_PORT="$(_resolve_port UPDATER  8082 "$PORT_UPDATER_OVERRIDE")"
+SYGEN_ASSIGNED_PORTS+=("$SYGEN_UPDATER_PORT")
 
 _port_note() {
     # $1=label, $2=resolved, $3=default, $4=override
@@ -3537,10 +3574,16 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
         # `tailscale serve` with messages like "your tailnet does not
         # support HTTPS", "TLS not configured", "no certificate". The user
         # must enable HTTPS Certificates in the tailnet admin DNS panel.
-        # Match case-insensitively because Tailscale wording shifts between
-        # versions.
-        if printf '%s' "$out" | grep -qiE 'https.*not.*(supported|configured|enabled)|tls.*not.*(configured|available)|certificate.*not.*(configured|available)|enable.*https.*certificate|ssl.*not.*configured'; then
-            die "Tailnet HTTPS Certificates feature is not enabled. Open https://login.tailscale.com/admin/dns and turn on 'HTTPS Certificates' (under MagicDNS), then re-run the install. Raw output: $(printf '%s' "$out" | head -n3 | tr '\n' ' ')"
+        # Match case-insensitively and tolerate either "https.*not" or
+        # "not.*https" word order — Tailscale wording shifts between
+        # versions (a 2026-05-11 install regressed past the old regex
+        # because the daemon now emits "your tailnet does not have HTTPS
+        # enabled" with "not" before "https").
+        if printf '%s' "$out" | grep -qiE 'https.*not.*(supported|configured|enabled|available)|not.*(have|support).*https|https.*disabled|tls.*not.*(configured|available)|certificate.*not.*(configured|available)|enable.*https.*certificate|ssl.*not.*configured'; then
+            emit_error "TAILSCALE_HTTPS_DISABLED" "network" \
+                "Tailnet HTTPS Certificates feature is not enabled — the iPhone Sygen app needs HTTPS to connect. Raw output: $(printf '%s' "$out" | head -n3 | tr '\n' ' ')" \
+                "Open https://login.tailscale.com/admin/dns and turn on 'HTTPS Certificates' (under MagicDNS), then re-run install.sh" \
+                "https://tailscale.com/kb/1153/enabling-https"
         fi
 
         if [ $rc -ne 0 ]; then
@@ -3555,6 +3598,37 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
         fi
         return 0
     }
+
+    # Proactive HTTPS Certificates pre-check: `tailscale cert <fqdn>` is the
+    # canonical probe for the tailnet HTTPS feature. It fails immediately
+    # with a clear marker when HTTPS is disabled, and a successful run
+    # caches a cert that `tailscale serve --https=443` reuses — so we're
+    # not paying for a second cert acquisition. Without this, the reactive
+    # detection inside _ts_run was the only safety net, and a 2026-05-11
+    # install slid through serve setup on a tailnet without HTTPS enabled:
+    # serve --bg returned 0, status briefly showed 443, but the iOS app
+    # could never connect because cert issuance silently failed.
+    log "Pre-check: tailnet HTTPS Certificates feature ($FQDN)"
+    cert_probe_dir="$(mktemp -d 2>/dev/null || echo "/tmp/sygen-tlscheck-$$")"
+    mkdir -p "$cert_probe_dir"
+    cert_probe_out="$(cd "$cert_probe_dir" && $TAILSCALE_SUDO "$TAILSCALE_BIN" cert "$FQDN" </dev/null 2>&1)"
+    cert_probe_rc=$?
+    # Cert files may be owned by root (Linux sudo path); remove with the
+    # same privilege we created them under.
+    $TAILSCALE_SUDO rm -rf "$cert_probe_dir" 2>/dev/null || rm -rf "$cert_probe_dir" 2>/dev/null || true
+    if [ $cert_probe_rc -ne 0 ]; then
+        if printf '%s' "$cert_probe_out" | grep -qiE 'https.*not.*(enabled|supported|configured|available)|not.*(have|support).*https|https.*disabled|enable.*https.*certificate|tls.*not.*(configured|available)|ssl.*not.*configured|certificate.*not.*(configured|available)'; then
+            emit_error "TAILSCALE_HTTPS_DISABLED" "network" \
+                "Tailscale HTTPS Certificates feature is not enabled on your tailnet — the iPhone Sygen app needs HTTPS to connect. Tailscale output: $(printf '%s' "$cert_probe_out" | head -n2 | tr '\n' ' ')" \
+                "Open https://login.tailscale.com/admin/dns and turn on 'HTTPS Certificates' under MagicDNS, then re-run install.sh" \
+                "https://tailscale.com/kb/1153/enabling-https"
+        fi
+        # Other cert failures (transient ACME, DNS lag, daemon not yet
+        # logged in) are non-fatal at the pre-check stage — downstream
+        # serve setup will retry and surface a structured error if cert
+        # acquisition is truly broken. Just leave a breadcrumb.
+        warn "tailscale cert $FQDN pre-check returned $cert_probe_rc (non-fatal): $(printf '%s' "$cert_probe_out" | head -n1)"
+    fi
 
     # Wipe any prior config so re-runs end up with the same routes we want.
     # 'reset' is a no-op when no serve config exists.

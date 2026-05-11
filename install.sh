@@ -3576,6 +3576,43 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     _ts_run "serve /api/"   1 serve --bg --set-path=/api/   "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
     _ts_run "serve /ws/"    1 serve --bg --set-path=/ws/    "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
     _ts_run "serve /upload" 0 serve --bg --set-path=/upload "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
+
+    # ---------- Verify tailscale serve config actually applied ----------
+    # Real-world failure mode (Алексей's mom, 2026-05-11): all three
+    # `serve --bg` calls returned 0, the installer printed the banner,
+    # but `tailscale serve status` was empty afterwards — the GUI app
+    # silently dropped the config and port 443 never started listening.
+    # We re-query the daemon, retry once with a reset, and surface a
+    # structured error so the iOS wizard can show an actionable card.
+    sleep 1
+    serve_status=$($TAILSCALE_SUDO "$TAILSCALE_BIN" serve status </dev/null 2>&1 || true)
+    if [ -z "$serve_status" ] || ! printf '%s' "$serve_status" | grep -q '443'; then
+        log "tailscale serve status empty after setup — retrying once"
+        $TAILSCALE_SUDO "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 </dev/null || true
+        sleep 1
+        _ts_run "serve /api/ (retry)"   1 serve --bg --set-path=/api/   "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
+        _ts_run "serve /ws/ (retry)"    1 serve --bg --set-path=/ws/    "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
+        _ts_run "serve /upload (retry)" 0 serve --bg --set-path=/upload "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
+        sleep 1
+        serve_status=$($TAILSCALE_SUDO "$TAILSCALE_BIN" serve status </dev/null 2>&1 || true)
+    fi
+    if [ -z "$serve_status" ] || ! printf '%s' "$serve_status" | grep -q '443'; then
+        emit_error "TAILSCALE_SERVE_FAILED" "network" \
+            "Tailscale serve config did not apply — iPhone Sygen app will not be able to reach this Mac. Daemon accepted the setup commands but 'tailscale serve status' shows no port 443 binding." \
+            "$TAILSCALE_SUDO $TAILSCALE_BIN serve reset && $TAILSCALE_SUDO $TAILSCALE_BIN serve --bg --set-path=/api/ http://127.0.0.1:${SYGEN_CORE_PORT}/api/" \
+            "https://tailscale.com/kb/1242/tailscale-serve"
+    fi
+
+    # Endpoint smoke-test: serve status can claim a binding before the
+    # listener is actually accepting connections. Non-fatal — just warn
+    # if /api/health doesn't respond, so the operator can debug without
+    # blocking the whole install on a transient race.
+    sleep 2
+    if ! curl -sf -k --max-time 5 "https://$FQDN/api/health" >/dev/null 2>&1; then
+        warn "Tailscale endpoint check failed: https://$FQDN/api/health did not respond."
+        warn "  Verify manually:  curl -k https://$FQDN/api/health"
+        warn "  Re-apply serve:   $TAILSCALE_SUDO $TAILSCALE_BIN serve reset && re-run install.sh"
+    fi
 fi
 
 # ---------- 8. Wait for admin bootstrap ----------
@@ -3825,6 +3862,34 @@ if [ "$JSON_OUTPUT" = "1" ]; then
         "$(json_escape "$SYGEN_ROOT/data")" \
         "$(json_escape "$VENV_DIR")" \
         "$IT_JSON"
+
+    # When --json-output is invoked from a Terminal (debugging,
+    # operator-driven re-install), the wizard parses the single JSON
+    # line above and a human reader sees nothing useful. Stdout is
+    # not a TTY when the iOS launcher pipes us via nohup, so the
+    # `[ -t 1 ]` gate keeps the wizard's parse stream clean while
+    # giving Terminal users the credentials they need.
+    if [ -t 1 ] && [ -n "$ADMIN_PASS" ]; then
+        cat <<EOF
+
+══════════════════════════════════════════════════════════
+ Sygen core installed successfully
+──────────────────────────────────────────────────────────
+ Server URL:     $ADMIN_URL
+ Admin login:    admin
+ Admin password: $ADMIN_PASS
+
+ iPhone setup:
+   1. Install Tailscale from the App Store
+   2. Sign in to the same Tailscale account as this Mac
+   3. Open the Sygen app → enter the URL + credentials above
+
+ To re-display this password later (one-time file, delete after login):
+   cat $SYGEN_ROOT/data/_secrets/.initial_admin_password
+══════════════════════════════════════════════════════════
+
+EOF
+    fi
     exit 0
 fi
 
@@ -3937,3 +4002,36 @@ Claude Code CLI auth
                         — creds persist in $SYGEN_ROOT/.claude/.
 =====================================================================
 DONE
+
+# Prominent credentials box — printed LAST so it's the final thing on
+# the operator's screen. Mom-of-Алексей test case (2026-05-11): the
+# "Admin pass:" line above got lost in the wall of post-install text;
+# this box bookends the install with the two facts the user actually
+# needs (URL + password).
+if [ -n "$ADMIN_PASS" ]; then
+    cat <<DONE
+
+══════════════════════════════════════════════════════════
+ Sygen core installed successfully
+──────────────────────────────────────────────────────────
+ Server URL:     $ADMIN_URL
+ Admin login:    admin
+ Admin password: $ADMIN_PASS
+
+DONE
+    if [ $LOCAL_MODE -eq 1 ] && [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
+        cat <<DONE
+ iPhone setup:
+   1. Install Tailscale from the App Store
+   2. Sign in to the same Tailscale account as this Mac
+   3. Open the Sygen app → enter the URL + credentials above
+
+DONE
+    fi
+    cat <<DONE
+ To re-display this password later (one-time file, delete after login):
+   cat $SYGEN_ROOT/data/_secrets/.initial_admin_password
+══════════════════════════════════════════════════════════
+
+DONE
+fi

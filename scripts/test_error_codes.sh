@@ -143,6 +143,17 @@ JSON="$(run_emit TAILSCALE_OFFLINE network \
 assert_field "$JSON" error_code TAILSCALE_OFFLINE
 assert_field "$JSON" stage network
 
+# ---------- Test 4b: TAILSCALE_SERVE_FAILED ----------
+echo "Test: TAILSCALE_SERVE_FAILED"
+JSON="$(run_emit TAILSCALE_SERVE_FAILED network \
+    "Tailscale serve config did not apply." \
+    'sudo tailscale serve reset' \
+    'https://tailscale.com/kb/1242/tailscale-serve')"
+assert_field "$JSON" error_code TAILSCALE_SERVE_FAILED
+assert_field "$JSON" stage network
+assert_field "$JSON" fix_command 'sudo tailscale serve reset'
+assert_field "$JSON" fix_docs_url 'https://tailscale.com/kb/1242/tailscale-serve'
+
 # ---------- Test 5: APT_LOCK_HELD ----------
 echo "Test: APT_LOCK_HELD"
 JSON="$(run_emit APT_LOCK_HELD deps \

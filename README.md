@@ -229,6 +229,7 @@ to `UNKNOWN_ERROR`.
 | `SUDO_REQUIRED`              | `deps`    | Linux: installer invoked without root (`EUID != 0`)                   |
 | `APT_LOCK_HELD`              | `deps`    | Linux: `apt-get` couldn't acquire dpkg lock after 10 min              |
 | `TAILSCALE_OFFLINE`          | `network` | `tailscale` CLI missing OR daemon not running OR device not logged in |
+| `TAILSCALE_SERVE_FAILED`     | `network` | `tailscale serve` setup commands returned 0 but the resulting `serve status` shows no port 443 binding — daemon silently dropped the config (re-run install.sh after `tailscale serve reset`) |
 | `PORT_IN_USE`                | `bind`    | Operator-overridden port already in use, OR no free port in range     |
 | `CERT_FAILED`                | `cert`    | TLS cert issuance failed — default for `_release_and_die` (Worker subdomain reservation released; `retry_after_hours` populated) |
 | `INSTALLER_MISCONFIGURED`    | `cert`    | certbot rejected its own arguments before reaching any CA (install.sh bug, not a CA issue) |

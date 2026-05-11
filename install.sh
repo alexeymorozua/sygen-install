@@ -3632,8 +3632,8 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     }
 
     # verify_tailscale_serve_bound: poll `tailscale serve status` with
-    # exponential backoff until the daemon reports a port-443 binding for
-    # FQDN, or the wait window expires.
+    # exponential backoff until the daemon reports an active serve config
+    # for FQDN, or the wait window expires.
     #
     # Background: Tailscale daemon binds to 443 asynchronously after a
     # `serve --bg` command returns 0 — observed 5-15s on cold Macs where
@@ -3659,17 +3659,21 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
                 serve_status=$($TAILSCALE_SUDO "$TAILSCALE_BIN" serve status </dev/null 2>&1 || true)
             fi
 
-            # Port 443 binding is the load-bearing signal. The FQDN check
-            # adds defense against stale status from a previous tailnet —
-            # but we don't hard-require it: Tailscale formats hostnames
-            # in different ways across versions (FQDN vs short host) and
-            # we'd rather accept a marginally-stale match than block on
-            # a formatting regression.
-            if printf '%s' "$serve_status" | grep -q '443'; then
-                if [ -z "$fqdn" ] || printf '%s' "$serve_status" | grep -qF "$fqdn"; then
-                    log "tailscale serve bound to 443 (after ${elapsed}s)"
-                    return 0
-                fi
+            # Real `tailscale serve status` output never contains the
+            # literal string "443" — the port is implied by the https://
+            # scheme in the URL header. Active serve config looks like:
+            #   https://<fqdn> (tailnet only)
+            #   |-- /api/   proxy http://127.0.0.1:8081/api/
+            # Empty / unconfigured prints nothing or "(no serve config)".
+            # We accept either the URL header for $fqdn OR any proxy line
+            # as evidence that serve is live. A previous "grep 443" check
+            # never matched in production and produced a false
+            # TAILSCALE_SERVE_FAILED on every install (Алексей's MacBook,
+            # 2026-05-11) despite the daemon being correctly configured.
+            if printf '%s' "$serve_status" | grep -qF "https://$fqdn" || \
+               printf '%s' "$serve_status" | grep -q 'proxy http'; then
+                log "tailscale serve bound (after ${elapsed}s)"
+                return 0
             fi
 
             sleep "$sleep_interval"
@@ -3751,7 +3755,7 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     #      drop, last-resort shape that proxies all paths through core
     #      (which already routes /api/, /ws/, /upload internally). Phase 3.
     #   4. If all three layers fail, emit the structured error.
-    log "Verifying tailscale serve binding (up to 30s for async 443 bind)..."
+    log "Verifying tailscale serve config (up to 30s for async bind)..."
     if ! verify_tailscale_serve_bound "$FQDN" 30; then
         log "Phase 1 verify failed — resetting and re-applying path-scoped serve"
         $TAILSCALE_SUDO "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 </dev/null || true
@@ -3772,7 +3776,7 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
 
             if ! verify_tailscale_serve_bound "$FQDN" 30; then
                 emit_error "TAILSCALE_SERVE_FAILED" "network" \
-                    "Tailscale serve config did not apply after 3 attempts (path-scoped, reset+retry, global fallback) — iPhone Sygen app will not be able to reach this Mac. Daemon accepted the setup commands but 'tailscale serve status' never showed a port 443 binding for $FQDN within 90s total." \
+                    "Tailscale serve config did not apply after 3 attempts (path-scoped, reset+retry, global fallback) — iPhone Sygen app will not be able to reach this Mac. Daemon accepted the setup commands but 'tailscale serve status' never showed an active serve binding for $FQDN within 90s total." \
                     "$TAILSCALE_SUDO $TAILSCALE_BIN serve reset && $TAILSCALE_SUDO $TAILSCALE_BIN serve --bg --set-path=/api/ http://127.0.0.1:${SYGEN_CORE_PORT}/api/" \
                     "https://tailscale.com/kb/1242/tailscale-serve"
             else

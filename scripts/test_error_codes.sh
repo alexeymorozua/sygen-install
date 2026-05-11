@@ -429,11 +429,10 @@ verify_tailscale_serve_bound() {
             serve_status=$($TAILSCALE_SUDO "$TAILSCALE_BIN" serve status </dev/null 2>&1 || true)
         fi
 
-        if printf '%s' "$serve_status" | grep -q '443'; then
-            if [ -z "$fqdn" ] || printf '%s' "$serve_status" | grep -qF "$fqdn"; then
-                log "tailscale serve bound to 443 (after ${elapsed}s)"
-                return 0
-            fi
+        if printf '%s' "$serve_status" | grep -qF "https://$fqdn" || \
+           printf '%s' "$serve_status" | grep -q 'proxy http'; then
+            log "tailscale serve bound (after ${elapsed}s)"
+            return 0
         fi
 
         sleep "$sleep_interval"
@@ -459,7 +458,7 @@ echo "Test: verify_tailscale_serve_bound — immediate success"
 START_T=$(date +%s)
 bash -c "
     source '$VERIFY_SHIM'
-    export SYGEN_TEST_TS_STATUS_CMD=\"printf '%s\\n' 'https://machine.tailnet.ts.net:443\n|-- /api proxy http://127.0.0.1:8081/api/'\"
+    export SYGEN_TEST_TS_STATUS_CMD=\"printf '%s\\n' 'https://machine.tailnet.ts.net (tailnet only)' '|-- /api/ proxy http://127.0.0.1:8081/api/'\"
     if verify_tailscale_serve_bound 'machine.tailnet.ts.net' 10; then
         exit 0
     else
@@ -506,7 +505,7 @@ echo "Test: verify_tailscale_serve_bound — eventual success after async bind"
 COUNTER_FILE="$(mktemp)"
 echo 0 >"$COUNTER_FILE"
 # Pre-build the command as a single string so we don't fight shell quoting.
-TS_STATUS_CMD="n=\$(cat $COUNTER_FILE); n=\$((n+1)); echo \$n > $COUNTER_FILE; if [ \"\$n\" -ge 3 ]; then printf '%s\n' 'https://machine.tailnet.ts.net:443'; printf '%s\n' '|-- /api proxy http://127.0.0.1:8081/api/'; else printf ''; fi"
+TS_STATUS_CMD="n=\$(cat $COUNTER_FILE); n=\$((n+1)); echo \$n > $COUNTER_FILE; if [ \"\$n\" -ge 3 ]; then printf '%s\n' 'https://machine.tailnet.ts.net (tailnet only)'; printf '%s\n' '|-- /api/ proxy http://127.0.0.1:8081/api/'; else printf ''; fi"
 START_T=$(date +%s)
 SYGEN_TEST_TS_STATUS_CMD="$TS_STATUS_CMD" bash -c "
     source '$VERIFY_SHIM'

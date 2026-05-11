@@ -10,6 +10,10 @@
     __SYGEN_ADMIN_PORT__    host port of pro.sygen.admin (Next.js)
     __SYGEN_UPDATER_PORT__  host port of pro.sygen.updater
     __HOME__                user's home dir (for $HOME-relative log paths)
+    __APNS_KEY_ID__         APNs Key ID (10-char) — empty when push disabled
+    __APNS_TEAM_ID__        Apple developer team ID — empty when push disabled
+    __APNS_BUNDLE_ID__      iOS app bundle id — empty when push disabled
+    __APNS_ENVIRONMENT__    "production" | "sandbox" — empty when push disabled
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -55,6 +59,17 @@
         -->
         <key>SYGEN_HOST_WHISPER_MODELS_DIR</key> <string>__HOME__/.local/share/whisper-cpp/models</string>
         <key>ADMIN_INTERNAL_URL</key>      <string>http://127.0.0.1:__SYGEN_ADMIN_PORT__</string>
+        <!--
+          APNs push (iOS). All four keys must be populated for the
+          backend to enable push delivery; absent or empty values keep
+          push silently disabled (push_apns.py logs once, then no-op).
+          The .p8 auth key is discovered via
+          ${SYGEN_HOME}/_secrets/AuthKey_*.p8 — no plist override needed.
+        -->
+        <key>APNS_KEY_ID</key>             <string>__APNS_KEY_ID__</string>
+        <key>APNS_TEAM_ID</key>            <string>__APNS_TEAM_ID__</string>
+        <key>APNS_BUNDLE_ID</key>          <string>__APNS_BUNDLE_ID__</string>
+        <key>APNS_ENVIRONMENT</key>        <string>__APNS_ENVIRONMENT__</string>
     </dict>
     <key>RunAtLoad</key>        <true/>
     <key>KeepAlive</key>        <true/>

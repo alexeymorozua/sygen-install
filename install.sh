@@ -2510,6 +2510,15 @@ EFFECTIVE_LOG_LEVEL=$(get_env LOG_LEVEL "INFO")
 EFFECTIVE_INSTALL_TOKEN=$(get_env SYGEN_INSTALL_TOKEN "${SYGEN_INSTALL_TOKEN:-}")
 EFFECTIVE_HEARTBEAT_URL=$(get_env SYGEN_INSTALL_HEARTBEAT_URL "${SYGEN_INSTALL_HEARTBEAT_URL:-}")
 EFFECTIVE_DNS_CHALLENGE_URL=$(get_env SYGEN_DNS_CHALLENGE_URL "${SYGEN_DNS_CHALLENGE_URL:-}")
+# APNs push (iOS). Preserved across re-runs of install.sh — fresh installs
+# inherit from the process env (operator may pre-export them before running
+# install.sh), re-runs read the values previously written into .env so the
+# operator doesn't have to re-supply them every upgrade. Empty values are
+# fine — sygen-core silently disables push when any APNS_* var is blank.
+EFFECTIVE_APNS_KEY_ID=$(get_env APNS_KEY_ID "${APNS_KEY_ID:-}")
+EFFECTIVE_APNS_TEAM_ID=$(get_env APNS_TEAM_ID "${APNS_TEAM_ID:-}")
+EFFECTIVE_APNS_BUNDLE_ID=$(get_env APNS_BUNDLE_ID "${APNS_BUNDLE_ID:-}")
+EFFECTIVE_APNS_ENVIRONMENT=$(get_env APNS_ENVIRONMENT "${APNS_ENVIRONMENT:-production}")
 # NEXT_PUBLIC_SYGEN_API_URL: macOS localhost mode forces localhost (no proxy
 # layer in front of admin), but tailscale/publicdomain submodes terminate
 # TLS in front of both admin (8080) and core (8081) — so admin should hit
@@ -2552,6 +2561,14 @@ sanitize_env_value() {
 }
 HOST_HOSTNAME_VAL="$(sanitize_env_value "$HOST_HOSTNAME_VAL")"
 HOST_TZ_VAL="$(sanitize_env_value "$HOST_TZ_VAL")"
+# APNs identifiers ride the same .env line, so the same control-char /
+# quote scrubbing applies — the values are short fixed-width strings
+# (10-char Key ID, ~10-char Team ID, reverse-DNS bundle id) so this is
+# a belt-and-suspenders sanitize, not a transformation.
+EFFECTIVE_APNS_KEY_ID="$(sanitize_env_value "$EFFECTIVE_APNS_KEY_ID")"
+EFFECTIVE_APNS_TEAM_ID="$(sanitize_env_value "$EFFECTIVE_APNS_TEAM_ID")"
+EFFECTIVE_APNS_BUNDLE_ID="$(sanitize_env_value "$EFFECTIVE_APNS_BUNDLE_ID")"
+EFFECTIVE_APNS_ENVIRONMENT="$(sanitize_env_value "$EFFECTIVE_APNS_ENVIRONMENT")"
 
 umask 077
 {
@@ -2659,6 +2676,17 @@ umask 077
     # Default `http://sygen-admin:3000` (compose hostname + Next.js dev
     # port). Native admin binds 127.0.0.1:$SYGEN_ADMIN_PORT.
     echo "ADMIN_INTERNAL_URL=http://127.0.0.1:$SYGEN_ADMIN_PORT"
+    # APNs push identifiers — empty when push is disabled, which the
+    # backend treats as a clean no-op (push_apns logs once at startup,
+    # then send_push returns reason=apns_disabled). The .p8 auth key is
+    # discovered separately under ${SYGEN_HOME}/_secrets/AuthKey_*.p8
+    # so it never touches .env. launchd plist mirrors these via
+    # __APNS_*__ placeholders; the .env line is for documentation +
+    # carryover across install.sh re-runs.
+    echo "APNS_KEY_ID=$EFFECTIVE_APNS_KEY_ID"
+    echo "APNS_TEAM_ID=$EFFECTIVE_APNS_TEAM_ID"
+    echo "APNS_BUNDLE_ID=$EFFECTIVE_APNS_BUNDLE_ID"
+    echo "APNS_ENVIRONMENT=$EFFECTIVE_APNS_ENVIRONMENT"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"
@@ -3284,6 +3312,10 @@ if [ $LOCAL_MODE -eq 1 ]; then
             -e "s|__SYGEN_UPDATER_TOKEN__|$EFFECTIVE_UPDATER_TOKEN|g" \
             -e "s|__SYGEN_HOST_TZ__|$HOST_TZ_VAL|g" \
             -e "s|__HOME__|$HOME|g" \
+            -e "s|__APNS_KEY_ID__|$EFFECTIVE_APNS_KEY_ID|g" \
+            -e "s|__APNS_TEAM_ID__|$EFFECTIVE_APNS_TEAM_ID|g" \
+            -e "s|__APNS_BUNDLE_ID__|$EFFECTIVE_APNS_BUNDLE_ID|g" \
+            -e "s|__APNS_ENVIRONMENT__|$EFFECTIVE_APNS_ENVIRONMENT|g" \
             "$tmpl" > "$plist_dst"
         rm -f "$tmpl"
         # 0644 — launchd silently refuses 0600 plists (umask 077 from .env

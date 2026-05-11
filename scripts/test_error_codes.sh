@@ -24,7 +24,8 @@ PASS=0
 #   - json_escape() — bash-only string escaper
 #   - ERROR_CODE / FIX_COMMAND / FIX_DOCS_URL — emit_error / die / emit_json_error
 #   - emit_json_error()
-#   - _release_and_die()'s JSON branch is tested separately (not here).
+#   - _release_and_die() — its JSON branch is also tested here so the
+#     err_code → human-`error`-field mapping doesn't regress.
 SHIM_FILE="$(mktemp)"
 trap 'rm -f "$SHIM_FILE"' EXIT
 
@@ -33,6 +34,10 @@ cat >"$SHIM_FILE" <<'SHIM_PREAMBLE'
 JSON_OUTPUT="${SYGEN_JSON_OUTPUT:-0}"
 JSON_DONE=0
 STAGE="init"
+# _release_and_die touches DOMAIN/FQDN/SYGEN_INSTALL_TOKEN; stub them so
+# the release/cleanup branches are skipped in unit tests.
+SYGEN_INSTALL_TOKEN=""
+FQDN=""
 log()  { :; }
 warn() { :; }
 die()  {
@@ -51,6 +56,7 @@ awk '
     /^ERROR_CODE=""$/              { in_blk=1 }
     /^emit_error\(\) \{$/          { in_fn=1 }
     /^emit_json_error\(\) \{$/     { in_fn=1 }
+    /^_release_and_die\(\) \{$/    { in_fn=1 }
     in_fn || in_blk { print }
     in_fn && /^}$/                 { in_fn=0 }
     in_blk && /^}$/                { in_blk=0 }
@@ -145,6 +151,17 @@ JSON="$(run_emit APT_LOCK_HELD deps \
     '')"
 assert_field "$JSON" error_code APT_LOCK_HELD
 
+# ---------- Test 5b: NODE_MISSING ----------
+echo "Test: NODE_MISSING"
+JSON="$(run_emit NODE_MISSING deps \
+    "node not found after brew install — try: brew link --overwrite node@22" \
+    'brew link --overwrite node@22' \
+    'https://nodejs.org')"
+assert_field "$JSON" error_code NODE_MISSING
+assert_field "$JSON" stage deps
+assert_field "$JSON" fix_command 'brew link --overwrite node@22'
+assert_field "$JSON" fix_docs_url 'https://nodejs.org'
+
 # ---------- Test 6: backwards compat — bare die() defaults to UNKNOWN_ERROR ----------
 echo "Test: bare die() yields UNKNOWN_ERROR"
 JSON="$(SYGEN_JSON_OUTPUT=1 bash -c "
@@ -176,6 +193,60 @@ else
     echo "  FAIL [escape] got=$ROUNDTRIP" >&2
     FAIL=$((FAIL + 1))
 fi
+
+# ---------- Test 8: _release_and_die — error field is human, error_code is UPPER ----------
+run_release() {
+    # $1 err_code, $2 details
+    SYGEN_JSON_OUTPUT=1 bash -c "
+        set +e
+        source '$SHIM_FILE'
+        STAGE='cert'
+        _release_and_die \"\$1\" \"\$2\"
+    " _ "$1" "$2" 2>/dev/null | grep -E '^\{' | tail -n1
+}
+
+contains_field() {
+    # $1 json, $2 key, $3 substring expected within value
+    local got
+    got="$(printf '%s' "$1" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except Exception:
+    print('<parse-error>')
+    sys.exit(0)
+print(d.get('$2', ''))
+")"
+    case "$got" in
+        *"$3"*)
+            PASS=$((PASS + 1))
+            return 0
+            ;;
+    esac
+    echo "  FAIL [$2 contains] expected substring=$3 got=$got" >&2
+    FAIL=$((FAIL + 1))
+    return 1
+}
+
+echo "Test: _release_and_die installer_misconfigured"
+JSON="$(run_release installer_misconfigured "certbot rejected its own arguments")"
+assert_field "$JSON" error_code INSTALLER_MISCONFIGURED
+assert_field "$JSON" stage cert
+contains_field "$JSON" error "Installer configuration error"
+contains_field "$JSON" error "certbot rejected its own arguments"
+assert_field "$JSON" details "certbot rejected its own arguments"
+
+echo "Test: _release_and_die tls_rate_limited"
+JSON="$(run_release tls_rate_limited "All three CAs refused")"
+assert_field "$JSON" error_code TLS_RATE_LIMITED
+contains_field "$JSON" error "rate-limited"
+# retry_after_hours is part of the cert-path contract — must survive.
+assert_field "$JSON" retry_after_hours 1
+
+echo "Test: _release_and_die default cert_failed"
+JSON="$(run_release "" "")"
+assert_field "$JSON" error_code CERT_FAILED
+contains_field "$JSON" error "TLS certificate issuance failed"
 
 # ---------- Result ----------
 echo ""

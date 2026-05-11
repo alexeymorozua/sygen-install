@@ -856,6 +856,27 @@ emit_json_error() {
 _release_and_die() {
     local err_code="${1:-cert_failed}"
     local details="${2:-}"
+    # Map err_code to a human-readable summary so the `error` field carries
+    # a real sentence (not a shell-token like "installer_misconfigured").
+    # Older iOS clients that don't consume `error_code` render `error` as
+    # the banner fallback — a raw machine code there is a UX bug.
+    local err_summary
+    case "$err_code" in
+        cert_failed)
+            err_summary="TLS certificate issuance failed." ;;
+        cert_renew_failed)
+            err_summary="TLS certificate renewal failed." ;;
+        installer_misconfigured)
+            err_summary="Installer configuration error — certbot rejected its own arguments before reaching any CA." ;;
+        tls_rate_limited)
+            err_summary="TLS certificate issuance refused by every CA — most likely rate-limited, retry in ~1 hour." ;;
+        *)
+            err_summary="Installation step failed: $err_code" ;;
+    esac
+    local err_msg="$err_summary"
+    if [ -n "$details" ]; then
+        err_msg="$err_summary $details"
+    fi
     if [ -n "${SYGEN_INSTALL_TOKEN:-}" ]; then
         warn "Releasing subdomain reservation back to the pool (cert failure)"
         curl -fsS --ipv4 -X DELETE \
@@ -881,13 +902,13 @@ _release_and_die() {
         local code_upper
         code_upper="$(printf '%s' "$err_code" | tr '[:lower:]-' '[:upper:]_')"
         printf '{"ok":false,"error":%s,"error_code":%s,"stage":%s,"details":%s,"fix_command":"","fix_docs_url":"","retry_after_hours":1}\n' \
-            "$(json_escape "$err_code")" \
+            "$(json_escape "$err_msg")" \
             "$(json_escape "$code_upper")" \
             "$(json_escape "$STAGE")" \
             "$(json_escape "$details")"
         exit 1
     fi
-    die "$err_code: $details"
+    die "$err_msg"
 }
 
 # apt-get retry on lock contention only. unattended-upgrades or the cloud-init
@@ -1603,7 +1624,10 @@ else
         NODE_BREW_BIN="$(command -v node || true)"
     fi
     [ -x "$NODE_BREW_BIN" ] \
-        || die "node not found after brew install — try: brew link --overwrite node@22"
+        || emit_error "NODE_MISSING" "deps" \
+            "node not found after brew install — try: brew link --overwrite node@22" \
+            "brew link --overwrite node@22" \
+            "https://nodejs.org"
 
     # Claude Code CLI — required by sygen-core to spawn agent CLI sessions.
     # Without it admin/iOS Claude-setup fails with "claude CLI not found".
@@ -1666,7 +1690,11 @@ else
             "python3 not found after apt install" \
             "apt-get install -y python3" \
             ""
-    [ -x "$NODE_BIN" ] || die "node not found after NodeSource install"
+    [ -x "$NODE_BIN" ] \
+        || emit_error "NODE_MISSING" "deps" \
+            "node not found after NodeSource install" \
+            "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs" \
+            "https://nodejs.org"
 fi
 log "  python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 log "  node:   $NODE_BIN ($("$NODE_BIN" --version 2>&1))"

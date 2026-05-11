@@ -225,10 +225,14 @@ to `UNKNOWN_ERROR`.
 | `HOMEBREW_MISSING`           | `deps`    | macOS: `brew` binary absent from `/opt/homebrew/bin` and `/usr/local/bin` (just-installed brew with stale shell PATH is auto-recovered via `brew shellenv`) |
 | `XCODE_CLT_MISSING`          | `deps`    | macOS: `xcode-select -p` fails (Command Line Tools not installed)     |
 | `PYTHON3_MISSING`            | `deps`    | python3 not found after the platform's deps install step              |
+| `NODE_MISSING`               | `deps`    | node not found after brew (`node@22`) / NodeSource install            |
 | `SUDO_REQUIRED`              | `deps`    | Linux: installer invoked without root (`EUID != 0`)                   |
 | `APT_LOCK_HELD`              | `deps`    | Linux: `apt-get` couldn't acquire dpkg lock after 10 min              |
 | `TAILSCALE_OFFLINE`          | `network` | `tailscale` CLI missing OR daemon not running OR device not logged in |
 | `PORT_IN_USE`                | `bind`    | Operator-overridden port already in use, OR no free port in range     |
+| `CERT_FAILED`                | `cert`    | TLS cert issuance failed — default for `_release_and_die` (Worker subdomain reservation released; `retry_after_hours` populated) |
+| `INSTALLER_MISCONFIGURED`    | `cert`    | certbot rejected its own arguments before reaching any CA (install.sh bug, not a CA issue) |
+| `TLS_RATE_LIMITED`           | `cert`    | All three CAs (Let's Encrypt / ZeroSSL / Google Trust Services) refused issuance — likely rate-limited everywhere |
 | `UNKNOWN_ERROR`              | varies    | Catch-all for unmapped failures (`set -e` aborts, etc.)               |
 
 Additional codes from the Onyx contract (`SQLITE_MISSING`,

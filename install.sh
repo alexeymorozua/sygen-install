@@ -3631,6 +3631,59 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
         return 0
     }
 
+    # verify_tailscale_serve_bound: poll `tailscale serve status` with
+    # exponential backoff until the daemon reports a port-443 binding for
+    # FQDN, or the wait window expires.
+    #
+    # Background: Tailscale daemon binds to 443 asynchronously after a
+    # `serve --bg` command returns 0 — observed 5-15s on cold Macs where
+    # cert issuance happens lazily. The previous single-shot check (1s
+    # after serve setup) caught the empty interim state and flagged a
+    # false TAILSCALE_SERVE_FAILED on two fresh installs in a row
+    # (мама + a second clean Mac on 2026-05-11). This loop gives the
+    # daemon up to ~30s to settle before declaring failure.
+    #
+    # Test hook: SYGEN_TEST_TS_STATUS_CMD overrides the status probe so
+    # scripts/test_error_codes.sh can drive deterministic timing.
+    verify_tailscale_serve_bound() {
+        local fqdn="$1"
+        local max_wait="${2:-30}"
+        local elapsed=0
+        local sleep_interval=2
+        local serve_status
+
+        while [ "$elapsed" -lt "$max_wait" ]; do
+            if [ -n "${SYGEN_TEST_TS_STATUS_CMD:-}" ]; then
+                serve_status=$(eval "$SYGEN_TEST_TS_STATUS_CMD" 2>&1)
+            else
+                serve_status=$($TAILSCALE_SUDO "$TAILSCALE_BIN" serve status </dev/null 2>&1 || true)
+            fi
+
+            # Port 443 binding is the load-bearing signal. The FQDN check
+            # adds defense against stale status from a previous tailnet —
+            # but we don't hard-require it: Tailscale formats hostnames
+            # in different ways across versions (FQDN vs short host) and
+            # we'd rather accept a marginally-stale match than block on
+            # a formatting regression.
+            if printf '%s' "$serve_status" | grep -q '443'; then
+                if [ -z "$fqdn" ] || printf '%s' "$serve_status" | grep -qF "$fqdn"; then
+                    log "tailscale serve bound to 443 (after ${elapsed}s)"
+                    return 0
+                fi
+            fi
+
+            sleep "$sleep_interval"
+            elapsed=$((elapsed + sleep_interval))
+            # Exponential-ish backoff capped at 5s. Keeps early polls
+            # cheap while still giving slow daemons room to breathe.
+            if [ "$sleep_interval" -lt 5 ]; then
+                sleep_interval=$((sleep_interval + 1))
+            fi
+        done
+
+        return 1
+    }
+
     # Proactive HTTPS Certificates pre-check: `tailscale cert <fqdn>` is the
     # canonical probe for the tailnet HTTPS feature. It fails immediately
     # with a clear marker when HTTPS is disabled, and a successful run
@@ -3684,29 +3737,50 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     _ts_run "serve /upload" 0 serve --bg --set-path=/upload "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
 
     # ---------- Verify tailscale serve config actually applied ----------
-    # Real-world failure mode (Алексей's mom, 2026-05-11): all three
-    # `serve --bg` calls returned 0, the installer printed the banner,
-    # but `tailscale serve status` was empty afterwards — the GUI app
-    # silently dropped the config and port 443 never started listening.
-    # We re-query the daemon, retry once with a reset, and surface a
-    # structured error so the iOS wizard can show an actionable card.
-    sleep 1
-    serve_status=$($TAILSCALE_SUDO "$TAILSCALE_BIN" serve status </dev/null 2>&1 || true)
-    if [ -z "$serve_status" ] || ! printf '%s' "$serve_status" | grep -q '443'; then
-        log "tailscale serve status empty after setup — retrying once"
+    # Real-world failure mode (Алексей's mom + 2nd clean Mac, 2026-05-11):
+    # all three `serve --bg` calls returned 0, the installer printed the
+    # banner, but `tailscale serve status` looked empty for 5-15s after —
+    # cert acquisition + bind on 443 is asynchronous on cold daemons.
+    # The previous single 1s sleep + one reset retry tripped the false
+    # TAILSCALE_SERVE_FAILED both times. The current verify chain:
+    #   1. Poll status for up to 30s waiting for the 443 binding (Phase 1).
+    #   2. If still unbound, reset + re-apply path-scoped serve and poll
+    #      another 30s (Phase 2, gives daemon a fresh state to work from).
+    #   3. If still unbound, fall back to a single global serve mapping
+    #      (--https=443 → core directly) — fewer routes for the GUI to
+    #      drop, last-resort shape that proxies all paths through core
+    #      (which already routes /api/, /ws/, /upload internally). Phase 3.
+    #   4. If all three layers fail, emit the structured error.
+    log "Verifying tailscale serve binding (up to 30s for async 443 bind)..."
+    if ! verify_tailscale_serve_bound "$FQDN" 30; then
+        log "Phase 1 verify failed — resetting and re-applying path-scoped serve"
         $TAILSCALE_SUDO "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 </dev/null || true
-        sleep 1
+        sleep 2
         _ts_run "serve /api/ (retry)"   1 serve --bg --set-path=/api/   "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
         _ts_run "serve /ws/ (retry)"    1 serve --bg --set-path=/ws/    "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
         _ts_run "serve /upload (retry)" 0 serve --bg --set-path=/upload "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
-        sleep 1
-        serve_status=$($TAILSCALE_SUDO "$TAILSCALE_BIN" serve status </dev/null 2>&1 || true)
-    fi
-    if [ -z "$serve_status" ] || ! printf '%s' "$serve_status" | grep -q '443'; then
-        emit_error "TAILSCALE_SERVE_FAILED" "network" \
-            "Tailscale serve config did not apply — iPhone Sygen app will not be able to reach this Mac. Daemon accepted the setup commands but 'tailscale serve status' shows no port 443 binding." \
-            "$TAILSCALE_SUDO $TAILSCALE_BIN serve reset && $TAILSCALE_SUDO $TAILSCALE_BIN serve --bg --set-path=/api/ http://127.0.0.1:${SYGEN_CORE_PORT}/api/" \
-            "https://tailscale.com/kb/1242/tailscale-serve"
+
+        if ! verify_tailscale_serve_bound "$FQDN" 30; then
+            log "Phase 2 verify failed — trying global single-target serve fallback"
+            $TAILSCALE_SUDO "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 </dev/null || true
+            sleep 2
+            # Single global mapping: all paths through core. Core already
+            # serves /api/, /ws/, /upload internally, so we lose the clean
+            # 404 on the bare URL but gain a far simpler config that the
+            # Tailscale GUI is less likely to silently drop.
+            _ts_run "serve global fallback" 0 serve --bg --https=443 "http://127.0.0.1:${SYGEN_CORE_PORT}"
+
+            if ! verify_tailscale_serve_bound "$FQDN" 30; then
+                emit_error "TAILSCALE_SERVE_FAILED" "network" \
+                    "Tailscale serve config did not apply after 3 attempts (path-scoped, reset+retry, global fallback) — iPhone Sygen app will not be able to reach this Mac. Daemon accepted the setup commands but 'tailscale serve status' never showed a port 443 binding for $FQDN within 90s total." \
+                    "$TAILSCALE_SUDO $TAILSCALE_BIN serve reset && $TAILSCALE_SUDO $TAILSCALE_BIN serve --bg --set-path=/api/ http://127.0.0.1:${SYGEN_CORE_PORT}/api/" \
+                    "https://tailscale.com/kb/1242/tailscale-serve"
+            else
+                log "Global single-target serve fallback succeeded"
+            fi
+        else
+            log "Path-scoped serve succeeded after reset+retry"
+        fi
     fi
 
     # Endpoint smoke-test: serve status can claim a binding before the

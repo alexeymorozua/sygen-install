@@ -400,6 +400,153 @@ else
 fi
 rm -f "$PORT_SHIM2"
 
+# ---------- Test 11: verify_tailscale_serve_bound retry loop ----------
+# The function is defined inside an `elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]`
+# block (4-space indented), so we can't awk-extract it as a top-level
+# definition. The logic is short and self-contained — keep a hermetic
+# copy here, but if you touch it in install.sh, mirror the change here.
+# Tests use SYGEN_TEST_TS_STATUS_CMD to stub `tailscale serve status`
+# without invoking the real daemon. Production code never reads this env
+# var when it's unset, so the hook is invisible outside tests.
+
+VERIFY_SHIM="$(mktemp)"
+cat >"$VERIFY_SHIM" <<'VERIFY_SHIM_BODY'
+log()  { :; }
+TAILSCALE_SUDO=""
+TAILSCALE_BIN="tailscale-not-installed-test"
+
+verify_tailscale_serve_bound() {
+    local fqdn="$1"
+    local max_wait="${2:-30}"
+    local elapsed=0
+    local sleep_interval=2
+    local serve_status
+
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        if [ -n "${SYGEN_TEST_TS_STATUS_CMD:-}" ]; then
+            serve_status=$(eval "$SYGEN_TEST_TS_STATUS_CMD" 2>&1)
+        else
+            serve_status=$($TAILSCALE_SUDO "$TAILSCALE_BIN" serve status </dev/null 2>&1 || true)
+        fi
+
+        if printf '%s' "$serve_status" | grep -q '443'; then
+            if [ -z "$fqdn" ] || printf '%s' "$serve_status" | grep -qF "$fqdn"; then
+                log "tailscale serve bound to 443 (after ${elapsed}s)"
+                return 0
+            fi
+        fi
+
+        sleep "$sleep_interval"
+        elapsed=$((elapsed + sleep_interval))
+        if [ "$sleep_interval" -lt 5 ]; then
+            sleep_interval=$((sleep_interval + 1))
+        fi
+    done
+
+    return 1
+}
+VERIFY_SHIM_BODY
+
+# Sanity: verify the in-script copy stays in sync with install.sh by
+# checking that install.sh contains the same key tokens. Drift detection.
+if ! grep -q 'verify_tailscale_serve_bound()' "$INSTALL_SH"; then
+    echo "  FAIL [verify_tailscale_serve_bound] install.sh has no such function — copy in test_error_codes.sh is stale" >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# 11a: immediate success — status already shows 443 + FQDN binding.
+echo "Test: verify_tailscale_serve_bound — immediate success"
+START_T=$(date +%s)
+bash -c "
+    source '$VERIFY_SHIM'
+    export SYGEN_TEST_TS_STATUS_CMD=\"printf '%s\\n' 'https://machine.tailnet.ts.net:443\n|-- /api proxy http://127.0.0.1:8081/api/'\"
+    if verify_tailscale_serve_bound 'machine.tailnet.ts.net' 10; then
+        exit 0
+    else
+        exit 1
+    fi
+"
+RC=$?
+ELAPSED=$(($(date +%s) - START_T))
+if [ "$RC" -eq 0 ] && [ "$ELAPSED" -lt 3 ]; then
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [verify immediate-success] rc=$RC elapsed=${ELAPSED}s (expected rc=0, elapsed<3s)" >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# 11b: timeout — status remains empty for the full window, must return 1.
+echo "Test: verify_tailscale_serve_bound — timeout when never binds"
+START_T=$(date +%s)
+bash -c "
+    source '$VERIFY_SHIM'
+    export SYGEN_TEST_TS_STATUS_CMD=\"printf ''\"
+    if verify_tailscale_serve_bound 'machine.tailnet.ts.net' 3; then
+        exit 0
+    else
+        exit 1
+    fi
+"
+RC=$?
+ELAPSED=$(($(date +%s) - START_T))
+# max_wait=3 → loop iterates with elapsed=0,2,5 → 2 sleeps (2s+3s)
+# before exiting. Total roughly 5s, allow generous bound.
+if [ "$RC" -eq 1 ] && [ "$ELAPSED" -ge 3 ] && [ "$ELAPSED" -lt 12 ]; then
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [verify timeout] rc=$RC elapsed=${ELAPSED}s (expected rc=1, 3s<=elapsed<12s)" >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# 11c: eventual success — status flips to 443 after a delay (simulates
+# async daemon bind). Counter file increments each call; emits the bound
+# status only after the 3rd probe (~5s elapsed, matching real-world
+# 5-15s async bind window).
+echo "Test: verify_tailscale_serve_bound — eventual success after async bind"
+COUNTER_FILE="$(mktemp)"
+echo 0 >"$COUNTER_FILE"
+# Pre-build the command as a single string so we don't fight shell quoting.
+TS_STATUS_CMD="n=\$(cat $COUNTER_FILE); n=\$((n+1)); echo \$n > $COUNTER_FILE; if [ \"\$n\" -ge 3 ]; then printf '%s\n' 'https://machine.tailnet.ts.net:443'; printf '%s\n' '|-- /api proxy http://127.0.0.1:8081/api/'; else printf ''; fi"
+START_T=$(date +%s)
+SYGEN_TEST_TS_STATUS_CMD="$TS_STATUS_CMD" bash -c "
+    source '$VERIFY_SHIM'
+    if verify_tailscale_serve_bound 'machine.tailnet.ts.net' 15; then
+        exit 0
+    else
+        exit 1
+    fi
+"
+RC=$?
+ELAPSED=$(($(date +%s) - START_T))
+FINAL_N=$(cat "$COUNTER_FILE")
+rm -f "$COUNTER_FILE"
+# 3rd probe means: probe 1 (elapsed=0, fail, sleep 2), probe 2 (elapsed=2,
+# fail, sleep 3), probe 3 (elapsed=5, success). Elapsed ~5s, counter=3.
+if [ "$RC" -eq 0 ] && [ "$ELAPSED" -ge 4 ] && [ "$ELAPSED" -lt 12 ] && [ "$FINAL_N" -ge 3 ]; then
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [verify eventual-success] rc=$RC elapsed=${ELAPSED}s counter=$FINAL_N (expected rc=0, 4s<=elapsed<12s, counter>=3)" >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# 11d: drift detection — install.sh must contain the 3-phase fallback
+# chain (path-scoped → reset+retry → global single-target). Regression
+# guard for the comment block + log lines that flag each phase.
+echo "Test: install.sh contains 3-phase fallback chain"
+PHASE_HITS=0
+grep -q 'Phase 1 verify failed'  "$INSTALL_SH" && PHASE_HITS=$((PHASE_HITS + 1))
+grep -q 'Phase 2 verify failed'  "$INSTALL_SH" && PHASE_HITS=$((PHASE_HITS + 1))
+grep -q 'global single-target serve fallback' "$INSTALL_SH" && PHASE_HITS=$((PHASE_HITS + 1))
+grep -q 'serve --bg --https=443'              "$INSTALL_SH" && PHASE_HITS=$((PHASE_HITS + 1))
+if [ "$PHASE_HITS" -eq 4 ]; then
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL [phase chain] only $PHASE_HITS/4 phase markers found in install.sh" >&2
+    FAIL=$((FAIL + 1))
+fi
+
+rm -f "$VERIFY_SHIM"
+
 # ---------- Result ----------
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

@@ -165,6 +165,34 @@ json_escape() {
     printf '"%s"' "$s"
 }
 
+# ---------- Structured error codes (v1.6.130+) ----------
+# emit_error / emit_json_error / _release_and_die emit JSON of shape
+#   {"ok":false,"error":"...","error_code":"HOMEBREW_MISSING","stage":"deps",
+#    "details":"","fix_command":"/bin/bash -c \"...\"","fix_docs_url":"https://brew.sh"}
+# so the iOS deploy wizard can show an actionable screen (icon + copy
+# button for fix_command) instead of a raw error blob.
+#
+# Backwards compat: error_code is "UNKNOWN_ERROR" when an unconverted
+# die() trips — older iOS builds without code-aware screens fall back to
+# the raw `error` text just like before.
+ERROR_CODE=""
+FIX_COMMAND=""
+FIX_DOCS_URL=""
+
+# emit_error: structured-error variant of die(). Sets ERROR_CODE / STAGE
+# / FIX_COMMAND / FIX_DOCS_URL so the JSON output carries them, then
+# delegates to die() for the human-mode stderr print + exit 1.
+#
+# Usage: emit_error CODE STAGE "human message" [fix_command] [fix_docs_url]
+emit_error() {
+    ERROR_CODE="$1"
+    STAGE="$2"
+    local msg="$3"
+    FIX_COMMAND="${4:-}"
+    FIX_DOCS_URL="${5:-}"
+    die "$msg"
+}
+
 # ---------- Port detection (v1.6.84+) ----------
 # Multi-instance support: a Mac may already run a dev sygen / Grafana /
 # Postgres / etc. on our default ports. _port_in_use probes for a LISTEN
@@ -225,7 +253,10 @@ _resolve_port() {
             die "SYGEN_${label}_PORT='$override' is not a valid port (1-65535)"
         fi
         if _port_in_use "$override"; then
-            die "SYGEN_${label}_PORT=$override is already in use — free that port or remove the env override"
+            emit_error "PORT_IN_USE" "bind" \
+                "SYGEN_${label}_PORT=$override is already in use — free that port or remove the env override" \
+                "lsof -nP -iTCP:${override} -sTCP:LISTEN" \
+                ""
         fi
         printf '%s' "$override"
         return
@@ -258,7 +289,10 @@ _resolve_port() {
 
     # Fresh install: walk for the first free port from default.
     if ! port="$(_find_free_port "$default")"; then
-        die "no free port found for ${label} in range ${default}..$((default + 100))"
+        emit_error "PORT_IN_USE" "bind" \
+            "no free port found for ${label} in range ${default}..$((default + 100))" \
+            "" \
+            ""
     fi
     printf '%s' "$port"
 }
@@ -760,10 +794,14 @@ emit_json_error() {
     JSON_DONE=1
     local err="${1:-install failed}"
     local details="${2:-}"
-    printf '{"ok":false,"error":%s,"stage":%s,"details":%s}\n' \
+    local code="${ERROR_CODE:-UNKNOWN_ERROR}"
+    printf '{"ok":false,"error":%s,"error_code":%s,"stage":%s,"details":%s,"fix_command":%s,"fix_docs_url":%s}\n' \
         "$(json_escape "$err")" \
+        "$(json_escape "$code")" \
         "$(json_escape "$STAGE")" \
-        "$(json_escape "$details")"
+        "$(json_escape "$details")" \
+        "$(json_escape "${FIX_COMMAND:-}")" \
+        "$(json_escape "${FIX_DOCS_URL:-}")"
 }
 
 # _release_and_die — used in the cert-issuance cascade to fail cleanly.
@@ -797,8 +835,14 @@ _release_and_die() {
     fi
     if [ "$JSON_OUTPUT" = "1" ] && [ "$JSON_DONE" = "0" ]; then
         JSON_DONE=1
-        printf '{"ok":false,"error":%s,"stage":%s,"details":%s,"retry_after_hours":1}\n' \
+        # Upper-snake the err_code arg ("cert_failed" → "CERT_FAILED") so
+        # iOS treats it as a structured code candidate; unmapped codes
+        # fall back to the raw error screen per the iOS contract.
+        local code_upper
+        code_upper="$(printf '%s' "$err_code" | tr '[:lower:]-' '[:upper:]_')"
+        printf '{"ok":false,"error":%s,"error_code":%s,"stage":%s,"details":%s,"fix_command":"","fix_docs_url":"","retry_after_hours":1}\n' \
             "$(json_escape "$err_code")" \
+            "$(json_escape "$code_upper")" \
             "$(json_escape "$STAGE")" \
             "$(json_escape "$details")"
         exit 1
@@ -847,7 +891,10 @@ apt_retry() {
         sleep $sleep_secs
     done
     rm -f "$stderr_file"
-    die "apt-get could not acquire dpkg lock after $((max_attempts * sleep_secs / 60)) min. Wait for unattended-upgrades to finish ('systemctl status unattended-upgrades'), or run 'systemctl stop unattended-upgrades && killall apt-get apt 2>/dev/null; rm -f /var/lib/dpkg/lock*' then re-install."
+    emit_error "APT_LOCK_HELD" "deps" \
+        "apt-get could not acquire dpkg lock after $((max_attempts * sleep_secs / 60)) min. Wait for unattended-upgrades to finish ('systemctl status unattended-upgrades'), or run 'systemctl stop unattended-upgrades && killall apt-get apt 2>/dev/null; rm -f /var/lib/dpkg/lock*' then re-install." \
+        "systemctl stop unattended-upgrades && killall apt-get apt 2>/dev/null; rm -f /var/lib/dpkg/lock*" \
+        ""
 }
 
 # Build whisper.cpp from source. Returns 0 on success, non-zero on any
@@ -1129,11 +1176,17 @@ if [ $LOCAL_MODE -eq 1 ]; then
                 TAILSCALE_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
                 log "Using Tailscale binary from /Applications/Tailscale.app (CLI not in PATH)"
             else
-                die "SELF_HOSTED_MODE=tailscale but Tailscale not found. Install from https://tailscale.com/download (Mac App Store works), run 'tailscale up' (or open the app and log in), then retry."
+                emit_error "TAILSCALE_OFFLINE" "network" \
+                    "SELF_HOSTED_MODE=tailscale but Tailscale not found. Install from https://tailscale.com/download (Mac App Store works), run 'tailscale up' (or open the app and log in), then retry." \
+                    "" \
+                    "https://tailscale.com/download"
             fi
             export TAILSCALE_BIN
             ts_status_json="$("$TAILSCALE_BIN" status --json 2>/dev/null)" \
-                || die "Tailscale daemon not running or device not logged in. Open Tailscale.app (or run 'tailscale up') and retry."
+                || emit_error "TAILSCALE_OFFLINE" "network" \
+                    "Tailscale daemon not running or device not logged in. Open Tailscale.app (or run 'tailscale up') and retry." \
+                    "tailscale up" \
+                    "https://tailscale.com/download"
 
             # jq isn't guaranteed yet on a fresh Mac (we install it below) —
             # use python3 (always present on modern macOS) to extract DNSName
@@ -1181,7 +1234,10 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     # same tailnet to reach the box.
     SYGEN_ROOT="/srv/sygen"
     if [ "$EUID" -ne 0 ]; then
-        die "Run as root on Linux (sudo bash or ssh root@...)"
+        emit_error "SUDO_REQUIRED" "deps" \
+            "Run as root on Linux (sudo bash or ssh root@...)" \
+            "sudo bash" \
+            ""
     fi
 
     # Pre-flight: tailscale CLI installed AND daemon up. If CLI is missing
@@ -1206,7 +1262,10 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
             || die "Failed to fetch Tailscale apt sources list"
         apt_retry update -qq
         apt_retry install -y -qq tailscale
-        die "Tailscale installed. Run 'sudo tailscale up' to log in to your tailnet, then re-run this installer."
+        emit_error "TAILSCALE_OFFLINE" "network" \
+            "Tailscale installed. Run 'sudo tailscale up' to log in to your tailnet, then re-run this installer." \
+            "sudo tailscale up" \
+            "https://tailscale.com/kb/1017/install"
     fi
 
     # Linux apt-installed tailscale is always in PATH; macOS may need a
@@ -1215,7 +1274,10 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     TAILSCALE_BIN="$(command -v tailscale)"
     export TAILSCALE_BIN
     ts_status_json="$("$TAILSCALE_BIN" status --json 2>/dev/null)" \
-        || die "Tailscale daemon not running or device not logged in. Run 'sudo tailscale up' and retry."
+        || emit_error "TAILSCALE_OFFLINE" "network" \
+            "Tailscale daemon not running or device not logged in. Run 'sudo tailscale up' and retry." \
+            "sudo tailscale up" \
+            "https://tailscale.com/kb/1080/cli"
 
     # python3 is preinstalled on every modern Debian/Ubuntu. Same parser
     # as the macOS branch — keep them in sync.
@@ -1240,7 +1302,10 @@ elif [ -z "${SYGEN_SUBDOMAIN:-}" ] && [ -z "${CF_API_TOKEN:-}" ]; then
     SYGEN_ROOT="/srv/sygen"
     log "Linux detected — auto-mode (will provision <id>.${DOMAIN} from $PROVISION_URL)"
     if [ "$EUID" -ne 0 ]; then
-        die "Run as root on Linux (sudo bash or ssh root@...)"
+        emit_error "SUDO_REQUIRED" "deps" \
+            "Run as root on Linux (sudo bash or ssh root@...)" \
+            "sudo bash" \
+            ""
     fi
 else
     SUB="${SYGEN_SUBDOMAIN:?SYGEN_SUBDOMAIN required (or unset both SYGEN_SUBDOMAIN and CF_API_TOKEN for auto-mode)}"
@@ -1256,7 +1321,10 @@ else
     CORS_ORIGIN="https://$FQDN"
     log "Linux detected — custom mode (subdomain $FQDN supplied by operator)"
     if [ "$EUID" -ne 0 ]; then
-        die "Run as root on Linux (sudo bash or ssh root@...)"
+        emit_error "SUDO_REQUIRED" "deps" \
+            "Run as root on Linux (sudo bash or ssh root@...)" \
+            "sudo bash" \
+            ""
     fi
 fi
 
@@ -1407,9 +1475,23 @@ if [ $LOCAL_MODE -eq 0 ]; then
     # Keep the env-file generation conditional on macOS only.
 else
     # ---------- 1-macos. Brew deps (python@3.14 + node@22 + whisper-cpp) ----------
+    log "macOS: checking Xcode Command Line Tools"
+    # xcode-select is a prereq for Homebrew (compiler toolchain). Surface
+    # XCODE_CLT_MISSING before HOMEBREW_MISSING so the iOS wizard can show
+    # the right fix_command (xcode-select --install opens a system dialog).
+    if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
+        emit_error "XCODE_CLT_MISSING" "deps" \
+            "Xcode Command Line Tools required. Install with 'xcode-select --install' then re-run." \
+            "xcode-select --install" \
+            "https://developer.apple.com/xcode/resources/"
+    fi
+
     log "macOS: checking Homebrew"
     if ! command -v brew >/dev/null 2>&1; then
-        die "Homebrew required on macOS. Install from https://brew.sh then re-run."
+        emit_error "HOMEBREW_MISSING" "deps" \
+            "Homebrew required on macOS. Install from https://brew.sh then re-run." \
+            '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' \
+            "https://brew.sh"
     fi
 
     log "macOS: installing native runtime deps (python@3.14, node@22, jq, whisper-cpp)"
@@ -1458,7 +1540,10 @@ else
         PYTHON_BREW_BIN="$(command -v python3.14 || true)"
     fi
     [ -x "$PYTHON_BREW_BIN" ] \
-        || die "python3.14 not found after brew install — try: brew link --overwrite python@3.14"
+        || emit_error "PYTHON3_MISSING" "deps" \
+            "python3.14 not found after brew install — try: brew link --overwrite python@3.14" \
+            "brew link --overwrite python@3.14" \
+            "https://docs.brew.sh/Homebrew-and-Python"
 
     NODE_BREW_BIN="$(brew --prefix node@22 2>/dev/null)/bin/node"
     if [ ! -x "$NODE_BREW_BIN" ]; then
@@ -1523,7 +1608,11 @@ if [ $LOCAL_MODE -eq 1 ]; then
 else
     PYTHON_BIN="$(command -v python3 || true)"
     NODE_BIN="$(command -v node || true)"
-    [ -x "$PYTHON_BIN" ] || die "python3 not found after apt install"
+    [ -x "$PYTHON_BIN" ] \
+        || emit_error "PYTHON3_MISSING" "deps" \
+            "python3 not found after apt install" \
+            "apt-get install -y python3" \
+            ""
     [ -x "$NODE_BIN" ] || die "node not found after NodeSource install"
 fi
 log "  python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
@@ -3282,7 +3371,10 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
                     && nginx_running_is_ours; then
                 return 0
             fi
-            die "Port $port is already in use by PID $pid_proc. Stop that process first (e.g. 'sudo kill ${pid_proc%% *}'), or for Apple's built-in Web Sharing: System Settings → General → Sharing → disable Content Caching / File Sharing. Then re-run."
+            emit_error "PORT_IN_USE" "bind" \
+                "Port $port is already in use by PID $pid_proc. Stop that process first (e.g. 'sudo kill ${pid_proc%% *}'), or for Apple's built-in Web Sharing: System Settings → General → Sharing → disable Content Caching / File Sharing. Then re-run." \
+                "sudo kill ${pid_proc%% *}" \
+                ""
         fi
     }
 

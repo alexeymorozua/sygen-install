@@ -191,10 +191,56 @@ do not need to call `/api/heartbeat` themselves.
 On failure the script still emits a single JSON line and exits non-zero:
 
 ```json
-{"ok":false,"error":"<reason>","stage":"deps|dns|cert|data|install|services|smoke|nginx|bootstrap","details":"<short>"}
+{
+  "ok": false,
+  "error": "<human-readable reason>",
+  "error_code": "HOMEBREW_MISSING",
+  "stage": "deps|bind|network|setup|nginx|cert|...",
+  "details": "<short>",
+  "fix_command": "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"",
+  "fix_docs_url": "https://brew.sh"
+}
 ```
 
+`error_code` is an `UPPER_SNAKE_CASE` machine-readable identifier;
+`fix_command` (optional) is a shell command the user can copy verbatim
+to resolve the failure; `fix_docs_url` (optional) is a docs link. See
+the [Error codes](#error-codes) catalog below for the full list.
+
+Older callers that only consume `error` + `stage` still work — the
+extra fields are additive and degrade gracefully (iOS falls back to the
+raw `error` text when `error_code` is missing or unrecognised).
+
 The default (no flag, no env var) banner output is unchanged.
+
+### Error codes
+
+The installer maps every recognised prerequisite failure to a stable
+code so wizards can show an actionable screen (icon + copy button for
+`fix_command`) instead of raw error text. Unmapped failures fall back
+to `UNKNOWN_ERROR`.
+
+| `error_code`                 | `stage`   | When                                                                  |
+|------------------------------|-----------|-----------------------------------------------------------------------|
+| `HOMEBREW_MISSING`           | `deps`    | macOS: `brew` not in PATH                                             |
+| `XCODE_CLT_MISSING`          | `deps`    | macOS: `xcode-select -p` fails (Command Line Tools not installed)     |
+| `PYTHON3_MISSING`            | `deps`    | python3 not found after the platform's deps install step              |
+| `SUDO_REQUIRED`              | `deps`    | Linux: installer invoked without root (`EUID != 0`)                   |
+| `APT_LOCK_HELD`              | `deps`    | Linux: `apt-get` couldn't acquire dpkg lock after 10 min              |
+| `TAILSCALE_OFFLINE`          | `network` | `tailscale` CLI missing OR daemon not running OR device not logged in |
+| `PORT_IN_USE`                | `bind`    | Operator-overridden port already in use, OR no free port in range     |
+| `UNKNOWN_ERROR`              | varies    | Catch-all for unmapped failures (`set -e` aborts, etc.)               |
+
+Additional codes from the Onyx contract (`SQLITE_MISSING`,
+`FFMPEG_MISSING`, `DISK_FULL`, `WRITE_PERMISSION`, `FQDN_UNREACHABLE`,
+`FIREWALL_BLOCKING`, `DEBIAN_VERSION_UNSUPPORTED`, `SYSTEMD_MISSING`)
+are reserved — the installer doesn't currently distinguish those at
+emit time, so unmapped failures in those areas surface as
+`UNKNOWN_ERROR` until a dedicated probe is added.
+
+`scripts/test_error_codes.sh` is a self-contained shell test that
+asserts the JSON contract — run it after any future edits to the
+emit_error / emit_json_error machinery in `install.sh`.
 
 ## Files
 

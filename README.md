@@ -222,7 +222,7 @@ to `UNKNOWN_ERROR`.
 
 | `error_code`                 | `stage`   | When                                                                  |
 |------------------------------|-----------|-----------------------------------------------------------------------|
-| `HOMEBREW_MISSING`           | `deps`    | macOS: `brew` not in PATH                                             |
+| `HOMEBREW_MISSING`           | `deps`    | macOS: `brew` binary absent from `/opt/homebrew/bin` and `/usr/local/bin` (just-installed brew with stale shell PATH is auto-recovered via `brew shellenv`) |
 | `XCODE_CLT_MISSING`          | `deps`    | macOS: `xcode-select -p` fails (Command Line Tools not installed)     |
 | `PYTHON3_MISSING`            | `deps`    | python3 not found after the platform's deps install step              |
 | `SUDO_REQUIRED`              | `deps`    | Linux: installer invoked without root (`EUID != 0`)                   |
@@ -241,6 +241,12 @@ emit time, so unmapped failures in those areas surface as
 `scripts/test_error_codes.sh` is a self-contained shell test that
 asserts the JSON contract — run it after any future edits to the
 emit_error / emit_json_error machinery in `install.sh`.
+
+`scripts/test_brew_detection.sh` covers the macOS Homebrew probe
+(`ensure_brew_in_path`): the installer now checks the canonical brew
+binary paths directly and self-heals a stale-PATH shell via
+`eval "$(brew shellenv)"`, so a user who just installed Homebrew no
+longer has to restart Terminal before re-running the wizard.
 
 ## Files
 

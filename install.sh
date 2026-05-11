@@ -193,6 +193,46 @@ emit_error() {
     die "$msg"
 }
 
+# ---------- Homebrew detection (macOS, v1.6.151+) ----------
+# `command -v brew` alone is unreliable right after a fresh Homebrew
+# install: the binary lands at /opt/homebrew/bin/brew (Apple Silicon)
+# or /usr/local/bin/brew (Intel), but the current Terminal session's
+# PATH hasn't been re-sourced yet — the user has to restart Terminal
+# or run `eval "$(brew shellenv)"` first. A real-world repro: Алексей's
+# mom installed brew, hit Retry in the iOS wizard, and the installer
+# still reported HOMEBREW_MISSING because PATH lagged the filesystem.
+#
+# ensure_brew_in_path probes the canonical brew binary locations
+# directly, then sources `brew shellenv` to inject brew + its prefix
+# into PATH for the rest of the script when the user's shell PATH
+# hasn't caught up yet. Prints the resolved brew path on stdout on
+# success; returns 1 with empty stdout when brew isn't on disk at all.
+#
+# SYGEN_TEST_BREW_BIN is a hook for scripts/test_brew_detection.sh —
+# "NONE" forces the no-brew branch, any other value pins the probe.
+ensure_brew_in_path() {
+    local brew_bin=""
+    if [ -n "${SYGEN_TEST_BREW_BIN:-}" ]; then
+        case "$SYGEN_TEST_BREW_BIN" in
+            NONE) brew_bin="" ;;
+            *)    brew_bin="$SYGEN_TEST_BREW_BIN" ;;
+        esac
+    elif [ -x /opt/homebrew/bin/brew ]; then
+        brew_bin="/opt/homebrew/bin/brew"
+    elif [ -x /usr/local/bin/brew ]; then
+        brew_bin="/usr/local/bin/brew"
+    fi
+    if [ -z "$brew_bin" ]; then
+        return 1
+    fi
+    if ! command -v brew >/dev/null 2>&1; then
+        log "macOS: brew binary found at $brew_bin but not in PATH; sourcing shellenv"
+        eval "$("$brew_bin" shellenv)" 2>/dev/null || true
+    fi
+    printf '%s' "$brew_bin"
+    return 0
+}
+
 # ---------- Port detection (v1.6.84+) ----------
 # Multi-instance support: a Mac may already run a dev sygen / Grafana /
 # Postgres / etc. on our default ports. _port_in_use probes for a LISTEN
@@ -1487,7 +1527,20 @@ else
     fi
 
     log "macOS: checking Homebrew"
-    if ! command -v brew >/dev/null 2>&1; then
+    # Probe the filesystem first (ensure_brew_in_path), THEN check PATH.
+    # A bare `command -v brew` falsely reports HOMEBREW_MISSING for users
+    # who just ran the brew installer in the same Terminal session — the
+    # binary is on disk but their shell PATH hasn't been re-sourced yet.
+    if BREW_BIN="$(ensure_brew_in_path)"; then
+        # Sanity: shellenv eval should have made brew callable. If not,
+        # the user has a weirder PATH setup than we can self-repair.
+        if ! command -v brew >/dev/null 2>&1; then
+            emit_error "HOMEBREW_MISSING" "deps" \
+                "Homebrew found at $BREW_BIN but failed to load into PATH. Restart Terminal and re-run." \
+                "eval \"\$($BREW_BIN shellenv)\"" \
+                "https://brew.sh"
+        fi
+    else
         emit_error "HOMEBREW_MISSING" "deps" \
             "Homebrew required on macOS. Install from https://brew.sh then re-run." \
             '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' \

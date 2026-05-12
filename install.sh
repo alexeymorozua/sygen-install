@@ -3886,10 +3886,19 @@ fi
 
 # ---------- 8. Wait for admin bootstrap ----------
 STAGE="bootstrap"
-log "Waiting for core to generate initial admin password..."
+log "Waiting for core to generate initial admin password (up to 5 min)..."
 PW_FILE="$SYGEN_ROOT/data/_secrets/.initial_admin_password"
 ADMIN_PASS=""
-for i in $(seq 1 60); do
+# 150×2s = 5 min. Was 60×2s = 2 min — surfaced 2026-05-12 on a
+# tester's MacBook where core cold-start took ~125s (embedding model
+# download + ML model loading on first run, especially on slower
+# disks). The script exit-1'd at the 120s mark while the core was
+# already 5s away from writing the password file. iOS wizard then
+# showed "install failed exit 1" despite the install itself being
+# fully functional — manifest written, launchd loaded, core healthy
+# moments later. Doubling the budget covers cold-start variance on
+# M-series Macs / spinning-disk Linux VPS / slow APAC mirrors.
+for i in $(seq 1 150); do
     if [ -f "$PW_FILE" ]; then
         ADMIN_PASS=$(head -n1 "$PW_FILE")
         break
@@ -4081,14 +4090,20 @@ manifest_write_all \
 
 if [ "$JSON_OUTPUT" = "1" ]; then
     if [ -z "$ADMIN_PASS" ]; then
+        # Last-chance recovery: install itself is fully written to disk
+        # (manifest + venv + services), the core is most likely just
+        # finishing its cold-start past the wait window. Tell the
+        # wizard exactly how to recover instead of presenting "failed"
+        # — re-running install.sh poll-waits again with all the work
+        # already done, so the password write usually wins on retry.
         if [ $LOCAL_MODE -eq 1 ]; then
             emit_json_error \
-                "core did not write initial admin password within 2 min" \
-                "see: tail $SYGEN_ROOT/logs/core.log; launchctl list | grep pro.sygen.core"
+                "core did not write initial admin password within 5 min — install on disk is complete, retry the install once core finishes cold-start; or read the password from $PW_FILE once it appears" \
+                "sleep 30 && cat $SYGEN_ROOT/data/_secrets/.initial_admin_password 2>/dev/null || tail $SYGEN_ROOT/logs/core.log"
         else
             emit_json_error \
-                "core did not write initial admin password within 2 min" \
-                "see: journalctl -u sygen-core -n 100"
+                "core did not write initial admin password within 5 min — install on disk is complete, retry once core finishes cold-start" \
+                "sleep 30 && cat $SYGEN_ROOT/data/_secrets/.initial_admin_password 2>/dev/null || journalctl -u sygen-core -n 100"
         fi
         exit 1
     fi

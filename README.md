@@ -226,6 +226,9 @@ to `UNKNOWN_ERROR`.
 | `XCODE_CLT_MISSING`          | `deps`    | macOS: `xcode-select -p` fails (Command Line Tools not installed)     |
 | `PYTHON3_MISSING`            | `deps`    | python3 not found after the platform's deps install step              |
 | `NODE_MISSING`               | `deps`    | node not found after brew (`node@22`) / NodeSource install            |
+| `NODE_BROKEN_DYLD`           | `deps`    | macOS: ``node`` binary exists but won't start due to Homebrew ABI mismatch (e.g. ``Library not loaded: libsimdjson.29.dylib``). Surface a fresh `brew reinstall node` + re-run install — silently warning here would let claude-CLI install fail downstream |
+| `NPM_MISSING`                | `deps`    | macOS: ``npm`` not found alongside node, blocking Claude CLI install  |
+| `CLAUDE_CLI_INSTALL_FAILED`  | `deps`    | ``npm install -g @anthropic-ai/claude-code`` failed OR succeeded but did not put ``claude`` on PATH. Strict-fail (was warn pre-1.6.160) because sygen-core cannot operate without it — every agent session spawns the CLI as subprocess |
 | `SUDO_REQUIRED`              | `deps`    | Linux: installer invoked without root (`EUID != 0`)                   |
 | `APT_LOCK_HELD`              | `deps`    | Linux: `apt-get` couldn't acquire dpkg lock after 10 min              |
 | `TAILSCALE_OFFLINE`          | `network` | `tailscale` CLI missing OR daemon not running OR device not logged in |

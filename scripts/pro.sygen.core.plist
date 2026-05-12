@@ -14,6 +14,10 @@
     __APNS_TEAM_ID__        Apple developer team ID — empty when push disabled
     __APNS_BUNDLE_ID__      iOS app bundle id — empty when push disabled
     __APNS_ENVIRONMENT__    "production" | "sandbox" — empty when push disabled
+    __CLAUDE_CLI_PATH__     absolute path to the ``claude`` binary, resolved
+                            during install (Homebrew / npm-global / local
+                            Claude install). Empty if install.sh could not
+                            find one — core will then auto-probe at runtime.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -70,6 +74,17 @@
         <key>APNS_TEAM_ID</key>            <string>__APNS_TEAM_ID__</string>
         <key>APNS_BUNDLE_ID</key>          <string>__APNS_BUNDLE_ID__</string>
         <key>APNS_ENVIRONMENT</key>        <string>__APNS_ENVIRONMENT__</string>
+        <!--
+          Resolved path to the ``claude`` CLI binary. launchd does not
+          source ``~/.zshrc``/``~/.bashrc``, so the inherited ``PATH``
+          above only covers Homebrew + system bins. If ``claude`` lives
+          elsewhere (npm-global, ``~/.claude/local/claude``, custom
+          install), shutil.which() inside the core returns None and the
+          OAuth wizard / streaming subprocess both fail with "claude CLI
+          not found at 'claude'". install.sh writes the absolute path
+          here so PATH lookups don't need to succeed.
+        -->
+        <key>CLAUDE_CLI_PATH</key>         <string>__CLAUDE_CLI_PATH__</string>
     </dict>
     <key>RunAtLoad</key>        <true/>
     <key>KeepAlive</key>        <true/>

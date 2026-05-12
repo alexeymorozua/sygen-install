@@ -1542,13 +1542,27 @@ if [ $LOCAL_MODE -eq 0 ]; then
     # Manifest-tracked so uninstall.sh can `npm uninstall -g` only when
     # we're the ones who put it there.
     if command -v claude >/dev/null 2>&1; then
+        log "Claude Code CLI already on PATH ($(command -v claude)) — recording as pre-existing"
         manifest_record_npm_preexisting "@anthropic-ai/claude-code"
     else
         log "Installing Claude Code CLI via npm (@anthropic-ai/claude-code)"
-        if manifest_npm_install "@anthropic-ai/claude-code" claude; then
-            :
-        else
-            warn "claude CLI install failed — admin/iOS Claude setup will fail until you run: npm install -g @anthropic-ai/claude-code"
+        # Strict — sygen-core fundamentally cannot operate without the
+        # claude CLI (every agent CLI session spawns it as subprocess).
+        # Previous policy was warn-and-continue, which let installs
+        # finish "successfully" while leaving the auth wizard permanently
+        # broken — surfaced 2026-05-12 on a MacBook where node was
+        # dyld-broken and the install silently skipped claude.
+        if ! manifest_npm_install "@anthropic-ai/claude-code" claude; then
+            emit_error "CLAUDE_CLI_INSTALL_FAILED" "deps" \
+                "npm install -g @anthropic-ai/claude-code failed — sygen-core cannot operate without the Claude Code CLI. Common cause: npm registry blocked or insufficient permissions on the node_modules dir." \
+                "npm install -g @anthropic-ai/claude-code && curl -fsSL $BASE_URL/install.sh | bash" \
+                "https://docs.claude.com/en/docs/claude-code/setup#install-the-cli"
+        fi
+        if ! command -v claude >/dev/null 2>&1; then
+            emit_error "CLAUDE_CLI_INSTALL_FAILED" "deps" \
+                "npm install completed but ``claude`` not on PATH. Check ``npm prefix -g`` is on your PATH." \
+                "npm install -g @anthropic-ai/claude-code --force && curl -fsSL $BASE_URL/install.sh | bash" \
+                "https://docs.claude.com/en/docs/claude-code/setup#install-the-cli"
         fi
     fi
 
@@ -1666,26 +1680,63 @@ else
             "brew link --overwrite node@22" \
             "https://nodejs.org"
 
+    # Node sanity check. Homebrew occasionally leaves dangling ABI
+    # mismatches after a `brew upgrade` — e.g. node compiled against
+    # libsimdjson.29 while the cellar now holds libsimdjson.30. The
+    # binary exists and is executable, but every invocation crashes
+    # before main() with dyld "Library not loaded". A naive
+    # ``[ -x "$NODE_BREW_BIN" ]`` check above passes; ``node --version``
+    # is the first call that actually exercises dynamic linking. If
+    # this fails we cannot do anything sensible with npm downstream, so
+    # surface the canonical fix (re-link/rebuild via brew) instead of
+    # letting the Claude CLI install silently warn-and-skip.
+    if ! NODE_VERSION_OUT="$("$NODE_BREW_BIN" --version 2>&1)"; then
+        emit_error "NODE_BROKEN_DYLD" "deps" \
+            "node at $NODE_BREW_BIN exists but won't start (likely Homebrew ABI mismatch after upgrade): $(echo "$NODE_VERSION_OUT" | tr '\n' ' ' | cut -c1-200)" \
+            "brew reinstall node && curl -fsSL $BASE_URL/install.sh | bash" \
+            "https://docs.brew.sh/Homebrew-on-macOS#troubleshooting"
+    fi
+    log "node sanity OK ($NODE_VERSION_OUT)"
+
     # Claude Code CLI — required by sygen-core to spawn agent CLI sessions.
     # Without it admin/iOS Claude-setup fails with "claude CLI not found".
     # Manifest-tracked so uninstall.sh can `npm uninstall -g` only when
     # we're the ones who put it there.
+    #
+    # Note for users coming from Claude.app (desktop chat) or the JetBrains
+    # Claude Code plugin: those are SEPARATE Anthropic products. They do
+    # not publish a ``claude`` command to your shell PATH, so sygen-core
+    # has nothing to spawn. We install ``@anthropic-ai/claude-code``
+    # globally via npm regardless of what other Anthropic products exist.
     if command -v claude >/dev/null 2>&1; then
+        log "Claude Code CLI already on PATH ($(command -v claude)) — recording as pre-existing"
         manifest_record_npm_preexisting "@anthropic-ai/claude-code"
     else
         log "macOS: installing Claude Code CLI via npm (@anthropic-ai/claude-code)"
+        log "  → this is the terminal CLI (separate from Claude.app desktop and IDE plugins)"
         # Use the brew-resolved npm so this works whether or not the user
         # has node@22 linked into PATH.
         NPM_BIN="$(dirname "$NODE_BREW_BIN")/npm"
         [ -x "$NPM_BIN" ] || NPM_BIN="$(command -v npm || true)"
-        if [ -x "$NPM_BIN" ]; then
-            if manifest_npm_install "@anthropic-ai/claude-code" claude "$NPM_BIN"; then
-                :
-            else
-                warn "claude CLI install failed — admin/iOS Claude setup will fail until you run: npm install -g @anthropic-ai/claude-code"
-            fi
-        else
-            warn "npm not found alongside node@22 — install Claude CLI manually: npm install -g @anthropic-ai/claude-code"
+        if [ ! -x "$NPM_BIN" ]; then
+            emit_error "NPM_MISSING" "deps" \
+                "npm not found alongside node — Claude CLI cannot be installed" \
+                "brew reinstall node && curl -fsSL $BASE_URL/install.sh | bash" \
+                "https://docs.brew.sh/Homebrew-on-macOS"
+        fi
+        if ! manifest_npm_install "@anthropic-ai/claude-code" claude "$NPM_BIN"; then
+            emit_error "CLAUDE_CLI_INSTALL_FAILED" "deps" \
+                "npm install -g @anthropic-ai/claude-code failed — sygen-core cannot operate without the Claude Code CLI. Common causes: broken node (dyld errors), npm registry blocked, or insufficient permissions on /opt/homebrew/lib/node_modules." \
+                "brew reinstall node && npm install -g @anthropic-ai/claude-code && curl -fsSL $BASE_URL/install.sh | bash" \
+                "https://docs.claude.com/en/docs/claude-code/setup#install-the-cli"
+        fi
+        # Verify the binary actually landed on PATH — npm install can
+        # report success but skip the bin-link step on permission errors.
+        if ! command -v claude >/dev/null 2>&1; then
+            emit_error "CLAUDE_CLI_INSTALL_FAILED" "deps" \
+                "npm install completed but ``claude`` not on PATH (bin-link missing). Check ``npm prefix -g`` is on your PATH." \
+                "npm install -g @anthropic-ai/claude-code --force && curl -fsSL $BASE_URL/install.sh | bash" \
+                "https://docs.claude.com/en/docs/claude-code/setup#install-the-cli"
         fi
     fi
 
@@ -2570,6 +2621,34 @@ EFFECTIVE_APNS_TEAM_ID="$(sanitize_env_value "$EFFECTIVE_APNS_TEAM_ID")"
 EFFECTIVE_APNS_BUNDLE_ID="$(sanitize_env_value "$EFFECTIVE_APNS_BUNDLE_ID")"
 EFFECTIVE_APNS_ENVIRONMENT="$(sanitize_env_value "$EFFECTIVE_APNS_ENVIRONMENT")"
 
+# Resolve the absolute path to ``claude`` for the launchd plist. launchd
+# does NOT source ``~/.zshrc`` / ``~/.bashrc``, so its child process
+# only sees the PATH baked into the plist. If ``claude`` lives outside
+# that PATH (npm-global, ``~/.claude/local/claude``, custom install),
+# the core's ``shutil.which("claude")`` returns None and OAuth setup
+# fails with "claude CLI not found at 'claude'". Capturing the
+# resolved path here, writing it to ``CLAUDE_CLI_PATH`` in the plist,
+# and letting the core honor that env var sidesteps the entire PATH
+# isolation problem. Empty string is OK — the core's auto-probe
+# fallback (claude_oauth.claude_cli_path) handles that case at runtime.
+EFFECTIVE_CLAUDE_CLI_PATH="$(command -v claude 2>/dev/null || true)"
+if [ -z "$EFFECTIVE_CLAUDE_CLI_PATH" ]; then
+    # Fall back to common install dirs that ``command -v`` would miss
+    # (some PATHs vary between root and the install user).
+    for _candidate in \
+        /opt/homebrew/bin/claude \
+        /usr/local/bin/claude \
+        "$HOME/.npm-global/bin/claude" \
+        "$HOME/.claude/local/claude"
+    do
+        if [ -x "$_candidate" ]; then
+            EFFECTIVE_CLAUDE_CLI_PATH="$_candidate"
+            break
+        fi
+    done
+fi
+EFFECTIVE_CLAUDE_CLI_PATH="$(sanitize_env_value "$EFFECTIVE_CLAUDE_CLI_PATH")"
+
 umask 077
 {
     echo "SYGEN_CORE_VERSION=$EFFECTIVE_CORE_VERSION"
@@ -2687,6 +2766,11 @@ umask 077
     echo "APNS_TEAM_ID=$EFFECTIVE_APNS_TEAM_ID"
     echo "APNS_BUNDLE_ID=$EFFECTIVE_APNS_BUNDLE_ID"
     echo "APNS_ENVIRONMENT=$EFFECTIVE_APNS_ENVIRONMENT"
+    # Recorded for documentation + plist parity. Empty if claude CLI
+    # could not be found at install time — the core auto-probes on
+    # startup so a later ``npm i -g @anthropic-ai/claude-code`` works
+    # without re-running install.sh (just `launchctl kickstart -k`).
+    echo "CLAUDE_CLI_PATH=$EFFECTIVE_CLAUDE_CLI_PATH"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"
@@ -3316,6 +3400,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
             -e "s|__APNS_TEAM_ID__|$EFFECTIVE_APNS_TEAM_ID|g" \
             -e "s|__APNS_BUNDLE_ID__|$EFFECTIVE_APNS_BUNDLE_ID|g" \
             -e "s|__APNS_ENVIRONMENT__|$EFFECTIVE_APNS_ENVIRONMENT|g" \
+            -e "s|__CLAUDE_CLI_PATH__|$EFFECTIVE_CLAUDE_CLI_PATH|g" \
             "$tmpl" > "$plist_dst"
         rm -f "$tmpl"
         # 0644 — launchd silently refuses 0600 plists (umask 077 from .env

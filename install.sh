@@ -653,6 +653,13 @@ manifest_write() {
         printf '  "admin_dir": %s,\n' "$(json_escape "$SYGEN_MANIFEST_ADMIN_DIR")"
         printf '  "core_version": %s,\n' "$(json_escape "$SYGEN_MANIFEST_CORE_VERSION")"
         printf '  "admin_version": %s,\n' "$(json_escape "$SYGEN_MANIFEST_ADMIN_VERSION")"
+        # Install-time submode + FQDN choice — pairs with the same
+        # values in .env. Recorded for postmortem diagnostics (the
+        # 2026-05-12 "iOS can't reach the install" debug needed this
+        # but the manifest didn't carry it). Empty strings when the
+        # field doesn't apply (e.g. FQDN on localhost mode).
+        printf '  "submode": %s,\n' "$(json_escape "${SELF_HOSTED_SUBMODE:-}")"
+        printf '  "fqdn": %s,\n' "$(json_escape "${FQDN:-}")"
         printf '  "installed_pkgs": ['
         local first=1 p
         for p in ${SYGEN_MANIFEST_INSTALLED_PKGS[@]+"${SYGEN_MANIFEST_INSTALLED_PKGS[@]}"}; do
@@ -1497,6 +1504,99 @@ setup_sygen_user() {
     useradd --system --no-create-home --shell /usr/sbin/nologin sygen \
         || die "failed to create system user 'sygen'"
 }
+
+# ---------- 0.5. Legacy artifact cleanup ----------
+#
+# Sygen pre-1.6.105 shipped an admin web frontend (Next.js) that lived
+# on port :8083 on macOS and was exposed through Tailscale serve with
+# path-scoped routes ``/ws/``, ``/api/``, ``/upload`` -> :8083. The
+# admin web was removed in 1.6.105 but its artifacts can survive a
+# reinstall on top — install.sh's existing ``tailscale serve reset``
+# at the bottom of the Tailscale-mode branch only runs when the
+# operator picks ``SELF_HOSTED_SUBMODE=tailscale`` for the NEW
+# install, so anyone choosing localhost / publicdomain over a
+# previous Tailscale install would end up with stale path-scoped
+# routes pointing at a port that nobody listens on (-> connection
+# refused, iOS app stuck on Login screen). Surfaced 2026-05-12 on a
+# tester's MacBook where /ws/, /api/, /upload on :8083 outlived the
+# 1.6.105 upgrade and the new localhost install kept iOS in the void.
+#
+# Wipe is BEFORE submode branching so it always runs. We touch only
+# rules we recognize as ours (legacy ports / paths Sygen used to
+# create) so a user's unrelated ``tailscale serve`` config stays
+# untouched.
+STAGE="legacy-cleanup"
+cleanup_legacy_sygen_serve() {
+    # macOS-only: tailscale-serve was a Mac concept in 1.6.x. On
+    # Linux the legacy admin web was behind nginx + LE, handled by
+    # the existing nginx config wipe further down.
+    if [ $LOCAL_MODE -eq 0 ]; then
+        return 0
+    fi
+    # Resolve tailscale binary without failing if it's absent — a
+    # fresh Mac may not have Tailscale at all (planning to install in
+    # localhost mode), and that's fine; nothing to clean either.
+    local tsbin
+    if [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
+        tsbin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    else
+        tsbin="$(command -v tailscale 2>/dev/null || true)"
+    fi
+    [ -n "$tsbin" ] || return 0
+
+    # Snapshot the serve status once — repeated invocations each
+    # round-trip to the daemon. Tailscale's text output is a tree:
+    #
+    #   https://<fqdn> (tailnet only)
+    #   |-- /api/    proxy http://127.0.0.1:8083/api/
+    #   |-- /ws/     proxy http://127.0.0.1:8083/ws/
+    #   |-- /upload  proxy http://127.0.0.1:8083/upload
+    #
+    # so the path is field ``$2`` and the backend URL is field ``$4``
+    # (NOT ``$1`` / ``$3`` — the tree-glyph ``|--`` is ``$1`` and
+    # ``proxy`` is ``$3``). Pre-fix awk matched ``$1 == path`` which
+    # never fires and the cleanup was a no-op.
+    local serve_status
+    serve_status="$("$tsbin" serve status 2>/dev/null || true)"
+
+    # Drop the three known legacy path-scoped routes if their backend
+    # is :8083 (pre-1.6.105 admin web). Narrower than ``serve reset``
+    # — keeps any non-Sygen routes untouched. Failures are silent;
+    # the user can re-run or clean manually if needed.
+    local path current_backend
+    for path in "/ws/" "/api/" "/upload"; do
+        current_backend="$(printf '%s\n' "$serve_status" \
+            | awk -v p="$path" '$2 == p && $3 == "proxy" { print $4 }' \
+            | head -n1)"
+        if printf '%s' "$current_backend" | grep -qE ':8083(/|$)'; then
+            log "  removing legacy Tailscale serve route $path -> :8083 (pre-1.6.105 admin web)"
+            # No sudo on macOS — Tailscale.app manages a per-user
+            # daemon and ``tailscale serve`` writes to the user's
+            # daemon directly. Same convention as everywhere else
+            # in this script's mac-only paths (see _ts_run callers).
+            "$tsbin" serve --https=443 "$path" off >/dev/null 2>&1 || true
+        fi
+    done
+}
+
+cleanup_legacy_sygen_launchd() {
+    # macOS-only. Legacy admin web shipped as ``com.sygen.admin``
+    # plist (separate launch agent) — present in 1.6.x < 1.6.105.
+    # Unload + remove without prompting; the plist points at a
+    # bundle that no longer exists in the new install tree.
+    if [ $LOCAL_MODE -eq 0 ]; then
+        return 0
+    fi
+    local plist="$HOME/Library/LaunchAgents/com.sygen.admin.plist"
+    if [ -f "$plist" ]; then
+        log "  removing legacy com.sygen.admin launch agent (pre-1.6.105)"
+        launchctl unload "$plist" 2>/dev/null || true
+        rm -f "$plist"
+    fi
+}
+
+cleanup_legacy_sygen_serve
+cleanup_legacy_sygen_launchd
 
 # ---------- 1. System packages ----------
 STAGE="deps"
@@ -2771,6 +2871,17 @@ umask 077
     # startup so a later ``npm i -g @anthropic-ai/claude-code`` works
     # without re-running install.sh (just `launchctl kickstart -k`).
     echo "CLAUDE_CLI_PATH=$EFFECTIVE_CLAUDE_CLI_PATH"
+    # Persist the install-time choices for postmortem diagnostics.
+    # Pre-1.6.x there was no record of "did the operator pick
+    # localhost / tailscale / publicdomain?" anywhere on disk, so a
+    # debug session had to reverse-engineer from launchctl + nginx
+    # state. Surfaced 2026-05-12: a tester whose iOS could not reach
+    # the install — we couldn't tell from the host alone whether the
+    # tailscale-serve step was skipped on purpose (localhost mode)
+    # or failed silently. Empty when the field doesn't apply (e.g.
+    # FQDN on a localhost install).
+    echo "SYGEN_INSTALL_SUBMODE=${SELF_HOSTED_SUBMODE:-}"
+    echo "SYGEN_FQDN=${FQDN:-}"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"

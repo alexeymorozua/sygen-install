@@ -3932,9 +3932,18 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     # catch-all — hitting the bare tailnet URL now returns 404 from
     # tailscale serve. iOS / desktop clients hit only /api/, /ws/,
     # /upload so they're unaffected.
-    _ts_run "serve /api/"   1 serve --bg --set-path=/api/   "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
-    _ts_run "serve /ws/"    1 serve --bg --set-path=/ws/    "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
-    _ts_run "serve /upload" 0 serve --bg --set-path=/upload "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
+    _ts_run "serve /api/"      1 serve --bg --set-path=/api/      "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
+    _ts_run "serve /ws/"       1 serve --bg --set-path=/ws/       "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
+    _ts_run "serve /upload"    0 serve --bg --set-path=/upload    "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
+    # Public webhook trigger endpoint (sygen-core 1.6.171+). Path-scoped
+    # so external services (Power Automate, GitHub, Stripe) can POST
+    # to https://<tailnet>/webhooks/<slug> and reach the unified core
+    # handler. Pre-1.6.171 webhooks lived on a separate port; the new
+    # endpoint is just another route on the main 8081 listener, but
+    # ``tailscale serve`` requires a path-scoped mapping for everything
+    # we want to expose — without this rule the bare URL would 404
+    # because no proxy route catches ``/webhooks/...``.
+    _ts_run "serve /webhooks/" 0 serve --bg --set-path=/webhooks/ "http://127.0.0.1:${SYGEN_CORE_PORT}/webhooks/"
 
     # ---------- Verify tailscale serve config actually applied ----------
     # Real-world failure mode (Алексей's mom + 2nd clean Mac, 2026-05-11):
@@ -3956,9 +3965,10 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
         log "Phase 1 verify failed — resetting and re-applying path-scoped serve"
         $TAILSCALE_SUDO "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 </dev/null || true
         sleep 2
-        _ts_run "serve /api/ (retry)"   1 serve --bg --set-path=/api/   "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
-        _ts_run "serve /ws/ (retry)"    1 serve --bg --set-path=/ws/    "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
-        _ts_run "serve /upload (retry)" 0 serve --bg --set-path=/upload "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
+        _ts_run "serve /api/ (retry)"      1 serve --bg --set-path=/api/      "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
+        _ts_run "serve /ws/ (retry)"       1 serve --bg --set-path=/ws/       "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
+        _ts_run "serve /upload (retry)"    0 serve --bg --set-path=/upload    "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
+        _ts_run "serve /webhooks/ (retry)" 0 serve --bg --set-path=/webhooks/ "http://127.0.0.1:${SYGEN_CORE_PORT}/webhooks/"
 
         if ! verify_tailscale_serve_bound "$FQDN" 30; then
             log "Phase 2 verify failed — trying global single-target serve fallback"

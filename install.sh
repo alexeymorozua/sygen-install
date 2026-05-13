@@ -4042,6 +4042,47 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
         warn "  Verify manually:  curl -k https://$FQDN/api/health"
         warn "  Re-apply serve:   $TAILSCALE_SUDO $TAILSCALE_BIN serve reset && re-run install.sh"
     fi
+
+    # ---------- Tailscale Funnel for /webhooks/ (public webhook access) ----------
+    # `tailscale serve` exposes /webhooks/ only inside the tailnet. External
+    # services (Power Automate, GitHub, Stripe, Zapier, etc.) cannot reach
+    # tailnet-only URLs — they need a publicly-resolvable endpoint over the
+    # internet. `tailscale funnel` is Tailscale's mechanism for selectively
+    # exposing serve paths publicly, and it shares the same set-path mapping
+    # syntax. Without this block users had to run the sudo funnel command
+    # manually after install, which most never discovered.
+    #
+    # Behaviour:
+    #   - Interactive TTY: prompt y/N (default Y).
+    #   - Non-interactive (iOS launcher etc.): skip unless SYGEN_AUTO_FUNNEL=1
+    #     is explicitly set. We do NOT auto-enable in non-interactive mode
+    #     because Funnel makes the path public to the whole internet — that
+    #     decision deserves an explicit opt-in when no human is at the keys.
+    if [ -t 0 ]; then
+        echo ""
+        echo "Включить Tailscale Funnel для public webhook access?"
+        echo "  Funnel экспонирует /webhooks/ путь публично через Tailscale."
+        echo "  Нужно если webhook будут приходить от внешних сервисов"
+        echo "  (Power Automate, GitHub, Stripe, etc.)."
+        echo "  Skip если ты будешь триггерить webhook только из своих устройств."
+        printf "Включить? [Y/n] "
+        read -r enable_funnel
+        case "$enable_funnel" in
+            n|N|no|No|NO)
+                log "Funnel skipped — webhook accessible только within tailnet"
+                ;;
+            *)
+                _ts_run "funnel /webhooks/" 0 funnel --bg --set-path=/webhooks/ "http://127.0.0.1:${SYGEN_CORE_PORT}/webhooks/"
+                log "Tailscale Funnel enabled for /webhooks/ — public webhook access ready"
+                ;;
+        esac
+    elif [ "${SYGEN_AUTO_FUNNEL:-}" = "1" ]; then
+        _ts_run "funnel /webhooks/" 0 funnel --bg --set-path=/webhooks/ "http://127.0.0.1:${SYGEN_CORE_PORT}/webhooks/"
+        log "Tailscale Funnel enabled for /webhooks/ (auto via SYGEN_AUTO_FUNNEL=1)"
+    else
+        log "Non-interactive mode — skip Funnel. Set SYGEN_AUTO_FUNNEL=1 env to force enable,"
+        log "  or run later: curl -fsSL https://install.sygen.pro/scripts/enable_webhook_funnel.sh | bash"
+    fi
 fi
 
 # ---------- 8. Wait for admin bootstrap ----------

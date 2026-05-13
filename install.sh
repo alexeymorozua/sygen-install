@@ -2749,6 +2749,38 @@ if [ -z "$EFFECTIVE_CLAUDE_CLI_PATH" ]; then
 fi
 EFFECTIVE_CLAUDE_CLI_PATH="$(sanitize_env_value "$EFFECTIVE_CLAUDE_CLI_PATH")"
 
+# 1.6.173 HIGH-1: trusted-proxies allowlist for the webhook public
+# ingress. Computed once here so both the .env file (read by systemd
+# EnvironmentFile= on Linux) and the launchd plist (which has no
+# EnvironmentFile equivalent on macOS) can reference the same value.
+# Empty means "ignore X-Forwarded-For entirely" — safe default for
+# localhost / PF-direct binds. See validate_hmac_regex_pattern / the
+# webhook_trigger module for the consuming side.
+case "${SELF_HOSTED_SUBMODE:-}" in
+    tailscale)
+        EFFECTIVE_TRUSTED_PROXIES="127.0.0.1,100.64.0.0/10"
+        ;;
+    publicdomain)
+        EFFECTIVE_TRUSTED_PROXIES="127.0.0.1,::1"
+        ;;
+    localhost)
+        EFFECTIVE_TRUSTED_PROXIES=""
+        ;;
+    "")
+        # Unset on Linux means auto-mode (Worker subdomain + nginx-fronted).
+        # Unset on macOS means localhost (no submode). The two map to
+        # different defaults — Linux nginx-fronted vs Mac loopback.
+        if [ "$OS" = "Linux" ]; then
+            EFFECTIVE_TRUSTED_PROXIES="127.0.0.1,::1"
+        else
+            EFFECTIVE_TRUSTED_PROXIES=""
+        fi
+        ;;
+    *)
+        EFFECTIVE_TRUSTED_PROXIES=""
+        ;;
+esac
+
 umask 077
 {
     echo "SYGEN_CORE_VERSION=$EFFECTIVE_CORE_VERSION"
@@ -2882,6 +2914,12 @@ umask 077
     # FQDN on a localhost install).
     echo "SYGEN_INSTALL_SUBMODE=${SELF_HOSTED_SUBMODE:-}"
     echo "SYGEN_FQDN=${FQDN:-}"
+    # 1.6.173 HIGH-1: trusted-proxies allowlist for the webhook public
+    # ingress (POST /webhooks/{slug}). Resolved per submode further up
+    # (EFFECTIVE_TRUSTED_PROXIES); empty for localhost / PF-direct
+    # means "ignore X-Forwarded-For entirely". launchd plist mirrors
+    # the same value via __SYGEN_WEBHOOK_TRUSTED_PROXIES__.
+    echo "SYGEN_WEBHOOK_TRUSTED_PROXIES=$EFFECTIVE_TRUSTED_PROXIES"
 } > "$SYGEN_ROOT/.env"
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"
@@ -3512,6 +3550,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
             -e "s|__APNS_BUNDLE_ID__|$EFFECTIVE_APNS_BUNDLE_ID|g" \
             -e "s|__APNS_ENVIRONMENT__|$EFFECTIVE_APNS_ENVIRONMENT|g" \
             -e "s|__CLAUDE_CLI_PATH__|$EFFECTIVE_CLAUDE_CLI_PATH|g" \
+            -e "s|__SYGEN_WEBHOOK_TRUSTED_PROXIES__|$EFFECTIVE_TRUSTED_PROXIES|g" \
             "$tmpl" > "$plist_dst"
         rm -f "$tmpl"
         # 0644 — launchd silently refuses 0600 plists (umask 077 from .env

@@ -18,6 +18,14 @@
                             during install (Homebrew / npm-global / local
                             Claude install). Empty if install.sh could not
                             find one — core will then auto-probe at runtime.
+    __SYGEN_WEBHOOK_TRUSTED_PROXIES__
+                            CSV of trusted reverse-proxy CIDRs/IPs for the
+                            public /webhooks/{slug} ingress (1.6.173 HIGH-1).
+                            Empty → core ignores X-Forwarded-For entirely
+                            (safe for localhost / PF-direct binds). Set by
+                            install.sh per submode: nginx-fronted picks
+                            127.0.0.1,::1; tailscale picks 127.0.0.1 plus
+                            Tailscale CGNAT range (100.64.0.0/10).
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -85,6 +93,15 @@
           here so PATH lookups don't need to succeed.
         -->
         <key>CLAUDE_CLI_PATH</key>         <string>__CLAUDE_CLI_PATH__</string>
+        <!--
+          1.6.173 HIGH-1: trusted-proxies allowlist for X-Forwarded-For
+          parsing on POST /webhooks/{slug}. Empty by default so a Mac
+          localhost install ignores spoofed XFF entirely. install.sh
+          fills in 127.0.0.1,::1 for nginx-fronted (publicdomain) and
+          127.0.0.1,100.64.0.0/10 for tailscale submode. launchd does
+          not load .env, so the value must be mirrored here.
+        -->
+        <key>SYGEN_WEBHOOK_TRUSTED_PROXIES</key> <string>__SYGEN_WEBHOOK_TRUSTED_PROXIES__</string>
     </dict>
     <key>RunAtLoad</key>        <true/>
     <key>KeepAlive</key>        <true/>

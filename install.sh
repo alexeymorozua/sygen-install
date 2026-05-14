@@ -2728,8 +2728,6 @@ EFFECTIVE_APNS_ENVIRONMENT=$(get_env APNS_ENVIRONMENT "${APNS_ENVIRONMENT:-produ
 # 1/24h per token). Graceful: if Worker is unreachable or secret not
 # configured, push just stays disabled — install proceeds normally.
 bootstrap_apns_key() {
-    [ -n "${EFFECTIVE_HEARTBEAT_URL:-}" ] || return 0
-
     # jq is installed earlier (apt on Linux, brew on macOS) before this
     # function is called. Belt-and-suspenders preflight in case install
     # order shifts — without jq, the response parsing below silently
@@ -2741,9 +2739,21 @@ bootstrap_apns_key() {
         return 0
     fi
 
-    # Heartbeat URL is `https://install.sygen.pro/api/heartbeat` — strip
-    # the suffix to get base, then append the bootstrap endpoint.
-    local base="${EFFECTIVE_HEARTBEAT_URL%/heartbeat}"
+    # Determine bootstrap endpoint base URL. EFFECTIVE_HEARTBEAT_URL is
+    # set only in auto-mode VPS installs (Worker reservation flow). For
+    # tailscale / publicdomain / localhost submodes there is no
+    # reservation, but the Worker still serves the anonymous
+    # /api/bootstrap/install-token + /api/bootstrap/apns endpoints — so
+    # fall back to the canonical Worker domain. Operator can override
+    # with SYGEN_INSTALL_BASE_URL (e.g. for staging Workers).
+    local base
+    if [ -n "${EFFECTIVE_HEARTBEAT_URL:-}" ]; then
+        base="${EFFECTIVE_HEARTBEAT_URL%/heartbeat}"
+    elif [ -n "${SYGEN_INSTALL_BASE_URL:-}" ]; then
+        base="${SYGEN_INSTALL_BASE_URL%/}/api"
+    else
+        base="https://install.sygen.pro/api"
+    fi
 
     # Tailscale / publicdomain submodes don't go through /api/provision
     # (no subdomain reservation), so they never get an install_token.

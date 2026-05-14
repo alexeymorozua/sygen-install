@@ -436,6 +436,98 @@ else
     FAIL=$((FAIL+1))
 fi
 
+# ---------- Test 9: empty EFFECTIVE_HEARTBEAT_URL -> hardcoded Worker fallback ----------
+# Regression for P0: tailscale / publicdomain / localhost submodes never
+# go through /api/provision so EFFECTIVE_HEARTBEAT_URL stays empty. The
+# old guard `[ -n "$EFFECTIVE_HEARTBEAT_URL" ] || return 0` silently
+# exited and push stayed disabled — exactly the bug bootstrap_apns_key()
+# was supposed to fix. Now the function must fall back to the canonical
+# Worker domain (https://install.sygen.pro/api) and still pull the .p8.
+echo "Test 9: empty EFFECTIVE_HEARTBEAT_URL -> hardcoded install.sygen.pro fallback works"
+SYGEN_ROOT="$WORK_DIR/t9"
+mkdir -p "$SYGEN_ROOT/data/_secrets"
+
+TK_RESP9="$WORK_DIR/tk9.json"
+echo '{"ok":true,"install_token":"sit_anon_tailscale9","ttl_seconds":14400}' >"$TK_RESP9"
+APNS_RESP9="$WORK_DIR/apns9.json"
+KEY_B64_9="$(printf 'TAILSCALE-PAYLOAD' | base64)"
+cat >"$APNS_RESP9" <<EOF
+{"ok":true,"key_id":"TS9KEY","key_b64":"$KEY_B64_9"}
+EOF
+
+# Stub: only matches the hardcoded install.sygen.pro URLs. If the
+# function still used $EFFECTIVE_HEARTBEAT_URL (empty), the curl URL
+# would be e.g. "/bootstrap/install-token" with no host → no match.
+make_curl_stub "$WORK_DIR/curl" \
+    "install.sygen.pro/api/bootstrap/install-token=$TK_RESP9,200" \
+    "install.sygen.pro/api/bootstrap/apns=$APNS_RESP9,200"
+
+OUT_ERR="$WORK_DIR/err9"
+RC=0
+SYGEN_ROOT="$SYGEN_ROOT" \
+EFFECTIVE_INSTALL_TOKEN="" \
+EFFECTIVE_HEARTBEAT_URL="" \
+EFFECTIVE_APNS_KEY_ID="" \
+PATH="$WORK_DIR:/usr/bin:/bin" \
+bash -c "source '$SHIM_FILE' && bootstrap_apns_key" \
+    2>"$OUT_ERR" || RC=$?
+
+ERR="$(cat "$OUT_ERR")"
+KEY_PATH9="$SYGEN_ROOT/data/_secrets/AuthKey_TS9KEY.p8"
+if [ "$RC" = "0" ] \
+    && [ -f "$KEY_PATH9" ] \
+    && echo "$ERR" | grep -q 'Anonymous install-token acquired' \
+    && echo "$ERR" | grep -q 'APNs key installed'; then
+    PASS=$((PASS+1))
+else
+    echo "  FAIL: rc=$RC" >&2
+    echo "  expected .p8 written via hardcoded install.sygen.pro fallback" >&2
+    echo "  stderr: $ERR" >&2
+    FAIL=$((FAIL+1))
+fi
+
+# ---------- Test 10: SYGEN_INSTALL_BASE_URL override beats hardcoded fallback ----------
+echo "Test 10: SYGEN_INSTALL_BASE_URL override is honored over hardcoded fallback"
+SYGEN_ROOT="$WORK_DIR/t10"
+mkdir -p "$SYGEN_ROOT/data/_secrets"
+
+TK_RESP10="$WORK_DIR/tk10.json"
+echo '{"ok":true,"install_token":"sit_anon_staging10","ttl_seconds":14400}' >"$TK_RESP10"
+APNS_RESP10="$WORK_DIR/apns10.json"
+KEY_B64_10="$(printf 'STAGING-PAYLOAD' | base64)"
+cat >"$APNS_RESP10" <<EOF
+{"ok":true,"key_id":"STG10KEY","key_b64":"$KEY_B64_10"}
+EOF
+
+# Stub matches ONLY the staging host — production host would 000.
+make_curl_stub "$WORK_DIR/curl" \
+    "staging.example.com/api/bootstrap/install-token=$TK_RESP10,200" \
+    "staging.example.com/api/bootstrap/apns=$APNS_RESP10,200"
+
+OUT_ERR="$WORK_DIR/err10"
+RC=0
+SYGEN_ROOT="$SYGEN_ROOT" \
+EFFECTIVE_INSTALL_TOKEN="" \
+EFFECTIVE_HEARTBEAT_URL="" \
+SYGEN_INSTALL_BASE_URL="https://staging.example.com" \
+EFFECTIVE_APNS_KEY_ID="" \
+PATH="$WORK_DIR:/usr/bin:/bin" \
+bash -c "source '$SHIM_FILE' && bootstrap_apns_key" \
+    2>"$OUT_ERR" || RC=$?
+
+ERR="$(cat "$OUT_ERR")"
+KEY_PATH10="$SYGEN_ROOT/data/_secrets/AuthKey_STG10KEY.p8"
+if [ "$RC" = "0" ] \
+    && [ -f "$KEY_PATH10" ] \
+    && echo "$ERR" | grep -q 'staging.example.com'; then
+    PASS=$((PASS+1))
+else
+    echo "  FAIL: rc=$RC" >&2
+    echo "  expected .p8 fetched via SYGEN_INSTALL_BASE_URL override" >&2
+    echo "  stderr: $ERR" >&2
+    FAIL=$((FAIL+1))
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

@@ -23,12 +23,39 @@ import { sha256Hex } from "../lib/crypto.js";
 const RATE_LIMIT_KEY_PREFIX = "IP_BOOTSTRAP:";
 const RATE_LIMIT_TTL_SECONDS = 3600;
 const RATE_LIMIT_MAX = 60;
-const TOKEN_TTL_SECONDS = 3600;
+// 4h gives iOS-led flows (App Attest follow-up, wizard interrupts) room
+// to call /api/bootstrap/apns long after the token was minted. install.sh
+// itself uses the token within seconds, so the longer TTL only affects
+// out-of-band callers.
+const TOKEN_TTL_SECONDS = 14400;
 
 function extractClientIP(request) {
   // CF-Connecting-IP is populated by Cloudflare edge and cannot be set
   // by the client. Safe to trust when this Worker runs behind CF.
   return request.headers.get("CF-Connecting-IP") || "unknown";
+}
+
+// IPv6 /64 prefixes are the smallest unit a residential ISP hands to a
+// single subscriber, so per-/64 buckets prevent a single attacker on a
+// home connection from minting 2^64 tokens by rotating addresses. IPv4
+// is already per-address (no /64 concept).
+function normalizeIPForRateLimit(ip) {
+  if (!ip || ip === "unknown") return ip;
+  if (ip.includes(".") && !ip.includes(":")) return ip;
+  try {
+    const parts = ip.split(":");
+    const zeroIdx = parts.indexOf("");
+    if (zeroIdx !== -1) {
+      const before = parts.slice(0, zeroIdx).filter((x) => x !== "");
+      const after = parts.slice(zeroIdx + 1).filter((x) => x !== "");
+      const missing = 8 - before.length - after.length;
+      const expanded = [...before, ...Array(missing).fill("0"), ...after];
+      return expanded.slice(0, 4).join(":") + "::/64";
+    }
+    return parts.slice(0, 4).join(":") + "::/64";
+  } catch {
+    return ip;
+  }
 }
 
 function generateToken() {
@@ -47,7 +74,8 @@ export async function handleInstallToken(request, env) {
   }
 
   const ip = extractClientIP(request);
-  const ipHash = await sha256Hex(ip);
+  const ipForRateLimit = normalizeIPForRateLimit(ip);
+  const ipHash = await sha256Hex(ipForRateLimit);
   const ipPrefix = ipHash.slice(0, 8);
   const rateKey = `${RATE_LIMIT_KEY_PREFIX}${ipHash}`;
 

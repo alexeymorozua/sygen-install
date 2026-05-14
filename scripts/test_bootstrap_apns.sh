@@ -348,6 +348,94 @@ else
     FAIL=$((FAIL+1))
 fi
 
+# ---------- Test 7: anonymous fallback does NOT leak into EFFECTIVE_INSTALL_TOKEN ----------
+# Anonymous bootstrap tokens are tagged subdomain="anonymous" in TOKEN_INDEX.
+# If install.sh's .env writeout (which only persists EFFECTIVE_INSTALL_TOKEN)
+# captured an anonymous token, future re-runs would feed it to eab /
+# heartbeat / release endpoints where SUBDOMAIN_RESERVATIONS.get("anonymous")
+# returns null → the Worker's defensive cleanup deletes the token. The fix
+# stores the anonymous token in a function-local var so it never escapes
+# the function and never appears in .env. Verify here.
+echo "Test 7: anonymous fallback does NOT set EFFECTIVE_INSTALL_TOKEN at caller scope"
+SYGEN_ROOT="$WORK_DIR/t7"
+mkdir -p "$SYGEN_ROOT/data/_secrets"
+
+TK_RESP7="$WORK_DIR/tk7.json"
+echo '{"ok":true,"install_token":"sit_anon_DEADBEEF","ttl_seconds":14400}' >"$TK_RESP7"
+APNS_RESP7="$WORK_DIR/apns7.json"
+KEY_B64_7="$(printf 'PAYLOAD-7' | base64)"
+cat >"$APNS_RESP7" <<EOF
+{"ok":true,"key_id":"ANON7KEY","key_b64":"$KEY_B64_7"}
+EOF
+make_curl_stub "$WORK_DIR/curl" \
+    "/bootstrap/install-token=$TK_RESP7,200" \
+    "/bootstrap/apns=$APNS_RESP7,200"
+
+OUT_ERR="$WORK_DIR/err7"
+RC=0
+SYGEN_ROOT="$SYGEN_ROOT" \
+EFFECTIVE_INSTALL_TOKEN="" \
+EFFECTIVE_HEARTBEAT_URL="https://install.sygen.pro/api/heartbeat" \
+EFFECTIVE_APNS_KEY_ID="" \
+PATH="$WORK_DIR:/usr/bin:/bin" \
+bash -c "source '$SHIM_FILE' && bootstrap_apns_key && printf 'AFTER_INSTALL_TOKEN=[%s]\nAFTER_BOOTSTRAP_TOKEN=[%s]\n' \"\${EFFECTIVE_INSTALL_TOKEN:-}\" \"\${EFFECTIVE_APNS_BOOTSTRAP_TOKEN:-}\"" \
+    2>"$OUT_ERR" >"$WORK_DIR/out7" || RC=$?
+
+OUT7="$(cat "$WORK_DIR/out7")"
+KEY_PATH7="$SYGEN_ROOT/data/_secrets/AuthKey_ANON7KEY.p8"
+if [ "$RC" = "0" ] \
+    && [ -f "$KEY_PATH7" ] \
+    && echo "$OUT7" | grep -q '^AFTER_INSTALL_TOKEN=\[\]$' \
+    && echo "$OUT7" | grep -q '^AFTER_BOOTSTRAP_TOKEN=\[\]$'; then
+    PASS=$((PASS+1))
+else
+    echo "  FAIL: rc=$RC" >&2
+    echo "  expected EFFECTIVE_INSTALL_TOKEN and EFFECTIVE_APNS_BOOTSTRAP_TOKEN both empty at caller scope" >&2
+    echo "  stdout: $OUT7" >&2
+    echo "  stderr: $(cat "$OUT_ERR")" >&2
+    FAIL=$((FAIL+1))
+fi
+
+# ---------- Test 8: real EFFECTIVE_INSTALL_TOKEN preserved unchanged ----------
+# Reservation-bound installs (auto submode) get a real install_token from
+# /api/provision. bootstrap_apns_key() must use it as-is and never
+# overwrite it — re-runs of install.sh need to keep using the same token
+# for eab/heartbeat/release calls.
+echo "Test 8: real EFFECTIVE_INSTALL_TOKEN preserved unchanged after bootstrap"
+SYGEN_ROOT="$WORK_DIR/t8"
+mkdir -p "$SYGEN_ROOT/data/_secrets"
+
+APNS_RESP8="$WORK_DIR/apns8.json"
+KEY_B64_8="$(printf 'PAYLOAD-8' | base64)"
+cat >"$APNS_RESP8" <<EOF
+{"ok":true,"key_id":"REAL8KEY","key_b64":"$KEY_B64_8"}
+EOF
+make_curl_stub "$WORK_DIR/curl" "/bootstrap/apns=$APNS_RESP8,200"
+
+OUT_ERR="$WORK_DIR/err8"
+RC=0
+SYGEN_ROOT="$SYGEN_ROOT" \
+EFFECTIVE_INSTALL_TOKEN="sit_real_RESERVATION_TOKEN_xyz" \
+EFFECTIVE_HEARTBEAT_URL="https://install.sygen.pro/api/heartbeat" \
+EFFECTIVE_APNS_KEY_ID="" \
+PATH="$WORK_DIR:/usr/bin:/bin" \
+bash -c "source '$SHIM_FILE' && bootstrap_apns_key && printf 'AFTER=[%s]\n' \"\${EFFECTIVE_INSTALL_TOKEN:-}\"" \
+    2>"$OUT_ERR" >"$WORK_DIR/out8" || RC=$?
+
+OUT8="$(cat "$WORK_DIR/out8")"
+KEY_PATH8="$SYGEN_ROOT/data/_secrets/AuthKey_REAL8KEY.p8"
+if [ "$RC" = "0" ] \
+    && [ -f "$KEY_PATH8" ] \
+    && echo "$OUT8" | grep -q '^AFTER=\[sit_real_RESERVATION_TOKEN_xyz\]$'; then
+    PASS=$((PASS+1))
+else
+    echo "  FAIL: rc=$RC" >&2
+    echo "  expected EFFECTIVE_INSTALL_TOKEN unchanged" >&2
+    echo "  stdout: $OUT8" >&2
+    echo "  stderr: $(cat "$OUT_ERR")" >&2
+    FAIL=$((FAIL+1))
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

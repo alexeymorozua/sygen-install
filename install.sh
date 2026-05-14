@@ -2730,6 +2730,17 @@ EFFECTIVE_APNS_ENVIRONMENT=$(get_env APNS_ENVIRONMENT "${APNS_ENVIRONMENT:-produ
 bootstrap_apns_key() {
     [ -n "${EFFECTIVE_HEARTBEAT_URL:-}" ] || return 0
 
+    # jq is installed earlier (apt on Linux, brew on macOS) before this
+    # function is called. Belt-and-suspenders preflight in case install
+    # order shifts — without jq, the response parsing below silently
+    # extracts empty strings and push stays disabled with no actionable
+    # hint to the operator.
+    if ! command -v jq >/dev/null 2>&1; then
+        warn "APNs bootstrap skipped: jq not installed (required for response parsing)."
+        warn "  Install via: brew install jq  (macOS) / apt-get install -y jq  (Linux)"
+        return 0
+    fi
+
     # Heartbeat URL is `https://install.sygen.pro/api/heartbeat` — strip
     # the suffix to get base, then append the bootstrap endpoint.
     local base="${EFFECTIVE_HEARTBEAT_URL%/heartbeat}"
@@ -2740,6 +2751,15 @@ bootstrap_apns_key() {
     # rate-limited per IP, returns a short-lived sentinel token that
     # /api/bootstrap/apns accepts. Failure here is non-fatal: push just
     # stays disabled and install continues.
+    #
+    # The anonymous token is stored in EFFECTIVE_APNS_BOOTSTRAP_TOKEN —
+    # a function-local alias that never reaches .env. Reusing
+    # EFFECTIVE_INSTALL_TOKEN here would (a) get the anonymous token
+    # persisted to .env on the next write-out, then (b) feed it into
+    # eab/heartbeat/release/dns_challenge calls on re-runs, where
+    # SUBDOMAIN_RESERVATIONS.get("anonymous") returns null and the
+    # Worker's defensive cleanup deletes the token from TOKEN_INDEX.
+    local EFFECTIVE_APNS_BOOTSTRAP_TOKEN=""
     if [ -z "${EFFECTIVE_INSTALL_TOKEN:-}" ]; then
         local token_url="${base}/bootstrap/install-token"
         log "Fetching anonymous install-token from $token_url"
@@ -2751,13 +2771,17 @@ bootstrap_apns_key() {
             local anon_token
             anon_token=$(printf '%s' "$tk_resp" | jq -r '.install_token // empty' 2>/dev/null || true)
             if [ -n "$anon_token" ]; then
-                EFFECTIVE_INSTALL_TOKEN="$anon_token"
-                log "Anonymous install-token acquired (TTL 1h)"
+                EFFECTIVE_APNS_BOOTSTRAP_TOKEN="$anon_token"
+                log "Anonymous install-token acquired (TTL 4h)"
             fi
         fi
     fi
 
-    if [ -z "${EFFECTIVE_INSTALL_TOKEN:-}" ]; then
+    # Precedence: real install_token (reservation-bound) > anonymous
+    # bootstrap token. The anonymous variant is only valid for
+    # /api/bootstrap/apns; reservation endpoints would reject it.
+    local _bootstrap_token="${EFFECTIVE_INSTALL_TOKEN:-${EFFECTIVE_APNS_BOOTSTRAP_TOKEN:-}}"
+    if [ -z "$_bootstrap_token" ]; then
         log "skip APNs bootstrap: no install_token (anonymous fallback failed)"
         return 0
     fi
@@ -2783,7 +2807,7 @@ bootstrap_apns_key() {
     local http
     http=$(curl -sS --ipv4 -o "$tmp" -w '%{http_code}' --max-time 10 \
         -X POST "$bootstrap_url" \
-        -H "Authorization: Bearer $EFFECTIVE_INSTALL_TOKEN" \
+        -H "Authorization: Bearer $_bootstrap_token" \
         -H "Accept: application/json" 2>/dev/null || echo "000")
 
     if [ "$http" != "200" ]; then

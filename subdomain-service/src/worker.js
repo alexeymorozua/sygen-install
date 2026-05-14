@@ -8,6 +8,10 @@
 //   DELETE /api/dns-challenge   — remove ACME DNS-01 TXT for owned subdomain
 //   POST   /api/eab             — return EAB creds for fallback CA (ZeroSSL)
 //   POST   /api/bootstrap/apns  — return APNs .p8 key for install.sh
+//   POST   /api/bootstrap/install-token
+//                                — issue ephemeral anonymous install_token
+//                                  for installs without a subdomain
+//                                  reservation (tailscale submode)
 //   GET    /api/health          — admin health check
 //
 // Scheduled:
@@ -27,6 +31,7 @@ import {
 } from "./handlers/dns_challenge.js";
 import { handleEab } from "./handlers/eab.js";
 import { handleBootstrapApns } from "./handlers/bootstrap_apns.js";
+import { handleInstallToken } from "./handlers/install_token.js";
 import { sweepExpired } from "./sweep.js";
 
 async function route(request, env) {
@@ -54,6 +59,9 @@ async function route(request, env) {
   }
   if (method === "POST" && path === "/api/bootstrap/apns") {
     return handleBootstrapApns(request, env);
+  }
+  if (method === "POST" && path === "/api/bootstrap/install-token") {
+    return handleInstallToken(request, env);
   }
   if (method === "GET" && path === "/api/health") {
     return handleHealth(request, env);

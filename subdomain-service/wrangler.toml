@@ -48,6 +48,20 @@ PROVISION_RATE_LIMIT = "30"
 # developer.apple.com (currently RBJZU2A5KU). The secret is set via
 #   wrangler secret put APNS_AUTH_KEY_B64 < <(base64 < AuthKey_*.p8)
 APNS_KEY_ID = "RBJZU2A5KU"
+# APNs Team ID — public Apple Developer identifier, not a secret.
+# Returned by /api/bootstrap/apns so install.sh can populate APNS_TEAM_ID
+# in the core .env without the operator pre-exporting it.
+APNS_TEAM_ID = "4KQZ8D8P7T"
+# iOS bundle identifier the .p8 key is bound to. Returned by
+# /api/bootstrap/apns; matches APNS_BUNDLE_ID in core .env and the
+# iOS app's Info.plist bundle ID.
+APNS_BUNDLE_ID = "com.timedesign.sygen.ios"
+# Default APNs environment for bootstrap response. Per-device routing
+# (sandbox vs production) is decided by sygen-core at push time from
+# the `env` field in /api/push/register, so this is just the value
+# install.sh seeds .env with — sandbox installs still work because the
+# core falls back on BadDeviceToken.
+APNS_DEFAULT_ENVIRONMENT = "production"
 
 # Daily sweep at 02:00 UTC — deletes expired reservations.
 [triggers]

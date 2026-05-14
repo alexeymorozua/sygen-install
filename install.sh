@@ -2728,12 +2728,40 @@ EFFECTIVE_APNS_ENVIRONMENT=$(get_env APNS_ENVIRONMENT "${APNS_ENVIRONMENT:-produ
 # 1/24h per token). Graceful: if Worker is unreachable or secret not
 # configured, push just stays disabled — install proceeds normally.
 bootstrap_apns_key() {
-    [ -n "${EFFECTIVE_INSTALL_TOKEN:-}" ] || { log "skip APNs bootstrap: no install_token"; return 0; }
     [ -n "${EFFECTIVE_HEARTBEAT_URL:-}" ] || return 0
 
     # Heartbeat URL is `https://install.sygen.pro/api/heartbeat` — strip
     # the suffix to get base, then append the bootstrap endpoint.
     local base="${EFFECTIVE_HEARTBEAT_URL%/heartbeat}"
+
+    # Tailscale / publicdomain submodes don't go through /api/provision
+    # (no subdomain reservation), so they never get an install_token.
+    # Fall back to the anonymous /api/bootstrap/install-token endpoint —
+    # rate-limited per IP, returns a short-lived sentinel token that
+    # /api/bootstrap/apns accepts. Failure here is non-fatal: push just
+    # stays disabled and install continues.
+    if [ -z "${EFFECTIVE_INSTALL_TOKEN:-}" ]; then
+        local token_url="${base}/bootstrap/install-token"
+        log "Fetching anonymous install-token from $token_url"
+        local tk_resp
+        tk_resp=$(curl -sS --ipv4 -X POST "$token_url" \
+            -H "Accept: application/json" \
+            --max-time 10 2>/dev/null || true)
+        if [ -n "$tk_resp" ]; then
+            local anon_token
+            anon_token=$(printf '%s' "$tk_resp" | jq -r '.install_token // empty' 2>/dev/null || true)
+            if [ -n "$anon_token" ]; then
+                EFFECTIVE_INSTALL_TOKEN="$anon_token"
+                log "Anonymous install-token acquired (TTL 1h)"
+            fi
+        fi
+    fi
+
+    if [ -z "${EFFECTIVE_INSTALL_TOKEN:-}" ]; then
+        log "skip APNs bootstrap: no install_token (anonymous fallback failed)"
+        return 0
+    fi
+
     local bootstrap_url="${base}/bootstrap/apns"
 
     local secrets_dir="$SYGEN_ROOT/data/_secrets"
@@ -2764,9 +2792,15 @@ bootstrap_apns_key() {
         return 0
     fi
 
-    local key_id key_b64
+    local key_id key_b64 team_id bundle_id environment
     key_id=$(jq -r '.key_id // empty' < "$tmp" 2>/dev/null || true)
     key_b64=$(jq -r '.key_b64 // empty' < "$tmp" 2>/dev/null || true)
+    # New (1.6.196+) fields. Older Workers omit them — `// empty` falls
+    # back to "" and the precedence clause below leaves the operator's
+    # pre-exported value (or existing .env) untouched.
+    team_id=$(jq -r '.team_id // empty' < "$tmp" 2>/dev/null || true)
+    bundle_id=$(jq -r '.bundle_id // empty' < "$tmp" 2>/dev/null || true)
+    environment=$(jq -r '.environment // empty' < "$tmp" 2>/dev/null || true)
     rm -f "$tmp"
 
     if [ -z "$key_id" ] || [ -z "$key_b64" ]; then
@@ -2782,9 +2816,13 @@ bootstrap_apns_key() {
     fi
     chmod 600 "$key_path"
 
-    # Carry the freshly-fetched KEY_ID into the .env / plist writeout
-    # below; operators who pre-exported APNS_KEY_ID keep precedence.
+    # Carry Worker-supplied APNs config into the .env / plist writeout
+    # below; operator-supplied values (process env / pre-existing .env)
+    # keep precedence via the `:-` guards.
     EFFECTIVE_APNS_KEY_ID="${EFFECTIVE_APNS_KEY_ID:-$key_id}"
+    EFFECTIVE_APNS_TEAM_ID="${EFFECTIVE_APNS_TEAM_ID:-$team_id}"
+    EFFECTIVE_APNS_BUNDLE_ID="${EFFECTIVE_APNS_BUNDLE_ID:-$bundle_id}"
+    EFFECTIVE_APNS_ENVIRONMENT="${EFFECTIVE_APNS_ENVIRONMENT:-$environment}"
     log "APNs key installed: $key_path (KEY_ID=$key_id)"
 }
 

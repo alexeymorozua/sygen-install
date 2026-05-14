@@ -54,12 +54,18 @@ export async function handleBootstrapApns(request, env) {
     return jsonResponse(401, { ok: false, error: "invalid_token" });
   }
 
-  const raw = await env.SUBDOMAIN_RESERVATIONS.get(subdomain);
-  if (!raw) {
-    // Stale TOKEN_INDEX entry — same cleanup pattern as heartbeat/eab.
-    await env.TOKEN_INDEX.delete(hash);
-    console.warn("bootstrap_apns: invalid_token", { token_hash_prefix: tokenPrefix });
-    return jsonResponse(401, { ok: false, error: "invalid_token" });
+  // Anonymous tokens (issued by /api/bootstrap/install-token) carry the
+  // sentinel "anonymous" instead of a real subdomain — they have no
+  // reservation row to look up. The TOKEN_INDEX entry itself is
+  // TTL-gated, so freshness is already enforced by KV expiry.
+  if (subdomain !== "anonymous") {
+    const raw = await env.SUBDOMAIN_RESERVATIONS.get(subdomain);
+    if (!raw) {
+      // Stale TOKEN_INDEX entry — same cleanup pattern as heartbeat/eab.
+      await env.TOKEN_INDEX.delete(hash);
+      console.warn("bootstrap_apns: invalid_token", { token_hash_prefix: tokenPrefix });
+      return jsonResponse(401, { ok: false, error: "invalid_token" });
+    }
   }
 
   const rateKey = `${RATE_LIMIT_PREFIX}${hash}`;
@@ -89,9 +95,19 @@ export async function handleBootstrapApns(request, env) {
     key_id: keyId,
   });
 
-  return jsonResponse(200, {
+  // team_id / bundle_id / environment are public-ish APNs config that
+  // install.sh used to write into .env / plist from env or expect the
+  // operator to pre-export. Returning them here lets install.sh come up
+  // with a fully populated APNs config in one round-trip, removing the
+  // last hand-config step for testers. Empty strings if unset in
+  // wrangler.toml [vars] — install.sh treats those as "leave existing".
+  const body = {
     ok: true,
     key_id: keyId,
     key_b64: keyB64,
-  });
+    team_id: env.APNS_TEAM_ID || "",
+    bundle_id: env.APNS_BUNDLE_ID || "",
+    environment: env.APNS_DEFAULT_ENVIRONMENT || "production",
+  };
+  return jsonResponse(200, body);
 }

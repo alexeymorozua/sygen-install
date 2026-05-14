@@ -64,6 +64,69 @@ test("bootstrap_apns: returns key_id + key_b64 on valid token", async () => {
   assert.equal(body.key_b64, env.APNS_AUTH_KEY_B64);
 });
 
+test("bootstrap_apns: returns team_id + bundle_id + environment when configured", async () => {
+  const { env, token } = await makeEnvWithReservation();
+  env.APNS_TEAM_ID = "4KQZ8D8P7T";
+  env.APNS_BUNDLE_ID = "com.timedesign.sygen.ios";
+  env.APNS_DEFAULT_ENVIRONMENT = "production";
+  const resp = await handleBootstrapApns(bootstrapRequest({ token }), env);
+  assert.equal(resp.status, 200);
+  const body = await resp.json();
+  assert.equal(body.team_id, "4KQZ8D8P7T");
+  assert.equal(body.bundle_id, "com.timedesign.sygen.ios");
+  assert.equal(body.environment, "production");
+});
+
+test("bootstrap_apns: falls back to empty team/bundle and 'production' env when not configured", async () => {
+  const { env, token } = await makeEnvWithReservation();
+  // No APNS_TEAM_ID / APNS_BUNDLE_ID / APNS_DEFAULT_ENVIRONMENT in env.
+  const resp = await handleBootstrapApns(bootstrapRequest({ token }), env);
+  assert.equal(resp.status, 200);
+  const body = await resp.json();
+  assert.equal(body.team_id, "");
+  assert.equal(body.bundle_id, "");
+  assert.equal(body.environment, "production");
+});
+
+test("bootstrap_apns: anonymous token (TOKEN_INDEX='anonymous') skips reservation lookup", async () => {
+  const env = {
+    SYGEN_DOMAIN: "sygen.pro",
+    APNS_KEY_ID: "RBJZU2A5KU",
+    APNS_AUTH_KEY_B64: "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCnN0dWIKLS0tLS1FTkQ=",
+    SUBDOMAIN_RESERVATIONS: makeKv(),
+    TOKEN_INDEX: makeKv(),
+  };
+  const anonToken = "sit_anon_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const hash = await sha256Hex(anonToken);
+  await env.TOKEN_INDEX.put(hash, "anonymous");
+
+  const resp = await handleBootstrapApns(bootstrapRequest({ token: anonToken }), env);
+  assert.equal(resp.status, 200);
+  const body = await resp.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.key_id, "RBJZU2A5KU");
+  // Anonymous lookup should NOT have created or required any reservation row.
+  assert.equal(env.SUBDOMAIN_RESERVATIONS.data.has("anonymous"), false);
+});
+
+test("bootstrap_apns: anonymous token rate-limit still applies (one fetch per token / 24h)", async () => {
+  const env = {
+    SYGEN_DOMAIN: "sygen.pro",
+    APNS_KEY_ID: "RBJZU2A5KU",
+    APNS_AUTH_KEY_B64: "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCnN0dWIKLS0tLS1FTkQ=",
+    SUBDOMAIN_RESERVATIONS: makeKv(),
+    TOKEN_INDEX: makeKv(),
+  };
+  const anonToken = "sit_anon_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const hash = await sha256Hex(anonToken);
+  await env.TOKEN_INDEX.put(hash, "anonymous");
+
+  const first = await handleBootstrapApns(bootstrapRequest({ token: anonToken }), env);
+  assert.equal(first.status, 200);
+  const second = await handleBootstrapApns(bootstrapRequest({ token: anonToken }), env);
+  assert.equal(second.status, 429);
+});
+
 test("bootstrap_apns: 401 on missing Authorization header", async () => {
   const { env } = await makeEnvWithReservation();
   const resp = await handleBootstrapApns(bootstrapRequest(), env);

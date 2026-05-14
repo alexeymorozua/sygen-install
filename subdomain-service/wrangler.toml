@@ -42,6 +42,12 @@ SUBDOMAIN_LENGTH = "8"
 # hit even 5 (one provision per fresh install). Defence-in-depth still
 # protects the underlying CF API quota — 30/h * 1 IP <<< 1200/5min/zone.
 PROVISION_RATE_LIMIT = "30"
+# APNs auth key ID — public identifier paired with the secret
+# APNS_AUTH_KEY_B64. install.sh writes the .p8 out as
+# AuthKey_${APNS_KEY_ID}.p8, so this must match the key registered at
+# developer.apple.com (currently RBJZU2A5KU). The secret is set via
+#   wrangler secret put APNS_AUTH_KEY_B64 < <(base64 < AuthKey_*.p8)
+APNS_KEY_ID = "RBJZU2A5KU"
 
 # Daily sweep at 02:00 UTC — deletes expired reservations.
 [triggers]
@@ -52,3 +58,7 @@ crons = ["0 2 * * *"]
 #                         records during /api/provision and TXT records for
 #                         ACME DNS-01 via /api/dns-challenge.
 #   ADMIN_TOKEN         — required for /api/health and any future admin routes.
+#   APNS_AUTH_KEY_B64   — base64 of the .p8 APNs auth key (paired with
+#                         APNS_KEY_ID above). Served by /api/bootstrap/apns
+#                         to install.sh; if unset the endpoint returns 503
+#                         and install.sh leaves push disabled (no fatal).

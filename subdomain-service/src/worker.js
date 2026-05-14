@@ -1,13 +1,14 @@
 // Sygen subdomain provisioning Worker.
 //
 // Endpoints (see PHASE3_subdomain_provisioning_design.md in sygen-clean):
-//   POST   /api/provision      — allocate a fresh <id>.sygen.pro
-//   POST   /api/heartbeat      — extend reservation TTL
-//   DELETE /api/release        — free reservation on uninstall
-//   POST   /api/dns-challenge  — add ACME DNS-01 TXT for owned subdomain
-//   DELETE /api/dns-challenge  — remove ACME DNS-01 TXT for owned subdomain
-//   POST   /api/eab            — return EAB creds for fallback CA (ZeroSSL)
-//   GET    /api/health         — admin health check
+//   POST   /api/provision       — allocate a fresh <id>.sygen.pro
+//   POST   /api/heartbeat       — extend reservation TTL
+//   DELETE /api/release         — free reservation on uninstall
+//   POST   /api/dns-challenge   — add ACME DNS-01 TXT for owned subdomain
+//   DELETE /api/dns-challenge   — remove ACME DNS-01 TXT for owned subdomain
+//   POST   /api/eab             — return EAB creds for fallback CA (ZeroSSL)
+//   POST   /api/bootstrap/apns  — return APNs .p8 key for install.sh
+//   GET    /api/health          — admin health check
 //
 // Scheduled:
 //   Daily cron — sweep expired reservations (cf_record_id + KV).
@@ -25,6 +26,7 @@ import {
   handleDnsChallengeDelete,
 } from "./handlers/dns_challenge.js";
 import { handleEab } from "./handlers/eab.js";
+import { handleBootstrapApns } from "./handlers/bootstrap_apns.js";
 import { sweepExpired } from "./sweep.js";
 
 async function route(request, env) {
@@ -49,6 +51,9 @@ async function route(request, env) {
   }
   if (method === "POST" && path === "/api/eab") {
     return handleEab(request, env);
+  }
+  if (method === "POST" && path === "/api/bootstrap/apns") {
+    return handleBootstrapApns(request, env);
   }
   if (method === "GET" && path === "/api/health") {
     return handleHealth(request, env);

@@ -2670,6 +2670,76 @@ EFFECTIVE_APNS_KEY_ID=$(get_env APNS_KEY_ID "${APNS_KEY_ID:-}")
 EFFECTIVE_APNS_TEAM_ID=$(get_env APNS_TEAM_ID "${APNS_TEAM_ID:-}")
 EFFECTIVE_APNS_BUNDLE_ID=$(get_env APNS_BUNDLE_ID "${APNS_BUNDLE_ID:-}")
 EFFECTIVE_APNS_ENVIRONMENT=$(get_env APNS_ENVIRONMENT "${APNS_ENVIRONMENT:-production}")
+
+# ---------- Bootstrap APNs auth key (post-heartbeat) ----------
+# install.sh historically expected operators to drop AuthKey_*.p8 into
+# ${SYGEN_HOME}/_secrets/ manually. That never happened for testers —
+# their cores ran with APNs disabled. Worker `/api/bootstrap/apns` now
+# distributes the key on demand, gated by install_token (rate-limited
+# 1/24h per token). Graceful: if Worker is unreachable or secret not
+# configured, push just stays disabled — install proceeds normally.
+bootstrap_apns_key() {
+    [ -n "${EFFECTIVE_INSTALL_TOKEN:-}" ] || { log "skip APNs bootstrap: no install_token"; return 0; }
+    [ -n "${EFFECTIVE_HEARTBEAT_URL:-}" ] || return 0
+
+    # Heartbeat URL is `https://install.sygen.pro/api/heartbeat` — strip
+    # the suffix to get base, then append the bootstrap endpoint.
+    local base="${EFFECTIVE_HEARTBEAT_URL%/heartbeat}"
+    local bootstrap_url="${base}/bootstrap/apns"
+
+    local secrets_dir="$SYGEN_ROOT/data/_secrets"
+    mkdir -p "$secrets_dir"
+    chmod 700 "$secrets_dir"
+
+    # Idempotency: if any AuthKey_*.p8 already exists (manual drop or
+    # prior install.sh run that already pulled one), keep it. Worker
+    # rate-limits 1/24h per token so re-runs of install.sh within the
+    # window would 429 anyway — short-circuit before the curl.
+    if ls "$secrets_dir"/AuthKey_*.p8 >/dev/null 2>&1; then
+        log "APNs key already present in $secrets_dir — keeping existing"
+        return 0
+    fi
+
+    log "Bootstrapping APNs key from $bootstrap_url"
+    local tmp
+    tmp=$(mktemp)
+    local http
+    http=$(curl -sS --ipv4 -o "$tmp" -w '%{http_code}' --max-time 10 \
+        -X POST "$bootstrap_url" \
+        -H "Authorization: Bearer $EFFECTIVE_INSTALL_TOKEN" \
+        -H "Accept: application/json" 2>/dev/null || echo "000")
+
+    if [ "$http" != "200" ]; then
+        warn "APNs bootstrap skipped (HTTP $http) — push will be disabled"
+        rm -f "$tmp"
+        return 0
+    fi
+
+    local key_id key_b64
+    key_id=$(jq -r '.key_id // empty' < "$tmp" 2>/dev/null || true)
+    key_b64=$(jq -r '.key_b64 // empty' < "$tmp" 2>/dev/null || true)
+    rm -f "$tmp"
+
+    if [ -z "$key_id" ] || [ -z "$key_b64" ]; then
+        warn "APNs bootstrap response malformed — push will be disabled"
+        return 0
+    fi
+
+    local key_path="$secrets_dir/AuthKey_${key_id}.p8"
+    if ! printf '%s' "$key_b64" | base64 -d > "$key_path" 2>/dev/null; then
+        warn "APNs bootstrap: base64 decode failed"
+        rm -f "$key_path"
+        return 0
+    fi
+    chmod 600 "$key_path"
+
+    # Carry the freshly-fetched KEY_ID into the .env / plist writeout
+    # below; operators who pre-exported APNS_KEY_ID keep precedence.
+    EFFECTIVE_APNS_KEY_ID="${EFFECTIVE_APNS_KEY_ID:-$key_id}"
+    log "APNs key installed: $key_path (KEY_ID=$key_id)"
+}
+
+bootstrap_apns_key
 # NEXT_PUBLIC_SYGEN_API_URL: macOS localhost mode forces localhost (no proxy
 # layer in front of admin), but tailscale/publicdomain submodes terminate
 # TLS in front of both admin (8080) and core (8081) — so admin should hit

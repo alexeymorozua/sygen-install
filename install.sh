@@ -233,6 +233,51 @@ ensure_brew_in_path() {
     return 0
 }
 
+# ---------- Ensure Tailscale CLI present (macOS self-hosted, tailscale submode) ----------
+# iOS app preflight (commit 8d1d0a1, 2026-05-12) SSH'es to the target Mac
+# and probes for a `tailscale` binary before kicking off install.sh. The
+# App Store Tailscale.app inherently can't double as a CLI (BundleIdentifier
+# registry error on direct exec; symlinks crash the same way). The brew
+# `tailscale` formula ships a real CLI + daemon without the GUI shell,
+# which is enough for headless / SSH-driven workflows.
+#
+# This is defensive — runs on every install pass so a wiped/uninstalled
+# CLI gets restored automatically. First-bootstrap (before install.sh
+# ever runs) is covered by a separate iOS preflight fix.
+ensure_tailscale_cli() {
+    if command -v tailscale >/dev/null 2>&1; then
+        log "Tailscale CLI present at $(command -v tailscale)"
+        return 0
+    fi
+
+    log "Tailscale CLI not found — attempting install"
+
+    if ! command -v brew >/dev/null 2>&1; then
+        die "Tailscale CLI required but neither installed nor reachable via brew. Install manually: https://pkgs.tailscale.com/stable/#macos"
+    fi
+
+    log "Installing tailscale via brew..."
+    if ! brew install tailscale >/dev/null 2>&1; then
+        die "brew install tailscale failed. Try manually: brew install tailscale"
+    fi
+
+    # Refresh PATH heuristics — brew binary path depends on architecture
+    # and a fresh `brew install` won't be on the current shell's PATH yet.
+    if ! command -v tailscale >/dev/null 2>&1; then
+        if [ -x /opt/homebrew/bin/brew ]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        elif [ -x /usr/local/bin/brew ]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+        fi
+    fi
+
+    if ! command -v tailscale >/dev/null 2>&1; then
+        die "tailscale brew formula installed but binary not in PATH"
+    fi
+
+    log "Tailscale CLI installed: $(command -v tailscale)"
+}
+
 # ---------- Port detection (v1.6.84+) ----------
 # Multi-instance support: a Mac may already run a dev sygen / Grafana /
 # Postgres / etc. on our default ports. _port_in_use probes for a LISTEN
@@ -1262,6 +1307,10 @@ if [ $LOCAL_MODE -eq 1 ]; then
             # Pre-flight: CLI must be reachable AND the daemon authenticated.
             # We don't try to log the user in — Tailscale auth flows are
             # interactive (browser/SSO) and beyond install.sh's mandate.
+            #
+            # Auto-install the brew tailscale formula if the CLI is missing.
+            # Re-runs / wiped CLIs get restored without manual intervention.
+            ensure_tailscale_cli
             #
             # Tailscale 1.96+ from the Mac App Store does NOT install a
             # /usr/local/bin/tailscale wrapper; the `install-cli` subcommand

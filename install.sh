@@ -4173,10 +4173,13 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     #
     # Behaviour:
     #   - Interactive TTY: prompt y/N (default Y).
-    #   - Non-interactive (iOS launcher etc.): skip unless SYGEN_AUTO_FUNNEL=1
-    #     is explicitly set. We do NOT auto-enable in non-interactive mode
-    #     because Funnel makes the path public to the whole internet — that
-    #     decision deserves an explicit opt-in when no human is at the keys.
+    #   - Non-interactive (iOS launcher etc.): enable Funnel by default. The
+    #     user picked tailscale submode, which strongly implies they want
+    #     webhooks reachable from outside the tailnet — silent skip was a
+    #     broken UX (webhooks looked configured but nothing external could
+    #     hit them). Opt out with SYGEN_NO_FUNNEL=1. SYGEN_AUTO_FUNNEL=1
+    #     remains as a documented opt-in for backward compat (and is now
+    #     the implicit default).
     if [ -t 0 ]; then
         echo ""
         echo "Включить Tailscale Funnel для public webhook access?"
@@ -4195,12 +4198,12 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
                 log "Tailscale Funnel enabled for /webhooks/ — public webhook access ready"
                 ;;
         esac
-    elif [ "${SYGEN_AUTO_FUNNEL:-}" = "1" ]; then
-        _ts_run "funnel /webhooks/" 0 funnel --bg --set-path=/webhooks/ "http://127.0.0.1:${SYGEN_CORE_PORT}/webhooks/"
-        log "Tailscale Funnel enabled for /webhooks/ (auto via SYGEN_AUTO_FUNNEL=1)"
+    elif [ "${SYGEN_NO_FUNNEL:-}" = "1" ]; then
+        log "Funnel skipped — SYGEN_NO_FUNNEL=1. Webhook accessible only within tailnet."
     else
-        log "Non-interactive mode — skip Funnel. Set SYGEN_AUTO_FUNNEL=1 env to force enable,"
-        log "  or run later: curl -fsSL https://install.sygen.pro/scripts/enable_webhook_funnel.sh | bash"
+        _ts_run "funnel /webhooks/" 0 funnel --bg --set-path=/webhooks/ "http://127.0.0.1:${SYGEN_CORE_PORT}/webhooks/"
+        log "Tailscale Funnel enabled for /webhooks/ by default (non-interactive tailscale submode)."
+        log "  Disable with SYGEN_NO_FUNNEL=1 if you only need tailnet-internal webhook access."
     fi
 fi
 

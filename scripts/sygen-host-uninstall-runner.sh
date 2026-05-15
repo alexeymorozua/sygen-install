@@ -1,8 +1,8 @@
 #!/bin/bash
 # Linux self-uninstall runner — pairs with /api/system/uninstall on core.
 #
-# Polls $SYGEN_ROOT/host_updates/uninstall_requested every 5 s. When admin
-# POSTs to /api/system/uninstall, sygen-core writes that file with a small
+# Polls $SYGEN_ROOT/host_updates/uninstall_requested every 5 s. When a
+# client POSTs to /api/system/uninstall, sygen-core writes that file with a small
 # JSON body for forensics. This runner picks it up, atomically renames it
 # to uninstall_running so duplicate POSTs cannot double-execute, then
 # detaches and exec's uninstall.sh --force in a fresh session.
@@ -89,7 +89,7 @@ process_trigger() {
         # --property=KillMode=process so we don't kill children that
         #   uninstall.sh itself spawns (apt, systemctl, etc.) when the
         #   unit eventually closes.
-        # Tee output to log_file so existing log-tailing tooling (admin
+        # Tee output to log_file so existing log-tailing tooling (iOS
         # uninstall progress UI) keeps working in parallel with journal.
         systemd-run \
             --unit="$unit_name" \

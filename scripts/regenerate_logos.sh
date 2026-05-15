@@ -12,7 +12,7 @@
 #
 # Output: 256x256 RGBA PNG with transparent background, one per SVG.
 # Skips _default.svg (it's the in-app fallback, never referenced from JSON).
-# SVGs are NOT removed — kept for web admin / future vector consumers.
+# SVGs are NOT removed — kept for future vector consumers.
 
 set -e
 

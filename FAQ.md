@@ -8,7 +8,7 @@ Quick answers to the most common questions. If your question isn't here, open an
 
 ### What is Sygen?
 
-Sygen is a self-hosted AI assistant framework. You run it on your own VPS or Mac/PC, connect Anthropic's Claude (or OpenAI Codex / Google Gemini), and get a personal AI assistant accessible through iOS, Android, or a web admin panel. Your conversations, files, and memory live entirely on your hardware — Sygen never sees your data.
+Sygen is a self-hosted AI assistant framework. You run it on your own VPS or Mac/PC, connect Anthropic's Claude (or OpenAI Codex / Google Gemini), and get a personal AI assistant accessible through the iOS app (Android and desktop clients are in development). Your conversations, files, and memory live entirely on your hardware — Sygen never sees your data.
 
 ### Where should I install it?
 
@@ -46,14 +46,14 @@ The full list of 48 supported providers (with regional filters) is in the iOS ap
 
 ### How do I install Sygen on a VPS?
 
-**Recommended:** use the iOS app's "Add server" → VPS Deploy Wizard. Pick a provider, rent a VPS (you'll get root credentials by email), enter them in the wizard. Sygen will be installed automatically — you get a working HTTPS admin URL within ~5-7 minutes.
+**Recommended:** use the iOS app's "Add server" → VPS Deploy Wizard. Pick a provider, rent a VPS (you'll get root credentials by email), enter them in the wizard. Sygen will be installed automatically — you get a working HTTPS server URL within ~5-7 minutes.
 
 **Manual install (advanced):**
 ```bash
 ssh root@your-vps-ip
 curl -fsSL https://install.sygen.pro/install.sh | bash
 ```
-This runs the auto-mode flow: a free `<random>.sygen.pro` subdomain is allocated, TLS certificate is issued, Sygen starts up. The final output prints your admin password.
+This runs the auto-mode flow: a free `<random>.sygen.pro` subdomain is allocated, TLS certificate is issued, Sygen starts up. The final output prints your initial admin login + password.
 
 ### How do I install Sygen on my Mac/PC (via Tailscale)?
 
@@ -195,7 +195,7 @@ Source-available. The installer + Worker are public at https://github.com/alexey
 
 ### Has it been security-reviewed?
 
-Yes. The install scripts, Worker, core, and admin panel have been reviewed by the security-review skill (Anthropic's automated code review). All findings have been addressed.
+Yes. The install scripts, Worker, and core have been reviewed by the security-review skill (Anthropic's automated code review). All findings have been addressed.
 
 ---
 
@@ -204,7 +204,7 @@ Yes. The install scripts, Worker, core, and admin panel have been reviewed by th
 ### iPhone can't reach my Sygen install — "couldn't connect" error
 
 Check in this order:
-1. Open the URL in Safari first — does the admin login page load? If no, your VPS is down or DNS hasn't propagated yet (wait ~5 min after install).
+1. Open the URL in Safari first — does it respond at all? If no, your VPS is down or DNS hasn't propagated yet (wait ~5 min after install).
 2. Tailscale users: are both iPhone and Mac on the same tailnet? Run `tailscale status` on Mac.
 3. publicdomain users: are router ports 80/443 forwarded to the Mac?
 4. Custom domain users: does `dig <yourdomain>` show your VPS IP?

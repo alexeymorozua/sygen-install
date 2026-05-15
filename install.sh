@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # Sygen install script — NATIVE install (no Docker, no Colima).
 #
-# Since 1.6.105: admin web is no longer installed (frozen sygen-admin
-# repo kept for emergency recovery). Workflow is iOS-app-only with a
-# desktop client in development. Templates pro.sygen.admin.plist /
-# sygen-admin.service still ship in scripts/ for hand-recovery only.
+# Workflow is iOS-app-only with a desktop client in development.
 #
 # Linux  (Debian 12+/Ubuntu 22+ VPS): apt, Python 3.14 venv, Node 22 (for
 #        the Claude CLI only), systemd units (sygen-core, sygen-updater),
@@ -35,22 +32,15 @@
 #   SYGEN_CORE_VERSION        default: latest — query GitHub Releases for
 #                             the newest core-X.Y.Z tag. Pin to a specific
 #                             version (e.g. 1.6.127) to freeze installs.
-#   SYGEN_ADMIN_VERSION       default: 0.5.66 — UNUSED since 1.6.105
-#                             (admin web removed); the env stub stays
-#                             so older callers don't error out.
 #   SYGEN_RELEASE_SOURCE      default: github (download wheel from GitHub
 #                             Releases). "source" = build from a local
 #                             checkout in SYGEN_CORE_SOURCE_DIR.
 #   SYGEN_CORE_SOURCE_DIR     when SYGEN_RELEASE_SOURCE=source: path to
 #                             a `sygen` checkout (pip install <dir>).
-#   SYGEN_ADMIN_SOURCE_DIR    UNUSED since 1.6.105 (admin web removed).
-#   SYGEN_ADMIN_PORT          UNUSED since 1.6.105 (admin web removed);
-#                             the placeholder stays in .env so older
-#                             tooling doesn't break, default 8080.
 #   SYGEN_CORE_PORT           host port for core API, default 8081.
 #   SYGEN_INTERAGENT_PORT     localhost port for the inter-agent bus, default 8799.
 #   SYGEN_UPDATER_PORT        localhost port for the updater HTTP server, default 8082.
-#                             All four auto-shift to the next free port (default+1, +2, …)
+#                             All three auto-shift to the next free port (default+1, +2, …)
 #                             when the default is occupied (multi-instance / coexistence
 #                             with Grafana/Postgres/dev sygen). Operator overrides win
 #                             verbatim; collisions on an explicit override are fatal.
@@ -70,7 +60,6 @@
 # $HOME/.sygen-local on macOS. Native processes default to these ports
 # (auto-shifted to the next free port if any are already taken):
 #   localhost:8081 — sygen-core   (FastAPI/aiohttp REST + WebSocket)
-#   localhost:8080 — UNUSED since 1.6.105 (was sygen-admin Next.js)
 #   localhost:8082 — sygen-updater (FastAPI, bound to 127.0.0.1, bearer-authed)
 #   localhost:8799 — interagent bus (used by the multi-agent CLI tools)
 #
@@ -285,10 +274,9 @@ ensure_tailscale_cli() {
 # overrides (SYGEN_*_PORT env vars) are captured BEFORE this point so they
 # can be honoured verbatim downstream — see PORT_*_OVERRIDE snapshot below.
 PORT_CORE_OVERRIDE="${SYGEN_CORE_PORT:-}"
-PORT_ADMIN_OVERRIDE="${SYGEN_ADMIN_PORT:-}"
 PORT_INTERAGENT_OVERRIDE="${SYGEN_INTERAGENT_PORT:-}"
 PORT_UPDATER_OVERRIDE="${SYGEN_UPDATER_PORT:-}"
-unset SYGEN_CORE_PORT SYGEN_ADMIN_PORT SYGEN_INTERAGENT_PORT SYGEN_UPDATER_PORT
+unset SYGEN_CORE_PORT SYGEN_INTERAGENT_PORT SYGEN_UPDATER_PORT
 
 # Ports already handed out in this install run. _resolve_port reads this
 # (from the parent shell, since it runs in a $(...) subshell) and never
@@ -348,7 +336,7 @@ _find_free_port() {
 
 # Resolve a port honouring (in priority): operator env override → existing
 # install (config.json / .env) → default + auto-shift if occupied.
-# $1=label (CORE|ADMIN|INTERAGENT|UPDATER), $2=default port, $3=override value
+# $1=label (CORE|INTERAGENT|UPDATER), $2=default port, $3=override value
 _resolve_port() {
     local label="$1" default="$2" override="$3"
     local port
@@ -387,7 +375,7 @@ _resolve_port() {
                 claimed="$(jq -r '.interagent_port // empty' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || true)"
             fi
             ;;
-        ADMIN|UPDATER)
+        UPDATER)
             if [ -f "$SYGEN_ROOT/.env" ]; then
                 claimed="$(grep -E "^SYGEN_${label}_PORT=" "$SYGEN_ROOT/.env" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
             fi
@@ -451,19 +439,17 @@ SYGEN_MANIFEST_PLISTS=()
 # unrecorded so uninstall.sh never touches a model the user pre-staged.
 # Each entry is a JSON object literal: {"path":"…","purpose":"…","size_bytes":N}.
 SYGEN_MANIFEST_DOWNLOADED=()
-# v1.7+ (native): per-platform autostart artifacts. macOS gets three
-# LaunchAgents (core / admin / updater); Linux gets the matching systemd
-# units. Tracked redundantly in SYGEN_MANIFEST_PLISTS too so the existing
-# unload loops in uninstall.sh keep working — the dedicated fields here
-# are for self-documenting manifests and the iOS preview UI.
+# v1.7+ (native): per-platform autostart artifacts. macOS gets two
+# LaunchAgents (core / updater); Linux gets the matching systemd units.
+# Tracked redundantly in SYGEN_MANIFEST_PLISTS too so the existing unload
+# loops in uninstall.sh keep working — the dedicated fields here are for
+# self-documenting manifests and the iOS preview UI.
 SYGEN_MANIFEST_AUTOSTART_PLISTS=()
 SYGEN_MANIFEST_AUTOSTART_LINUX_UNITS=()
 # Resolved native artefact paths. Recorded so uninstall can rm -rf them
 # directly without having to re-derive locations from $SYGEN_ROOT.
 SYGEN_MANIFEST_CORE_VENV=""
-SYGEN_MANIFEST_ADMIN_DIR=""
 SYGEN_MANIFEST_CORE_VERSION=""
-SYGEN_MANIFEST_ADMIN_VERSION=""
 
 _manifest_has_item() {
     local needle="$1"
@@ -592,7 +578,7 @@ manifest_record_autostart_plist() {
 
 manifest_record_autostart_linux_unit() {
     # $1 = absolute path to an installed systemd unit file. Idempotent —
-    # we install three units (core/admin/updater) so multiple calls are
+    # we install two units (core/updater) so multiple calls are
     # expected; a duplicate path on a re-run must not re-add itself.
     local path="$1"
     if _manifest_has_item "$path" \
@@ -603,13 +589,11 @@ manifest_record_autostart_linux_unit() {
 }
 
 manifest_set_native_paths() {
-    # Record the resolved venv / admin paths and target versions. Called
-    # once per install run from the install stage; safe to re-set on a
-    # re-run since the paths are deterministic from $SYGEN_ROOT.
+    # Record the resolved venv path and target core version. Called once
+    # per install run from the install stage; safe to re-set on a re-run
+    # since the paths are deterministic from $SYGEN_ROOT.
     SYGEN_MANIFEST_CORE_VENV="$1"
-    SYGEN_MANIFEST_ADMIN_DIR="$2"
-    SYGEN_MANIFEST_CORE_VERSION="$3"
-    SYGEN_MANIFEST_ADMIN_VERSION="$4"
+    SYGEN_MANIFEST_CORE_VERSION="$2"
 }
 
 # Wrap `brew list || brew install` so each package call lands in the
@@ -686,18 +670,16 @@ manifest_write() {
     {
         printf '{\n'
         # version=3 (v1.7+ native install): drops colima_profile_*, adds
-        # install_mode + core_venv/admin_dir/core_version/admin_version
-        # plus a multi-value autostart_linux_units. Older v1/v2 manifests
-        # carry install_mode="docker" implicitly (absent ⇒ docker) — see
+        # install_mode + core_venv/core_version plus a multi-value
+        # autostart_linux_units. Older v1/v2 manifests carry
+        # install_mode="docker" implicitly (absent ⇒ docker) — see
         # uninstall.sh's routing on $USE_NATIVE_MODE.
         printf '  "version": 3,\n'
         printf '  "install_mode": "native",\n'
         printf '  "installed_at": %s,\n' "$(json_escape "$installed_at")"
         printf '  "sygen_root": %s,\n' "$(json_escape "$SYGEN_ROOT")"
         printf '  "core_venv": %s,\n' "$(json_escape "$SYGEN_MANIFEST_CORE_VENV")"
-        printf '  "admin_dir": %s,\n' "$(json_escape "$SYGEN_MANIFEST_ADMIN_DIR")"
         printf '  "core_version": %s,\n' "$(json_escape "$SYGEN_MANIFEST_CORE_VERSION")"
-        printf '  "admin_version": %s,\n' "$(json_escape "$SYGEN_MANIFEST_ADMIN_VERSION")"
         # Install-time submode + FQDN choice — pairs with the same
         # values in .env. Recorded for postmortem diagnostics (the
         # 2026-05-12 "iOS can't reach the install" debug needed this
@@ -1242,32 +1224,26 @@ DOMAIN="${SYGEN_DOMAIN:-sygen.pro}"
 # SYGEN_INSTALL_BASE_URL when testing a fork.
 BASE_URL="${SYGEN_INSTALL_BASE_URL:-https://raw.githubusercontent.com/alexeymorozua/sygen-install/main}"
 # Default versions are pinned to the tags that exist as GitHub Releases.
-# Override SYGEN_CORE_VERSION / SYGEN_ADMIN_VERSION to install a different
-# release. SYGEN_RELEASE_SOURCE=source pulls from local checkouts
-# (SYGEN_CORE_SOURCE_DIR / SYGEN_ADMIN_SOURCE_DIR) — the transitional path
-# for a freshly-cut commit that isn't released yet.
+# Override SYGEN_CORE_VERSION to install a different release.
+# SYGEN_RELEASE_SOURCE=source pulls from a local checkout
+# (SYGEN_CORE_SOURCE_DIR) — the transitional path for a freshly-cut
+# commit that isn't released yet.
 CORE_VERSION="${SYGEN_CORE_VERSION:-latest}"
-# ADMIN_VERSION is unused since 1.6.105 (admin web removed); the var
-# stays so older callers passing SYGEN_ADMIN_VERSION don't error.
-ADMIN_VERSION="${SYGEN_ADMIN_VERSION:-0.5.66}"
 RELEASE_SOURCE="${SYGEN_RELEASE_SOURCE:-github}"
 CORE_SOURCE_DIR="${SYGEN_CORE_SOURCE_DIR:-}"
-ADMIN_SOURCE_DIR="${SYGEN_ADMIN_SOURCE_DIR:-}"
 CORE_GITHUB_REPO="${SYGEN_CORE_GITHUB_REPO:-alexeymorozua/sygen}"
-ADMIN_GITHUB_REPO="${SYGEN_ADMIN_GITHUB_REPO:-alexeymorozua/sygen-admin}"
-# Public mirror repo holding wheel/tarball/sha256 artefacts for sygen-core,
-# sygen-updater, and sygen-admin. Source repos above stay private; only the
-# release artefacts are mirrored here so the installer can fetch them
-# anonymously. Tags use prefixed names: core-X.Y.Z, admin-X.Y.Z.
+# Public mirror repo holding wheel/sha256 artefacts for sygen-core +
+# sygen-updater. Source repo above stays private; only the release
+# artefacts are mirrored here so the installer can fetch them
+# anonymously. Tags use the prefixed name core-X.Y.Z.
 RELEASES_GITHUB_REPO="${SYGEN_RELEASES_GITHUB_REPO:-alexeymorozua/sygen-releases}"
 
 # Surface non-default release sources loudly. An attacker with write
 # access to .env (or environment of the calling shell) could redirect
 # updates to a fork they control — silent override hides that pivot.
 if [ "$CORE_GITHUB_REPO" != "alexeymorozua/sygen" ] \
-        || [ "$ADMIN_GITHUB_REPO" != "alexeymorozua/sygen-admin" ] \
         || [ "$RELEASES_GITHUB_REPO" != "alexeymorozua/sygen-releases" ]; then
-    warn "fetching from non-default repo: core=$CORE_GITHUB_REPO, admin=$ADMIN_GITHUB_REPO, releases=$RELEASES_GITHUB_REPO. proceed only if intentional."
+    warn "fetching from non-default repo: core=$CORE_GITHUB_REPO, releases=$RELEASES_GITHUB_REPO. proceed only if intentional."
 fi
 
 # AUTO_MODE=1 means "ask install.sygen.pro for a free <id>.sygen.pro".
@@ -1275,7 +1251,7 @@ fi
 # never holds a Cloudflare token in auto-mode — DNS-01 challenges are
 # answered through Worker-mediated /api/dns-challenge endpoints (see
 # subdomain-service/README.md). AUTO_MODE=0 means the operator supplied
-# their own subdomain + Cloudflare token (legacy / admin-managed installs).
+# their own subdomain + Cloudflare token (legacy / operator-managed installs).
 # AUTO_MODE_REUSE=1 means we're re-running install.sh on a host that already
 # went through provision once; we must NOT call /api/provision again (would
 # orphan the live record + waste a slot) — we re-read the saved token + fqdn
@@ -1289,15 +1265,15 @@ PROVISION_URL="${SYGEN_PROVISION_URL:-https://install.${DOMAIN}/api/provision}"
 
 if [ $LOCAL_MODE -eq 1 ]; then
     SYGEN_ROOT="$HOME/.sygen-local"
-    # SYGEN_ADMIN_PORT is resolved later by _resolve_port (port-detection
-    # block). For localhost mode the ADMIN_URL/CORS_ORIGIN are recomputed
+    # SYGEN_CORE_PORT is resolved later by _resolve_port (port-detection
+    # block). For localhost mode the SERVER_URL/CORS_ORIGIN are recomputed
     # post-resolution because they embed the port.
 
     case "$SELF_HOSTED_SUBMODE" in
         localhost)
             SUB="${SYGEN_SUBDOMAIN:-local}"
             FQDN="localhost"
-            ADMIN_URL=""    # filled in after _resolve_port
+            SERVER_URL=""    # filled in after _resolve_port
             CORS_ORIGIN=""  # filled in after _resolve_port
             log "macOS detected — localhost mode (Colima + http://localhost, no TLS)"
             warn "  iPhone cannot reach http://localhost (App Transport Security blocks plain HTTP)."
@@ -1350,7 +1326,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
 
             FQDN="$ts_fqdn"
             SUB="${FQDN%%.*}"
-            ADMIN_URL="https://$FQDN"
+            SERVER_URL="https://$FQDN"
             CORS_ORIGIN="https://$FQDN"
             log "macOS detected — Tailscale mode (HTTPS via tailnet)"
             log "  fqdn=$FQDN"
@@ -1364,7 +1340,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
             AUTO_MODE=1
             SUB=""        # populated by /api/provision below
             FQDN=""       # populated by /api/provision below
-            ADMIN_URL=""  # populated by /api/provision below
+            SERVER_URL=""  # populated by /api/provision below
             CORS_ORIGIN=""
             log "macOS detected — public-domain mode (Worker /api/provision + brew nginx)"
             warn "  iPhone access requires NAT port forwarding on your router:"
@@ -1440,7 +1416,7 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
 
     FQDN="$ts_fqdn"
     SUB="${FQDN%%.*}"
-    ADMIN_URL="https://$FQDN"
+    SERVER_URL="https://$FQDN"
     CORS_ORIGIN="https://$FQDN"
     log "Linux + Tailscale mode (HTTPS via tailnet $FQDN)"
     log "  iPhone must also be on this tailnet to reach the box"
@@ -1467,7 +1443,7 @@ else
     CF_API_TOKEN="${CF_API_TOKEN:?CF_API_TOKEN required for custom-mode install}"
     CF_ZONE_ID="${CF_ZONE_ID:?CF_ZONE_ID required for custom-mode install}"
     SYGEN_ROOT="/srv/sygen"
-    ADMIN_URL="https://$FQDN"
+    SERVER_URL="https://$FQDN"
     CORS_ORIGIN="https://$FQDN"
     log "Linux detected — custom mode (subdomain $FQDN supplied by operator)"
     if [ "$EUID" -ne 0 ]; then
@@ -1487,7 +1463,7 @@ elif [ $LOCAL_MODE -eq 0 ]; then
 elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     log "Host: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown) — fqdn will be assigned by provisioning service"
 else
-    log "Host: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown) — deploying $ADMIN_URL"
+    log "Host: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown) — deploying $SERVER_URL"
 fi
 
 # Manifest path is bound to the now-final SYGEN_ROOT. Load any prior
@@ -1508,8 +1484,6 @@ manifest_load "$SYGEN_MANIFEST_PATH"
 # silently collide on the default ports.
 SYGEN_CORE_PORT="$(_resolve_port CORE       8081 "$PORT_CORE_OVERRIDE")"
 SYGEN_ASSIGNED_PORTS+=("$SYGEN_CORE_PORT")
-SYGEN_ADMIN_PORT="$(_resolve_port ADMIN     8080 "$PORT_ADMIN_OVERRIDE")"
-SYGEN_ASSIGNED_PORTS+=("$SYGEN_ADMIN_PORT")
 SYGEN_INTERAGENT_PORT="$(_resolve_port INTERAGENT 8799 "$PORT_INTERAGENT_OVERRIDE")"
 SYGEN_ASSIGNED_PORTS+=("$SYGEN_INTERAGENT_PORT")
 SYGEN_UPDATER_PORT="$(_resolve_port UPDATER  8082 "$PORT_UPDATER_OVERRIDE")"
@@ -1527,20 +1501,19 @@ _port_note() {
 }
 log "Port assignment:"
 log "  core:       $(_port_note CORE       "$SYGEN_CORE_PORT"       8081 "$PORT_CORE_OVERRIDE")"
-log "  admin:      $(_port_note ADMIN      "$SYGEN_ADMIN_PORT"      8080 "$PORT_ADMIN_OVERRIDE")"
 log "  interagent: $(_port_note INTERAGENT "$SYGEN_INTERAGENT_PORT" 8799 "$PORT_INTERAGENT_OVERRIDE")"
 log "  updater:    $(_port_note UPDATER    "$SYGEN_UPDATER_PORT"    8082 "$PORT_UPDATER_OVERRIDE")"
 
-# localhost mode embeds the admin port in ADMIN_URL/CORS_ORIGIN; recompute
+# localhost mode embeds the core port in SERVER_URL/CORS_ORIGIN; recompute
 # now that the resolved value is known. Tailscale / publicdomain / custom
 # modes use https://$FQDN with no port and stay untouched.
 if [ "$LOCAL_MODE" -eq 1 ] && [ "$SELF_HOSTED_SUBMODE" = "localhost" ]; then
-    ADMIN_URL="http://localhost:${SYGEN_ADMIN_PORT}"
-    CORS_ORIGIN="http://localhost:${SYGEN_ADMIN_PORT}"
+    SERVER_URL="http://localhost:${SYGEN_CORE_PORT}"
+    CORS_ORIGIN="http://localhost:${SYGEN_CORE_PORT}"
 fi
 
 # Ensure a dedicated unprivileged 'sygen' system user exists (Linux only).
-# sygen-core / sygen-admin systemd units run as this user so a process-level
+# sygen-core systemd unit runs as this user so a process-level
 # RCE is contained to a non-login account that can write only $SYGEN_ROOT
 # (enforced via ProtectSystem=strict + ReadWritePaths=__SYGEN_ROOT__ in the
 # unit templates). Updater stays root — it needs systemctl + chown across
@@ -1662,8 +1635,7 @@ if [ $LOCAL_MODE -eq 0 ]; then
     # python3-venv: required for `python3 -m venv`. python3-pip: needed for
     # `pip install` inside the venv (the venv inherits pip from the base).
     # P1-10: include `tar` defensively — stock Debian/Ubuntu has it but
-    # minimal LXC/container images sometimes don't, and we extract the
-    # admin tarball during install.
+    # minimal LXC/container images sometimes don't.
     # ffmpeg required by tools/media_tools/transcribe_audio.py to convert
     # incoming OGG/Opus voice messages to WAV for whisper.cpp.
     BASE_PKGS="ca-certificates curl jq gnupg openssl python3 python3-venv python3-pip build-essential tar ffmpeg"
@@ -1685,8 +1657,8 @@ if [ $LOCAL_MODE -eq 0 ]; then
     fi
 
     # Claude Code CLI — required by sygen-core to spawn agent CLI sessions.
-    # Without it the admin/iOS Claude-setup flow fails with "claude CLI
-    # not found at 'claude'". Installed globally via npm so the binary
+    # Without it the iOS Claude-setup flow fails with "claude CLI not
+    # found at 'claude'". Installed globally via npm so the binary
     # lands at /usr/bin/claude regardless of which user invokes it.
     # Manifest-tracked so uninstall.sh can `npm uninstall -g` only when
     # we're the ones who put it there.
@@ -1772,8 +1744,6 @@ else
     # Native install needs:
     #   python@3.14  — runtime for sygen-core + sygen-updater venv
     #   node@22      — npm runtime for the Claude Code CLI install below
-    #                  (admin web was the prior consumer; removed in 1.6.105
-    #                  but Claude CLI still needs npm)
     #   jq           — used by provision response parsing, .env edits
     #   whisper-cpp  — voice transcription binary (ggml model fetched separately)
     # nginx + pipx (certbot) are publicdomain-only.
@@ -1848,7 +1818,7 @@ else
     log "node sanity OK ($NODE_VERSION_OUT)"
 
     # Claude Code CLI — required by sygen-core to spawn agent CLI sessions.
-    # Without it admin/iOS Claude-setup fails with "claude CLI not found".
+    # Without it iOS Claude-setup fails with "claude CLI not found".
     # Manifest-tracked so uninstall.sh can `npm uninstall -g` only when
     # we're the ones who put it there.
     #
@@ -1993,7 +1963,7 @@ if [ "$AUTO_MODE" -eq 1 ]; then
             fi
             [ -n "${SUB:-}" ] || die "auto-mode re-run: heartbeat ok but cannot recover subdomain — config.json missing or has no instance_name. Wipe $SYGEN_ROOT/data/config and rerun."
             FQDN="${SUB}.${DOMAIN}"
-            ADMIN_URL="https://$FQDN"
+            SERVER_URL="https://$FQDN"
             CORS_ORIGIN="https://$FQDN"
             log "Auto-mode re-run: continuing with existing $FQDN"
         elif [ "$PROBE_HTTP" = "404" ] || [ "$PROBE_HTTP" = "401" ]; then
@@ -2049,7 +2019,7 @@ if [ "$AUTO_MODE" -eq 1 ]; then
             # into nginx, rm -rf, etc. Reject before any downstream use.
             validate_fqdn "$FQDN" \
                 || die "auto-mode re-run: instance_name '$SUB' from config.json is not a valid DNS label"
-            ADMIN_URL="https://$FQDN"
+            SERVER_URL="https://$FQDN"
             CORS_ORIGIN="https://$FQDN"
             log "Auto-mode re-run: continuing with existing $FQDN"
         fi
@@ -2111,7 +2081,7 @@ if [ "$AUTO_MODE" -eq 1 ]; then
         fi
 
         SUB="${FQDN%%.*}"
-        ADMIN_URL="https://$FQDN"
+        SERVER_URL="https://$FQDN"
         CORS_ORIGIN="https://$FQDN"
         log "Auto-mode: assigned $FQDN (install_token will be saved for weekly heartbeats)"
     fi
@@ -2171,7 +2141,7 @@ if [ "$needs_dns" -eq 1 ] && [ "$AUTO_MODE_REUSE" -eq 0 ]; then
             warn "  This usually means the host egresses through a different IP than"
             warn "  Cloudflare saw on the /api/provision request (NAT, VPN, IPv6, ...)."
             warn "  Sygen will continue using $DNS_GOT — fix the A record manually if"
-            warn "  it should point at $PUBLIC_IP (admin-managed flow, out-of-band)."
+            warn "  it should point at $PUBLIC_IP (operator-managed flow, out-of-band)."
         else
             log "  DNS resolved: $DNS_GOT"
         fi
@@ -2527,9 +2497,9 @@ install -d -m 0700 "$SYGEN_ROOT/data/_secrets"
 # Pick a sensible default for instance_name. Auto-mode SUB is a meaningful
 # subdomain (e.g. yuqp3yqv.sygen.pro → "yuqp3yqv"); for everything else
 # (localhost, tailscale, custom) prefer the host's short hostname so each
-# client (admin web, iOS, future agents) shows a label that matches what
-# the operator already calls the box. Falls back to "sygen" if hostname is
-# somehow empty so we never write an empty string.
+# client (iOS, future agents) shows a label that matches what the operator
+# already calls the box. Falls back to "sygen" if hostname is somehow empty
+# so we never write an empty string.
 if [ "$AUTO_MODE" -eq 1 ] && [ -n "${SUB:-}" ]; then
     DEFAULT_INSTANCE_NAME="$SUB"
 else
@@ -2582,8 +2552,8 @@ if [ ! -f "$SYGEN_ROOT/data/config/config.json" ]; then
 else
     # Migrate older installs that pre-date instance_name. Idempotent: only
     # writes when the field is missing OR an empty string. A user-set value
-    # (even one that differs from DEFAULT_INSTANCE_NAME) is preserved — admin
-    # web / iOS / API are the canonical edit surfaces, install.sh must never
+    # (even one that differs from DEFAULT_INSTANCE_NAME) is preserved —
+    # iOS / API are the canonical edit surfaces, install.sh must never
     # stomp them on re-run. Atomic via tmp+mv so a crash mid-write doesn't
     # truncate the live config.
     current_name=$(jq -r '.instance_name // ""' "$SYGEN_ROOT/data/config/config.json" 2>/dev/null || echo "")
@@ -2651,10 +2621,10 @@ get_env() {
 # instead of attempting to download core-latest (which 404s).
 #
 # We hit the /releases collection (not /releases/latest) because the
-# mirror holds tags for both core-X.Y.Z and admin-X.Y.Z; /latest may
-# point at an admin tag. Filter by the core- prefix and pick max
-# semver. Python is required by sygen anyway, so it's safe to assume
-# python3 is available (the venv setup later requires it explicitly).
+# mirror may hold tags for other artefacts too; /latest could point at
+# any of them. Filter by the core- prefix and pick max semver. Python
+# is required by sygen anyway, so it's safe to assume python3 is
+# available (the venv setup later requires it explicitly).
 resolve_latest_core_version() {
     local api_url='https://api.github.com/repos/alexeymorozua/sygen-releases/releases?per_page=100'
     local response
@@ -2683,7 +2653,6 @@ print(versions[0][1])
 # "currently installed" reference). Stored in .env so launchd/systemd units
 # inherit them and the updater can trust them as ground truth.
 EFFECTIVE_CORE_VERSION=$(get_env SYGEN_CORE_VERSION "$CORE_VERSION")
-EFFECTIVE_ADMIN_VERSION=$(get_env SYGEN_ADMIN_VERSION "$ADMIN_VERSION")
 
 # Resolve the "latest" sentinel to a concrete version. Done before the
 # .env write below so the resolved value is what gets stored — once
@@ -2862,10 +2831,10 @@ bootstrap_apns_key() {
 
 bootstrap_apns_key
 # NEXT_PUBLIC_SYGEN_API_URL: macOS localhost mode forces localhost (no proxy
-# layer in front of admin), but tailscale/publicdomain submodes terminate
-# TLS in front of both admin (8080) and core (8081) — so admin should hit
-# the API same-origin via the proxy, exactly like Linux. Empty string =
-# same-origin in the admin runtime.
+# layer in front), but tailscale/publicdomain submodes terminate TLS in
+# front of core — so clients should hit the API via the proxy on the
+# canonical FQDN, exactly like Linux. Empty string = same-origin (read
+# from the page that served the client).
 if [ $LOCAL_MODE -eq 1 ] && [ "$SELF_HOSTED_SUBMODE" = "localhost" ]; then
     EFFECTIVE_PUBLIC_API_URL="http://localhost:${SYGEN_CORE_PORT}"
 else
@@ -2875,7 +2844,7 @@ fi
 # Host hostname + IANA timezone, surfaced into core via env vars so
 # /api/system/status and /api/system/timezone can fall back to host
 # metadata before the operator first writes config["instance_name"] /
-# config["user_timezone"] via the admin/iOS PUT endpoints.
+# config["user_timezone"] via the iOS PUT endpoints.
 #
 # macOS: prefer the user-friendly ComputerName ("Mac mini (aiagent)");
 # fall back to `hostname` if scutil fails. Linux uses `hostname`.
@@ -2975,7 +2944,6 @@ esac
 umask 077
 {
     echo "SYGEN_CORE_VERSION=$EFFECTIVE_CORE_VERSION"
-    echo "SYGEN_ADMIN_VERSION=$EFFECTIVE_ADMIN_VERSION"
     # P0-3: pin the Python interpreter the updater uses to seed new venvs.
     # Without this the updater falls back to `shutil.which("python3")`,
     # which on macOS is /usr/bin/python3 (Apple stub, often 3.9) — not
@@ -2991,7 +2959,6 @@ umask 077
     # GitHub repo coordinates so the updater can poll Releases without
     # rediscovering them at runtime. Override via env to test forks.
     echo "SYGEN_CORE_GITHUB_REPO=$CORE_GITHUB_REPO"
-    echo "SYGEN_ADMIN_GITHUB_REPO=$ADMIN_GITHUB_REPO"
     if [ -n "$EFFECTIVE_PUBLIC_API_URL" ]; then
         echo "NEXT_PUBLIC_SYGEN_API_URL=$EFFECTIVE_PUBLIC_API_URL"
     fi
@@ -3034,35 +3001,30 @@ umask 077
     # Updater integration. Defaults baked into core point at the Docker
     # bind-mount (`/data/_updates.json`) and compose hostname
     # (`http://sygen-updater:8082`) — neither resolves on a native install.
-    # Without these overrides the admin /api/system/updates endpoint
-    # returns {supported: false} and the Update banner stays hidden.
+    # Without these overrides /api/system/updates returns
+    # {supported: false} and the Update banner stays hidden.
     # Multi-instance: SYGEN_UPDATER_PORT is read by sygen-updater's
     # entrypoint to bind LISTEN_PORT; SYGEN_UPDATER_URL must match.
     echo "SYGEN_UPDATES_STATE=$SYGEN_ROOT/host_updates/_updates.json"
     echo "SYGEN_UPDATER_PORT=$SYGEN_UPDATER_PORT"
     echo "SYGEN_UPDATER_URL=http://127.0.0.1:$SYGEN_UPDATER_PORT"
-    # Resolved host port for sygen-admin (Next.js standalone). Read by
-    # the systemd unit / launchd plist via __SYGEN_ADMIN_PORT__ token; we
-    # also persist into .env so updater + tools can pick it up at runtime.
-    echo "SYGEN_ADMIN_PORT=$SYGEN_ADMIN_PORT"
     # Resolved core port + interagent port — kept in .env for diagnostics
     # and so re-runs of install.sh can read the previously-claimed values
     # via _resolve_port (otherwise we'd auto-shift again on re-run).
     echo "SYGEN_CORE_PORT=$SYGEN_CORE_PORT"
     echo "SYGEN_INTERAGENT_PORT=$SYGEN_INTERAGENT_PORT"
-    # Updater's atomic-swap targets. Default in updater.py is
-    # SYGEN_HOME/{venv,admin} which resolves to /srv/sygen/data/{venv,admin}
-    # on native (because SYGEN_HOME=$SYGEN_ROOT/data per the systemd unit
-    # so the bot finds config/_secrets/sessions etc. inside data/). But
-    # install.sh puts the live venv + admin at $SYGEN_ROOT/{venv,admin}
-    # — without these overrides Apply Update would mv-swap into a sibling
-    # directory, sygen-core would keep launching the old wheel from
+    # Updater's atomic-swap target. Default in updater.py is
+    # SYGEN_HOME/venv which resolves to /srv/sygen/data/venv on native
+    # (because SYGEN_HOME=$SYGEN_ROOT/data per the systemd unit so the
+    # bot finds config/_secrets/sessions etc. inside data/). But
+    # install.sh puts the live venv at $SYGEN_ROOT/venv — without this
+    # override Apply Update would mv-swap into a sibling directory,
+    # sygen-core would keep launching the old wheel from
     # /srv/sygen/venv/bin/sygen and the UI banner would never clear.
     echo "SYGEN_VENV_DIR=$SYGEN_ROOT/venv"
-    echo "SYGEN_ADMIN_DIR=$SYGEN_ROOT/admin"
     # /api/system/uninstall trigger location + host_metrics output dir.
     # Both default to /data/... (Docker bind-mount paths) inside
-    # rest_routes.py. Without overrides the admin "Delete Server" button
+    # rest_routes.py. Without overrides the "Delete Server" button
     # writes the trigger to a non-existent path (OSError) and the
     # CPU/RAM/disk widget on the dashboard falls back to placeholder
     # values regardless of what the host_metrics daemon writes.
@@ -3074,10 +3036,6 @@ umask 077
     # writes to $SYGEN_HOME/host_updates/ (= $SYGEN_ROOT/data/...) but
     # core reads from $SYGEN_ROOT/host_updates/ → mismatch.
     echo "STATE_PATH=$SYGEN_ROOT/host_updates/_updates.json"
-    # admin internal URL for /api/system/status's _admin_version() fetch.
-    # Default `http://sygen-admin:3000` (compose hostname + Next.js dev
-    # port). Native admin binds 127.0.0.1:$SYGEN_ADMIN_PORT.
-    echo "ADMIN_INTERNAL_URL=http://127.0.0.1:$SYGEN_ADMIN_PORT"
     # APNs push identifiers — empty when push is disabled, which the
     # backend treats as a clean no-op (push_apns logs once at startup,
     # then send_push returns reason=apns_disabled). The .p8 auth key is
@@ -3115,20 +3073,17 @@ umask 077
 umask 022
 chmod 600 "$SYGEN_ROOT/.env"
 
-# ---------- 5. Native install: Python venv + admin tarball ----------
+# ---------- 5. Native install: Python venv ----------
 STAGE="install"
 
 VENV_DIR="$SYGEN_ROOT/venv"
-# ADMIN_DIR retained as a path constant for plist substitution + uninstall
-# manifest paths; admin web is no longer installed since 1.6.105.
-ADMIN_DIR="$SYGEN_ROOT/admin"
 VENV_PIP="$VENV_DIR/bin/pip"
 VENV_SYGEN_BIN="$VENV_DIR/bin/sygen"
 VENV_UPDATER_BIN="$VENV_DIR/bin/sygen-updater"
 
 # Helper: GitHub Release artefact URL for a given repo + tag + filename.
-# The tag is passed verbatim so we can use prefixed tags on the public
-# mirror (core-X.Y.Z, admin-X.Y.Z) without forcing a `v` prefix.
+# The tag is passed verbatim so we can use the prefixed core-X.Y.Z tag
+# on the public mirror without forcing a `v` prefix.
 gh_release_url() {
     # $1=repo (owner/name), $2=full tag (e.g. core-1.6.75), $3=asset filename
     printf 'https://github.com/%s/releases/download/%s/%s' "$1" "$2" "$3"
@@ -3269,7 +3224,7 @@ else
     UPDATER_WHEEL_TMPDIR="$(mktemp -d -t sygen-updater-wheel.XXXXXX)"
     UPDATER_WHEEL_DEST="$UPDATER_WHEEL_TMPDIR/$UPDATER_WHEEL"
     # P0-2 + P0-5: verify SHA256 if asset exists, else best-effort skip
-    # (updater is non-critical for first install; admin still works
+    # (updater is non-critical for first install; core still works
     # without it). Skip path is unchanged from previous behaviour.
     _probe=0
     gh_release_asset_exists "$UPDATER_WHEEL_URL" || _probe=$?
@@ -3318,20 +3273,7 @@ if [ $LOCAL_MODE -eq 0 ] && id -u sygen >/dev/null 2>&1; then
     chown -R sygen:sygen "$SYGEN_ROOT/data" 2>/dev/null || true
 fi
 
-# ----- 5b. Admin web: REMOVED in 1.6.105 -----
-# Admin web (sygen-admin Next.js) is no longer installed. The user
-# workflow is iOS-app-only (with a desktop client in development); see
-# sygen CHANGELOG 1.6.105 and sygen-admin repo (frozen but kept for
-# emergency recovery). Templates pro.sygen.admin.plist /
-# sygen-admin.service still ship in scripts/ for hand-recovery only.
-#
-# We deliberately do NOT touch an existing $ADMIN_DIR on disk: users
-# upgrading from <1.6.105 keep their running admin until they
-# explicitly remove it (uninstall.sh still cleans it up).
-log "Skipping sygen-admin install (removed from pipeline in 1.6.105 — iOS-app-only workflow)"
-
-manifest_set_native_paths "$VENV_DIR" "" \
-    "$EFFECTIVE_CORE_VERSION" ""
+manifest_set_native_paths "$VENV_DIR" "$EFFECTIVE_CORE_VERSION"
 
 # ---------- 5b. Host metrics daemon (macOS + Linux) ----------
 # Writes live host CPU/RAM/disk usage to $SYGEN_ROOT/host_metrics/state.json
@@ -3437,8 +3379,8 @@ fi
 #     Homebrew packages (colima/nginx/certbot/docker/jq/openssl/tailscale)
 #     are outdated.
 #   - host_update_runner.sh sits in a 5-second poll loop watching for
-#     $SYGEN_ROOT/host_updates/requested. Core writes that file when
-#     admin POSTs /api/system/host-updates/apply; the runner validates
+#     $SYGEN_ROOT/host_updates/requested. Core writes that file when a
+#     client POSTs /api/system/host-updates/apply; the runner validates
 #     against the same allowlist, runs `brew upgrade <pkgs>`, and on
 #     Colima upgrade restarts the VM cleanly.
 #
@@ -3512,7 +3454,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
 
     curl -fsSL -o "$SYGEN_ROOT/uninstall.sh" \
         "$BASE_URL/uninstall.sh" \
-        || warn "could not fetch uninstall.sh — admin/iOS Delete Server will fail until you re-run install.sh"
+        || warn "could not fetch uninstall.sh — iOS Delete Server will fail until you re-run install.sh"
     chmod 0755 "$SYGEN_ROOT/uninstall.sh" 2>/dev/null || true
 
     curl -fsSL -o "$SYGEN_ROOT/bin/host_uninstall_runner.sh" \
@@ -3528,7 +3470,7 @@ fi
 # macOS gets the launchd-driven runner inside the LOCAL_MODE block above.
 # Linux native install needs a systemd-based equivalent so /api/system/uninstall
 # actually has a host-side process that picks up the trigger file and
-# invokes uninstall.sh --force. Without this the admin "Delete Server"
+# invokes uninstall.sh --force. Without this the iOS "Delete Server"
 # button writes the trigger but nothing acts on it.
 if [ $LOCAL_MODE -eq 0 ]; then
     STAGE="self-uninstall-runner"
@@ -3538,7 +3480,7 @@ if [ $LOCAL_MODE -eq 0 ]; then
 
     curl -fsSL -o "$SYGEN_ROOT/uninstall.sh" \
         "$BASE_URL/uninstall.sh" \
-        || warn "could not fetch uninstall.sh — admin/iOS Delete Server will fail until you re-run install.sh"
+        || warn "could not fetch uninstall.sh — iOS Delete Server will fail until you re-run install.sh"
     chmod 0755 "$SYGEN_ROOT/uninstall.sh" 2>/dev/null || true
 
     curl -fsSL -o "$SYGEN_ROOT/bin/sygen-host-uninstall-runner.sh" \
@@ -3556,7 +3498,7 @@ if [ $LOCAL_MODE -eq 0 ]; then
 
     systemctl daemon-reload
     systemctl enable --now sygen-host-uninstall-runner.service \
-        || warn "systemd enable failed — admin/iOS Delete Server will not function"
+        || warn "systemd enable failed — iOS Delete Server will not function"
 fi
 
 # ---------- 5e. Whisper.cpp (out-of-box voice transcription) ----------
@@ -3659,7 +3601,7 @@ elif [ "$OS" = "Linux" ]; then
     # is no longer required for voice transcription to work — the model is
     # bind-mounted into the container regardless. We still try apt as a
     # best-effort so host-side tools (scripts/deploy_whisper.sh, ad-hoc
-    # admin SSH sessions) keep working where the package is available.
+    # operator SSH sessions) keep working where the package is available.
     log "Installing whisper.cpp model (container ships whisper-cli; host package is best-effort)"
     if command -v whisper-cli >/dev/null 2>&1 || command -v whisper-cpp >/dev/null 2>&1; then
         log "whisper.cpp already installed on host"
@@ -3708,7 +3650,7 @@ fi
 
 # ---------- 6. Install + start native services ----------
 STAGE="services"
-log "Installing native services (core/admin/updater) and starting them"
+log "Installing native services (core/updater) and starting them"
 
 # Resolve the system-wide python (needed for the launchd PYTHON_BIN spot
 # in plists, etc) — already done in deps stage.
@@ -3729,9 +3671,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
         sed \
             -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
             -e "s|__VENV_DIR__|$VENV_DIR|g" \
-            -e "s|__ADMIN_DIR__|$ADMIN_DIR|g" \
             -e "s|__NODE_BIN__|$NODE_BIN|g" \
-            -e "s|__SYGEN_ADMIN_PORT__|$SYGEN_ADMIN_PORT|g" \
             -e "s|__SYGEN_UPDATER_PORT__|$SYGEN_UPDATER_PORT|g" \
             -e "s|__SYGEN_UPDATER_TOKEN__|$EFFECTIVE_UPDATER_TOKEN|g" \
             -e "s|__SYGEN_HOST_TZ__|$HOST_TZ_VAL|g" \
@@ -3755,8 +3695,6 @@ if [ $LOCAL_MODE -eq 1 ]; then
     }
 
     install_native_plist "pro.sygen.core"    "pro.sygen.core.plist"
-    # pro.sygen.admin.plist no longer loaded (admin web removed in
-    # 1.6.105). Template stays in scripts/ for hand-recovery.
     # Updater is best-effort — it may not be installed yet (wheel not
     # published). Skip the plist if its binary is missing.
     if [ -x "$VENV_UPDATER_BIN" ]; then
@@ -3766,8 +3704,8 @@ if [ $LOCAL_MODE -eq 1 ]; then
     fi
 else
     # ----- Linux: systemd units, system-wide -----
-    # Hand $SYGEN_ROOT to the unprivileged 'sygen' user so the core/admin
-    # services can write logs, sessions, host_metrics, etc. .env stays
+    # Hand $SYGEN_ROOT to the unprivileged 'sygen' user so the core
+    # service can write logs, sessions, host_metrics, etc. .env stays
     # 0600; chown -R only changes ownership, not perms. The updater
     # service stays root and writes /srv/sygen/host_updates/_updates.json
     # into a sygen-owned dir — root can write there regardless.
@@ -3786,9 +3724,7 @@ else
         sed \
             -e "s|__SYGEN_ROOT__|$SYGEN_ROOT|g" \
             -e "s|__VENV_DIR__|$VENV_DIR|g" \
-            -e "s|__ADMIN_DIR__|$ADMIN_DIR|g" \
             -e "s|__NODE_BIN__|$NODE_BIN|g" \
-            -e "s|__SYGEN_ADMIN_PORT__|$SYGEN_ADMIN_PORT|g" \
             "$tmpl" > "$unit_dst"
         rm -f "$tmpl"
         chmod 0644 "$unit_dst"
@@ -3796,8 +3732,6 @@ else
     }
 
     install_native_unit "sygen-core.service"
-    # sygen-admin.service no longer installed (admin web removed in
-    # 1.6.105). Template stays in scripts/ for hand-recovery.
     if [ -x "$VENV_UPDATER_BIN" ]; then
         install_native_unit "sygen-updater.service"
     else
@@ -3855,16 +3789,11 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$SELF_HOSTED_SUBMODE" != "tailscale" ]; then
     log "Configuring nginx vhost for $FQDN"
     curl -fsSL -o /tmp/sygen.nginx.tmpl "$BASE_URL/nginx.conf.tmpl" \
         || die "could not fetch nginx.conf.tmpl"
-    # Remap the admin upstream from the legacy :3000 (Docker default) to the
-    # native install port (default 8080). sygen-admin systemd unit binds
-    # PORT=$SYGEN_ADMIN_PORT, and skipping this substitution leaves nginx
-    # proxying to a dead :3000 — every page returns 502.
     # Core upstream stays on :8081 by default; multi-instance support
     # rewrites it to $SYGEN_CORE_PORT when auto-shifted.
     sed \
         -e "s/__FQDN__/$FQDN/g" \
         -e "s|__CERT_DIR__|${CERTBOT_LIVE_DIR}|g" \
-        -e "s|http://127.0.0.1:3000|http://127.0.0.1:${SYGEN_ADMIN_PORT}|g" \
         -e "s|http://127.0.0.1:8081|http://127.0.0.1:${SYGEN_CORE_PORT}|g" \
         /tmp/sygen.nginx.tmpl > "/etc/nginx/sites-available/sygen"
     ln -sf "/etc/nginx/sites-available/sygen" /etc/nginx/sites-enabled/sygen
@@ -3874,9 +3803,7 @@ if [ $LOCAL_MODE -eq 0 ] && [ "$SELF_HOSTED_SUBMODE" != "tailscale" ]; then
 elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     STAGE="nginx"
     # brew nginx serves vhosts from $(brew --prefix)/etc/nginx/servers/*.conf
-    # (loaded by the default nginx.conf via `include servers/*`). The admin
-    # container binds to localhost:$SYGEN_ADMIN_PORT (instead of :3000) on
-    # macOS, so the proxy_pass needs to reflect that.
+    # (loaded by the default nginx.conf via `include servers/*`).
     BREW_PREFIX="$(brew --prefix)"
     BREW_NGINX_PREFIX="$(brew --prefix nginx 2>/dev/null || echo "$BREW_PREFIX")"
     NGINX_CONF_DIR="$BREW_NGINX_PREFIX/etc/nginx/servers"
@@ -3889,14 +3816,12 @@ elif [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
     curl -fsSL -o /tmp/sygen.nginx.tmpl "$BASE_URL/nginx.conf.tmpl" \
         || die "could not fetch nginx.conf.tmpl"
     # Substitute __FQDN__, the cert dir (Linux: /etc/letsencrypt;
-    # macOS-publicdomain: $SYGEN_ROOT/letsencrypt), and remap the admin
-    # upstream from :3000 to the mac-side host port chosen earlier
-    # (default 8080). Core defaults to :8081 but is rewritten when
-    # _resolve_port auto-shifted onto a different free port.
+    # macOS-publicdomain: $SYGEN_ROOT/letsencrypt). Core defaults to :8081
+    # but is rewritten when _resolve_port auto-shifted onto a different
+    # free port.
     sed \
         -e "s/__FQDN__/$FQDN/g" \
         -e "s|__CERT_DIR__|${CERTBOT_LIVE_DIR}|g" \
-        -e "s|http://127.0.0.1:3000|http://127.0.0.1:${SYGEN_ADMIN_PORT}|g" \
         -e "s|http://127.0.0.1:8081|http://127.0.0.1:${SYGEN_CORE_PORT}|g" \
         /tmp/sygen.nginx.tmpl \
         | $SUDO tee "$NGINX_CONF_DIR/sygen.conf" >/dev/null
@@ -4150,18 +4075,14 @@ elif [ "$SELF_HOSTED_SUBMODE" = "tailscale" ]; then
     $TAILSCALE_SUDO "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 </dev/null || true
 
     # Mountpoints share port 443; subsequent --bg calls add path handlers
-    # to the existing serve config. Order matters: more-specific paths first
-    # so they don't get shadowed by the catch-all "/" → admin route.
+    # to the existing serve config. Order matters: more-specific paths first.
     #
     # IMPORTANT: backend URLs MUST include the same path as --set-path or
     # Tailscale Serve strips the prefix on the way to the backend. Sygen
     # core expects /api/auth/login etc., not /auth/login, so without the
     # trailing path the proxy returns 404 on every mobile login request.
-    # Pre-1.6.105 a catch-all "/" mapping forwarded the bare URL to admin
-    # web on port 8080. Admin is no longer installed, so we skip the
-    # catch-all — hitting the bare tailnet URL now returns 404 from
-    # tailscale serve. iOS / desktop clients hit only /api/, /ws/,
-    # /upload so they're unaffected.
+    # The bare tailnet URL returns 404 from tailscale serve (no catch-all
+    # mapped). iOS / desktop clients hit only /api/, /ws/, /upload.
     _ts_run "serve /api/"      1 serve --bg --set-path=/api/      "http://127.0.0.1:${SYGEN_CORE_PORT}/api/"
     _ts_run "serve /ws/"       1 serve --bg --set-path=/ws/       "http://127.0.0.1:${SYGEN_CORE_PORT}/ws/"
     _ts_run "serve /upload"    0 serve --bg --set-path=/upload    "http://127.0.0.1:${SYGEN_CORE_PORT}/upload"
@@ -4305,7 +4226,7 @@ done
 if [ $LOCAL_MODE -eq 0 ]; then
     # Sygen update polling runs inside sygen-updater.service (systemd unit
     # we installed in stage 6). It polls GitHub Releases and atomically
-    # swaps the venv + admin tarball when an apply is requested.
+    # swaps the venv when an apply is requested.
     #
     # certbot's Debian/Ubuntu package installs certbot.timer (runs twice
     # daily), so cert renewals happen on their own. We just need nginx to
@@ -4417,8 +4338,8 @@ if [ $LOCAL_MODE -eq 0 ]; then
 # Sygen nightly backup — managed by install.sh (Phase 2.8).
 # Snapshots /srv/sygen/{data,.env,.claude} into
 # /var/backups/sygen/sygen-YYYY-MM-DD.tar.gz and prunes archives >7d old.
-# venv/ and admin/ are NOT backed up — they're reproducible from
-# install.sh given the version pins in .env.
+# venv/ is NOT backed up — it's reproducible from install.sh given
+# the version pin in .env.
 set -euo pipefail
 
 SRC=/srv/sygen
@@ -4529,14 +4450,15 @@ if [ "$JSON_OUTPUT" = "1" ]; then
     else
         MODE="custom"
     fi
-    # admin_version / admin_dir kept as empty strings for backward
-    # compat with the iOS deploy wizard (CONTRACT_ios_vps_deploy_wizard.md
-    # still names the keys); admin web is not installed since 1.6.105.
-    printf '{"ok":true,"mode":%s,"install_mode":"native","fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_version":%s,"admin_version":"","data_dir":%s,"venv_dir":%s,"admin_dir":"","install_token":%s}\n' \
+    # admin_user / admin_password / admin_url retained as iOS deploy
+    # wizard keys (CONTRACT_ios_vps_deploy_wizard.md) — these reference
+    # the "admin" user role + first-login credentials, not the removed
+    # admin web.
+    printf '{"ok":true,"mode":%s,"install_mode":"native","fqdn":%s,"admin_user":"admin","admin_password":%s,"admin_url":%s,"core_version":%s,"data_dir":%s,"venv_dir":%s,"install_token":%s}\n' \
         "$(json_escape "$MODE")" \
         "$(json_escape "$FQDN")" \
         "$(json_escape "$ADMIN_PASS")" \
-        "$(json_escape "$ADMIN_URL")" \
+        "$(json_escape "$SERVER_URL")" \
         "$(json_escape "$EFFECTIVE_CORE_VERSION")" \
         "$(json_escape "$SYGEN_ROOT/data")" \
         "$(json_escape "$VENV_DIR")" \
@@ -4554,7 +4476,7 @@ if [ "$JSON_OUTPUT" = "1" ]; then
 ══════════════════════════════════════════════════════════
  Sygen core installed successfully
 ──────────────────────────────────────────────────────────
- Server URL:     $ADMIN_URL
+ Server URL:     $SERVER_URL
  Admin login:    admin
  Admin password: $ADMIN_PASS
 
@@ -4575,7 +4497,7 @@ fi
 cat <<DONE
 
 =====================================================================
- Sygen is up at: $ADMIN_URL
+ Sygen is up at: $SERVER_URL
 ---------------------------------------------------------------------
   Admin user: admin
 DONE
@@ -4645,7 +4567,7 @@ DONE
   Routes:      sudo tailscale serve status         (show current /api,/ws,/ routes)
                sudo tailscale serve reset          (drop all routes, then re-run install.sh)
   iPhone:      install Tailscale (App Store) and join the same tailnet,
-               then open $ADMIN_URL in Safari.
+               then open $SERVER_URL in Safari.
 DONE
             ;;
         publicdomain)
@@ -4693,7 +4615,7 @@ if [ -n "$ADMIN_PASS" ]; then
 ══════════════════════════════════════════════════════════
  Sygen core installed successfully
 ──────────────────────────────────────────────────────────
- Server URL:     $ADMIN_URL
+ Server URL:     $SERVER_URL
  Admin login:    admin
  Admin password: $ADMIN_PASS
 

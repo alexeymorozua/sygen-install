@@ -7,7 +7,6 @@
     __VENV_DIR__            absolute path to the Python venv (e.g.
                             /Users/<user>/.sygen-local/venv)
     __SYGEN_ROOT__          data/.env/logs root (e.g. ~/.sygen-local)
-    __SYGEN_ADMIN_PORT__    host port of pro.sygen.admin (Next.js)
     __SYGEN_UPDATER_PORT__  host port of pro.sygen.updater
     __HOME__                user's home dir (for $HOME-relative log paths)
     __APNS_KEY_ID__         APNs Key ID (10-char) — empty when push disabled
@@ -70,7 +69,6 @@
           even after a successful whisper deploy.
         -->
         <key>SYGEN_HOST_WHISPER_MODELS_DIR</key> <string>__HOME__/.local/share/whisper-cpp/models</string>
-        <key>ADMIN_INTERNAL_URL</key>      <string>http://127.0.0.1:__SYGEN_ADMIN_PORT__</string>
         <!--
           APNs push (iOS). All four keys must be populated for the
           backend to enable push delivery; absent or empty values keep

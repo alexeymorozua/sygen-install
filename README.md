@@ -3,19 +3,19 @@
 One-shot installer for a single-node Sygen deployment.
 
 **v1.7+ ships native processes — no Docker, no Colima.** Sygen runs as
-a Python venv (core + updater) and a Next.js standalone Node process
-(admin), managed by `launchctl` (macOS) or `systemd` (Linux). Sub-agents
-get direct access to host tools (Xcode, swiftc, iOS simulators on a Mac
-mini; native dev toolchains on Linux).
+a Python venv (core + updater), managed by `launchctl` (macOS) or
+`systemd` (Linux). The iOS app is the primary client surface; a desktop
+client is in development. Sub-agents get direct access to host tools
+(Xcode, swiftc, iOS simulators on a Mac mini; native dev toolchains on
+Linux).
 
 Supported: Linux (Debian 12+/Ubuntu 22+ VPS), macOS (local dev).
 Windows/WSL2 is planned but not yet supported.
 
-`install.sh` downloads the `sygen` Python wheel and `sygen-admin` Next.js
-tarball directly from GitHub Releases, creates a venv, extracts the
-admin tarball, writes service unit files, and starts everything. On
-Linux it also provisions DNS + TLS via Cloudflare and wires up an nginx
-reverse proxy.
+`install.sh` downloads the `sygen` Python wheel directly from GitHub
+Releases, creates a venv, writes service unit files, and starts
+everything. On Linux it also provisions DNS + TLS via Cloudflare and
+wires up an nginx reverse proxy.
 
 ## Usage — Linux (VPS)
 
@@ -42,7 +42,7 @@ the custom-mode env vars below to fall back to a self-managed subdomain.
 
 ### Custom mode (bring your own subdomain)
 
-For admin-managed installs on a Cloudflare zone you control. Set all three
+For operator-managed installs on a Cloudflare zone you control. Set all three
 env vars; the auto-provision call is skipped, DNS is upserted with the
 operator-supplied token, and no `SYGEN_INSTALL_TOKEN` is written (no
 heartbeat or auto-reclaim).
@@ -58,8 +58,8 @@ curl -fsSL https://install.sygen.pro/install.sh | \
 ## Usage — macOS (self-hosted on your own Mac)
 
 The macOS branch has three sub-modes, selected via `SELF_HOSTED_MODE`. All
-run the same native services (`pro.sygen.{core,admin,updater}` LaunchAgents)
-— the difference is only how the admin UI is exposed (and whether your
+run the same native services (`pro.sygen.{core,updater}` LaunchAgents)
+— the difference is only how the server is exposed (and whether your
 iPhone can reach it).
 
 | Mode           | iPhone access     | TLS                  | Setup work             |
@@ -80,8 +80,7 @@ curl -fsSL https://install.sygen.pro/install.sh | bash
 
 Requires [Homebrew](https://brew.sh). The installer will `brew install`
 `python@3.14`, `node@22`, `jq`, and `whisper-cpp`, create a Python venv
-at `~/.sygen-local/venv`, extract the admin tarball at
-`~/.sygen-local/admin`, and run Sygen at `http://localhost:8080`. No
+at `~/.sygen-local/venv`, and run Sygen at `http://localhost:8081`. No
 root, no DNS, no TLS — and **no iPhone connectivity** (App Transport
 Security on iOS blocks plain HTTP).
 
@@ -101,9 +100,9 @@ curl -fsSL https://install.sygen.pro/install.sh | \
 
 The installer reads the Mac's MagicDNS name (e.g.
 `mac-mini.tail-abc123.ts.net`), then runs `tailscale serve` to terminate
-TLS at port 443 and proxy `/`, `/api/`, `/ws/`, `/upload` to the
-matching native service. The cert is issued and renewed by Tailscale;
-nothing is exposed to the public internet.
+TLS at port 443 and proxy `/api/`, `/ws/`, `/upload` to the matching
+native service. The cert is issued and renewed by Tailscale; nothing is
+exposed to the public internet.
 
 ```bash
 sudo tailscale serve status   # show current routes
@@ -152,11 +151,11 @@ the port-forwarding, cert-renewal, and reboot-recovery work above.
 
 ```
 Status:     launchctl list | grep pro.sygen
-Logs:       tail -F ~/.sygen-local/logs/{core,admin,updater}.log
-Stop:       launchctl unload ~/Library/LaunchAgents/pro.sygen.{core,admin,updater}.plist
-Start:      launchctl load -w ~/Library/LaunchAgents/pro.sygen.{core,admin,updater}.plist
+Logs:       tail -F ~/.sygen-local/logs/{core,updater}.log
+Stop:       launchctl unload ~/Library/LaunchAgents/pro.sygen.{core,updater}.plist
+Start:      launchctl load -w ~/Library/LaunchAgents/pro.sygen.{core,updater}.plist
 Restart:    launchctl kickstart -k gui/$(id -u)/pro.sygen.core
-Upgrade:    POST to the updater /apply endpoint via the admin UI
+Upgrade:    triggered from the iOS app (Settings → Update); or POST to the updater /apply endpoint
 Uninstall:  curl -fsSL https://install.sygen.pro/uninstall.sh | bash
 ```
 
@@ -169,7 +168,8 @@ See the header of [`install.sh`](./install.sh) for the full env var list.
 ## Output formats
 
 By default `install.sh` prints a human-readable banner at the end with the
-admin URL, generated password, image refs, and follow-up commands.
+server URL, the initial admin login + generated password, and follow-up
+commands.
 
 For SSH-driven deploy wizards (e.g. the iOS deploy flow), pass
 `--json-output` or set `SYGEN_JSON_OUTPUT=1` to get a single
@@ -180,13 +180,16 @@ stderr so the operator can watch the install in real time.
 # success: one JSON line on stdout, ok=true (auto-mode shown — no env vars)
 curl -fsSL https://install.sygen.pro/install.sh | \
     SYGEN_JSON_OUTPUT=1 sudo bash
-# {"ok":true,"mode":"auto","install_mode":"native","fqdn":"s3xk7f2p.sygen.pro","admin_user":"admin","admin_password":"...","admin_url":"https://s3xk7f2p.sygen.pro","core_version":"1.6.74","admin_version":"0.5.54","data_dir":"/srv/sygen/data","venv_dir":"/srv/sygen/venv","admin_dir":"/srv/sygen/admin","install_token":"sit_..."}
+# {"ok":true,"mode":"auto","install_mode":"native","fqdn":"s3xk7f2p.sygen.pro","admin_user":"admin","admin_password":"...","admin_url":"https://s3xk7f2p.sygen.pro","core_version":"1.6.198","data_dir":"/srv/sygen/data","venv_dir":"/srv/sygen/venv","install_token":"sit_..."}
 ```
 
-`install_token` is `null` in custom mode and a `sit_...` string in auto-mode;
-deploy wizards (e.g. iOS) can persist it alongside provider creds for later
-reference. Day-to-day heartbeat traffic is handled by core itself — wizards
-do not need to call `/api/heartbeat` themselves.
+`admin_user` / `admin_password` / `admin_url` describe the initial
+login user (role: `admin`) and the URL of the server — the iOS deploy
+wizard consumes these fields verbatim. `install_token` is `null` in
+custom mode and a `sit_...` string in auto-mode; deploy wizards (e.g.
+iOS) can persist it alongside provider creds for later reference.
+Day-to-day heartbeat traffic is handled by core itself — wizards do not
+need to call `/api/heartbeat` themselves.
 
 On failure the script still emits a single JSON line and exits non-zero:
 
@@ -262,9 +265,9 @@ longer has to restart Terminal before re-running the wizard.
 
 - [`install.sh`](./install.sh) — installer entry point
 - [`uninstall.sh`](./uninstall.sh) — manifest-driven uninstaller
-- [`scripts/pro.sygen.{core,admin,updater}.plist`](./scripts/) — macOS
+- [`scripts/pro.sygen.{core,updater}.plist`](./scripts/) — macOS
   LaunchAgent templates
-- [`scripts/sygen-{core,admin,updater}.service`](./scripts/) — Linux
+- [`scripts/sygen-{core,updater}.service`](./scripts/) — Linux
   systemd unit templates
 - [`nginx.conf.tmpl`](./nginx.conf.tmpl) — nginx vhost template (`__FQDN__`
   is substituted by the installer)
@@ -284,10 +287,10 @@ CNAME. Edits to `main` publish within a minute.
 
 ## Upgrade on a deployed host
 
-Trigger an upgrade via the admin UI's update banner — the `sygen-updater`
-service downloads the new wheel + admin tarball from GitHub Releases,
-performs an atomic mv-swap of the venv and admin dirs, and restarts
-core + admin. Manual fallback:
+Trigger an upgrade from the iOS app (Settings → Update) — the
+`sygen-updater` service downloads the new wheel from GitHub Releases,
+performs an atomic mv-swap of the venv, and restarts core. Manual
+fallback:
 
 ```bash
 # macOS
@@ -303,12 +306,11 @@ systemctl restart sygen-core
 
 A fresh install keeps itself current without manual intervention:
 
-- **sygen-core + sygen-admin** — the `sygen-updater` service polls
-  GitHub Releases every 30 minutes for new tags on `alexeymorozua/sygen`
-  and `alexeymorozua/sygen-admin` and writes a state file that the admin
-  UI reads via `/api/system/updates`. Updates are **detected**
-  automatically; **applying** them is driven by an admin click so an
-  in-flight Claude session is never killed mid-work.
+- **sygen-core** — the `sygen-updater` service polls GitHub Releases
+  every 30 minutes for new tags on `alexeymorozua/sygen` and writes a
+  state file that the iOS app reads via `/api/system/updates`. Updates
+  are **detected** automatically; **applying** them is driven by a user
+  click so an in-flight Claude session is never killed mid-work.
 - **OS security patches** — `unattended-upgrades` is installed and
   enabled (`/etc/apt/apt.conf.d/20auto-upgrades`). The distro default
   `50unattended-upgrades` policy is security-only.
@@ -337,7 +339,7 @@ roll back), set `SYGEN_CORE_VERSION` explicitly:
 
 ```bash
 # pin to a specific published tag
-SYGEN_CORE_VERSION=1.6.127 bash install.sh
+SYGEN_CORE_VERSION=1.6.198 bash install.sh
 
 # build from a local checkout (transitional / dev)
 SYGEN_RELEASE_SOURCE=source \
@@ -349,10 +351,10 @@ If the GitHub API is unreachable while resolving `latest`, the
 installer aborts with a workaround message pointing at the explicit-pin
 escape hatch above.
 
-Every wheel and tarball pulled from GitHub Releases is SHA256-verified
-against an `.sha256` sidecar published alongside the asset. A missing
-sidecar is treated as a broken release and the installer aborts (fail
-closed — no opt-out).
+Every wheel pulled from GitHub Releases is SHA256-verified against an
+`.sha256` sidecar published alongside the asset. A missing sidecar is
+treated as a broken release and the installer aborts (fail closed — no
+opt-out).
 
 Opting out:
 
@@ -374,25 +376,24 @@ A fresh install brings Sygen back up automatically after every host
 reboot, so power blips and scheduled reboots don't require any manual
 recovery.
 
-- **macOS** — three LaunchAgents in `~/Library/LaunchAgents/`:
+- **macOS** — two LaunchAgents in `~/Library/LaunchAgents/`:
   - `pro.sygen.core.plist` runs `~/.sygen-local/venv/bin/sygen`.
-  - `pro.sygen.admin.plist` runs `node ~/.sygen-local/admin/server.js`.
   - `pro.sygen.updater.plist` runs `~/.sygen-local/venv/bin/sygen-updater`.
-  All three have `RunAtLoad=true` and `KeepAlive=true`, so they restart
-  on crash and start at user login. Logs land in
-  `~/.sygen-local/logs/{core,admin,updater}.log`.
-- **Linux** — three systemd units at `/etc/systemd/system/`:
-  - `sygen-core.service`, `sygen-admin.service`, `sygen-updater.service`,
-    all `WantedBy=multi-user.target`, all `Restart=always` (or
+  Both have `RunAtLoad=true` and `KeepAlive=true`, so they restart on
+  crash and start at user login. Logs land in
+  `~/.sygen-local/logs/{core,updater}.log`.
+- **Linux** — two systemd units at `/etc/systemd/system/`:
+  - `sygen-core.service`, `sygen-updater.service`, both
+    `WantedBy=multi-user.target`, both `Restart=always` (or
     `on-failure` for the updater).
-  - `sygen-core` and `sygen-admin` run as a dedicated unprivileged
-    `sygen` system user (no shell, no home), with
-    `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=yes`,
-    `NoNewPrivileges=yes`, and `ReadWritePaths=/srv/sygen`. Process-level
-    RCE in either service is contained to `/srv/sygen` — it cannot escape
-    to `/etc`, `/home`, or other system paths.
+  - `sygen-core` runs as a dedicated unprivileged `sygen` system user
+    (no shell, no home), with `ProtectSystem=strict`,
+    `ProtectHome=read-only`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
+    and `ReadWritePaths=/srv/sygen`. Process-level RCE in the service
+    is contained to `/srv/sygen` — it cannot escape to `/etc`, `/home`,
+    or other system paths.
   - `sygen-updater` stays root because the apply path needs `systemctl
-    restart` and `chown` across the venv/admin swap. It still has
+    restart` and `chown` across the venv swap. It still has
     `NoNewPrivileges=yes` and only listens on loopback (`127.0.0.1:8082`,
     bearer-authed); binding on a non-loopback address requires the
     explicit `SYGEN_UPDATER_ALLOW_REMOTE=1` opt-in.
@@ -403,12 +404,10 @@ Disabling:
 ```bash
 # macOS
 launchctl unload ~/Library/LaunchAgents/pro.sygen.core.plist
-launchctl unload ~/Library/LaunchAgents/pro.sygen.admin.plist
 launchctl unload ~/Library/LaunchAgents/pro.sygen.updater.plist
 
 # Linux
 systemctl disable --now sygen-core.service
-systemctl disable --now sygen-admin.service
 systemctl disable --now sygen-updater.service
 ```
 
@@ -426,23 +425,21 @@ archive of `/srv/sygen/{data,.env,claude-auth}` to
 are pruned automatically. Each archive is `chmod 600` because it
 contains the API token, JWT secret, and Claude OAuth credentials.
 
-`venv/` and `admin/` are intentionally NOT backed up — they're
-deterministically reproducible from `install.sh` given the version pins
-in `.env`.
+`venv/` is intentionally NOT backed up — it is deterministically
+reproducible from `install.sh` given the version pin in `.env`.
 
 The first snapshot is taken at the end of the install run, so a fresh
 host has a usable backup right away.
 
 ### Restore on a new host
 
-After running `install.sh` on the replacement VPS (so DNS, certs, the
-venv, and the admin tarball are wired up), drop a backup tarball over
-the data dir:
+After running `install.sh` on the replacement VPS (so DNS, certs, and
+the venv are wired up), drop a backup tarball over the data dir:
 
 ```bash
-systemctl stop sygen-core sygen-admin
+systemctl stop sygen-core
 tar -xzf /var/backups/sygen/sygen-YYYY-MM-DD.tar.gz -C /srv/sygen/
-systemctl start sygen-core sygen-admin
+systemctl start sygen-core
 ```
 
 ### Off-site copy
@@ -462,7 +459,7 @@ systemctl disable --now sygen-backup.timer
 
 ## Uninstall
 
-Clean removal of the entire stack — containers, data, secrets, systemd
+Clean removal of the entire stack — services, data, secrets, systemd
 backup timer, nginx vhost, and cert renewal hook. Keeps the Let's Encrypt
 cert and system packages so re-installing is fast.
 
@@ -496,17 +493,16 @@ curl -fsSL https://install.sygen.pro/uninstall.sh | \
 ```
 
 The script auto-routes between native (v1.7+) and legacy Docker
-manifests via `install_mode` in `.install_manifest.json`. On Linux, the
-Let's Encrypt cert in `/etc/letsencrypt/` is left in place; remove it
-with `certbot delete --cert-name <fqdn>` if you don't plan to re-install.
+manifests via `install_mode` in `.install_manifest.json`. It also
+cleans up legacy sygen-admin artifacts (services, plists, $SYGEN_ROOT/admin)
+on hosts upgraded from pre-1.6.105 installs. On Linux, the Let's
+Encrypt cert in `/etc/letsencrypt/` is left in place; remove it with
+`certbot delete --cert-name <fqdn>` if you don't plan to re-install.
 
 ## Release sources
 
 - Core:  Python wheels at
   [`alexeymorozua/sygen` releases](https://github.com/alexeymorozua/sygen/releases)
   (filename `sygen-<version>-py3-none-any.whl`)
-- Admin: Next.js standalone tarballs at
-  [`alexeymorozua/sygen-admin` releases](https://github.com/alexeymorozua/sygen-admin/releases)
-  (filename `sygen-admin-<version>.tar.gz`)
 - Updater: published alongside core wheels
   (filename `sygen_updater-<version>-py3-none-any.whl`)

@@ -14,8 +14,8 @@ Restart=on-failure
 RestartSec=5
 StandardOutput=append:__SYGEN_ROOT__/logs/host-uninstall-runner.log
 StandardError=append:__SYGEN_ROOT__/logs/host-uninstall-runner.log
-# Conservative hardening: not as locked-down as the core/admin services
-# because this runner needs to invoke uninstall.sh which must touch
+# Conservative hardening: not as locked-down as the core service because
+# this runner needs to invoke uninstall.sh which must touch
 # /etc/systemd/system, /usr/local/bin, etc.
 NoNewPrivileges=no
 

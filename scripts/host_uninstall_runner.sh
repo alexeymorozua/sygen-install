@@ -7,7 +7,7 @@
 #
 # Sibling of host_update_runner.sh — same trigger-file architecture.
 # Polls $SYGEN_ROOT/host_updates/uninstall_requested every 5 s; when
-# admin POSTs to /api/system/uninstall the core container writes that
+# a client POSTs to /api/system/uninstall the core process writes that
 # file with a small JSON body for forensics (requested_at / requested_by).
 #
 # When the trigger appears:
@@ -31,7 +31,7 @@
 # result.json — by the time the uninstall completes the bind-mounted
 # state directory no longer exists, so any write would land in a
 # detached folder no client can read. The frontend already knows the
-# server is going down (admin/iOS clients show "uninstall queued").
+# server is going down (iOS clients show "uninstall queued").
 #
 # Usage:
 #   host_uninstall_runner.sh                 # run forever
@@ -115,9 +115,9 @@ process_trigger() {
     # Cleanup of our own launchd agent + the host_update_runner agent
     # only fires when uninstall.sh actually succeeded — otherwise we'd
     # tear down the very mechanism the user needs to retry, leaving
-    # them with a half-uninstalled host and no admin endpoint to fix
-    # it from. On failure we leave the runner alive so the next admin
-    # POST can try again.
+    # them with a half-uninstalled host and no endpoint to retry from.
+    # On failure we leave the runner alive so the next client POST can
+    # try again.
     LOG_FILE="$SYGEN_ROOT/logs/uninstall.log"
     mkdir -p "$SYGEN_ROOT/logs" 2>/dev/null || true
 
@@ -222,7 +222,7 @@ log "Starting (interval=${INTERVAL}s, trigger=$TRIGGER)"
 
 # Recover from a crash mid-uninstall: if a stale uninstall_running
 # marker is on disk with no trigger, just clear it. We can't tell
-# whether the previous attempt completed; the next admin click will
+# whether the previous attempt completed; the next user click will
 # resync (or, more likely, the host is already gone and this runner
 # only loaded again because launchd restarted us during a flapping
 # state — in which case clearing the marker is safe).

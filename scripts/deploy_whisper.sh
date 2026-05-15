@@ -18,7 +18,7 @@ WHISPER_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggm
 # Hardcoded so a corrupted/poisoned download is caught and removed.
 WHISPER_MODEL_SHA256="1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
 
-# Install errors get pinned here so the admin UI can surface "tried and failed"
+# Install errors get pinned here so the iOS app can surface "tried and failed"
 # vs "never tried" — see core /api/system/voice/config.
 ERROR_FILE="$HOME/.local/share/whisper-cpp/.last_install_error"
 
@@ -110,4 +110,4 @@ else
     fi
 fi
 
-log "Done. Voice transcription is ready — verify in admin Settings → Voice."
+log "Done. Voice transcription is ready — verify in iOS Settings → Voice."

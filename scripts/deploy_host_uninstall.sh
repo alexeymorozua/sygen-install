@@ -8,7 +8,7 @@
 #   - ~/Library/LaunchAgents/com.sygen.host-uninstall-runner.plist
 #
 # Pairs with the /api/system/uninstall endpoint that v1.6.45+ core
-# exposes; with both halves installed, "Delete Server" in admin/iOS
+# exposes; with both halves installed, "Delete Server" in the iOS app
 # stops containers, removes ~/.sygen-local, and frees RAM.
 #
 # Linux installs are out of scope — server-class operators run
@@ -79,5 +79,5 @@ log "Loaded $label"
 log "Done."
 log "  Status:  launchctl list | grep host-uninstall-runner"
 log "  Logs:    tail -f $SYGEN_ROOT/logs/host-uninstall-runner.log"
-log "  Trigger: admin/iOS 'Delete Server' or"
+log "  Trigger: iOS 'Delete Server' or"
 log "           POST /api/system/uninstall on the running core"

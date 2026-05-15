@@ -2,7 +2,7 @@
 # Host-level update runner for Sygen.
 #
 # Polls a trigger file at $SYGEN_ROOT/host_updates/requested every 5 s.
-# When admin POSTs to /api/system/host-updates/apply the core container
+# When a client POSTs to /api/system/host-updates/apply the core process
 # writes that file with a JSON body listing packages to upgrade. This
 # script claims the trigger atomically (rename to running), runs
 # `brew upgrade <pkgs>`, refreshes the check file, and writes the
@@ -226,8 +226,7 @@ process_trigger() {
         case " $PACKAGES " in
             *" python@3.14 "*|*" node@22 "*)
                 log "Restarting sygen native services to pick up new runtime"
-                launchctl kickstart -k "gui/$(id -u)/pro.sygen.core"   2>/dev/null || true
-                launchctl kickstart -k "gui/$(id -u)/pro.sygen.admin"  2>/dev/null || true
+                launchctl kickstart -k "gui/$(id -u)/pro.sygen.core"    2>/dev/null || true
                 launchctl kickstart -k "gui/$(id -u)/pro.sygen.updater" 2>/dev/null || true
                 ;;
         esac
@@ -286,7 +285,7 @@ log "Starting (interval=${INTERVAL}s, trigger=$TRIGGER)"
 
 # Recover from a crash mid-apply: if a stale running marker exists at
 # startup with no trigger, just clear it. We can't tell whether the
-# upgrade completed; the next admin click will resync.
+# upgrade completed; the next user click will resync.
 if [ -f "$RUNNING" ] && [ ! -f "$TRIGGER" ]; then
     log "Stale running marker on startup — clearing"
     rm -f "$RUNNING" 2>/dev/null || true

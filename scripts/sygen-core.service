@@ -18,7 +18,7 @@ Environment=SYGEN_HOME=__SYGEN_ROOT__/data
 # and ~/.claude/.oauth_token. The sygen system user has no home dir
 # (--no-create-home) so we point HOME at SYGEN_ROOT, which sygen owns and
 # can write to. Without this Path.home() resolves to a path the unit
-# cannot write to and "Setup Claude" in admin/iOS fails silently.
+# cannot write to and "Setup Claude" in the iOS app fails silently.
 Environment=HOME=__SYGEN_ROOT__
 Environment=PATH=__VENV_DIR__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=__VENV_DIR__/bin/sygen

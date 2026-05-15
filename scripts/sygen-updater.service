@@ -19,7 +19,7 @@ Restart=on-failure
 RestartSec=10
 StandardOutput=append:__SYGEN_ROOT__/logs/updater.log
 StandardError=append:__SYGEN_ROOT__/logs/updater.log
-# Updater stays root (needs systemctl restart + chown across the venv/admin
+# Updater stays root (needs systemctl restart + chown across the venv
 # swap), but it does not need extra capabilities — drop them defensively.
 NoNewPrivileges=yes
 

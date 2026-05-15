@@ -324,13 +324,12 @@ PORT_RESULT="$(SYGEN_TEST_BUSY_PORTS=":8081:8082:8799:" bash -c "
     set +e
     source '$PORT_SHIM'
     CORE=\"\$(_resolve_port CORE 8081 '')\";       SYGEN_ASSIGNED_PORTS+=(\"\$CORE\")
-    ADMIN=\"\$(_resolve_port ADMIN 8080 '')\";     SYGEN_ASSIGNED_PORTS+=(\"\$ADMIN\")
     INTERAGENT=\"\$(_resolve_port INTERAGENT 8799 '')\"; SYGEN_ASSIGNED_PORTS+=(\"\$INTERAGENT\")
     UPDATER=\"\$(_resolve_port UPDATER 8082 '')\"; SYGEN_ASSIGNED_PORTS+=(\"\$UPDATER\")
-    printf '%s %s %s %s\n' \"\$CORE\" \"\$ADMIN\" \"\$INTERAGENT\" \"\$UPDATER\"
+    printf '%s %s %s\n' \"\$CORE\" \"\$INTERAGENT\" \"\$UPDATER\"
 " 2>/dev/null)"
 
-read -r CORE_P ADMIN_P INTERAGENT_P UPDATER_P <<<"$PORT_RESULT"
+read -r CORE_P INTERAGENT_P UPDATER_P <<<"$PORT_RESULT"
 
 assert_eq() {
     # $1 label, $2 actual, $3 expected
@@ -343,7 +342,6 @@ assert_eq() {
 }
 
 assert_eq "core_port"       "$CORE_P"       8083
-assert_eq "admin_port"      "$ADMIN_P"      8080
 assert_eq "interagent_port" "$INTERAGENT_P" 8800
 # The regression: pre-fix UPDATER returned 8083 (same as CORE). Post-fix
 # it must walk past the already-assigned 8083 to 8084.
@@ -351,9 +349,8 @@ assert_eq "updater_port"    "$UPDATER_P"    8084
 
 # Cross-uniqueness: no two services should ever share a port.
 if [ "$CORE_P" = "$UPDATER_P" ] || [ "$CORE_P" = "$INTERAGENT_P" ] || \
-   [ "$ADMIN_P" = "$UPDATER_P" ] || [ "$ADMIN_P" = "$INTERAGENT_P" ] || \
-   [ "$CORE_P" = "$ADMIN_P" ]    || [ "$INTERAGENT_P" = "$UPDATER_P" ]; then
-    echo "  FAIL [uniqueness] core=$CORE_P admin=$ADMIN_P interagent=$INTERAGENT_P updater=$UPDATER_P" >&2
+   [ "$INTERAGENT_P" = "$UPDATER_P" ]; then
+    echo "  FAIL [uniqueness] core=$CORE_P interagent=$INTERAGENT_P updater=$UPDATER_P" >&2
     FAIL=$((FAIL + 1))
 else
     PASS=$((PASS + 1))

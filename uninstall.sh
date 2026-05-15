@@ -2,8 +2,9 @@
 # Sygen uninstall script — clean removal of Sygen from a host.
 #
 # Routes on $MANIFEST.install_mode:
-#   - "native"  (v1.7+): stops launchd/systemd services, removes the venv
-#               + admin dir, plists/units, $SYGEN_ROOT.
+#   - "native"  (v1.7+): stops launchd/systemd services, removes the venv,
+#               plists/units, $SYGEN_ROOT. Legacy admin artifacts (if any
+#               survive from pre-1.6.105 installs) are cleaned up too.
 #   - "docker"  (or absent — pre-v1.7 manifests): runs the legacy Docker
 #               cleanup path: docker compose down, colima stop/delete,
 #               brew uninstall (manifest-driven), $SYGEN_ROOT wipe.
@@ -213,16 +214,16 @@ fi
 # ---------- Confirmation gate ----------
 log "This will REMOVE Sygen from this host (install_mode=$INSTALL_MODE):"
 if [ "$INSTALL_MODE" = "native" ]; then
-    log "  - Stop and unload native services (sygen-core / sygen-admin / sygen-updater)"
+    log "  - Stop and unload native services (sygen-core / sygen-updater; legacy sygen-admin too if present)"
 else
     log "  - Stop and remove all Sygen containers"
 fi
-log "  - Delete $SYGEN_ROOT including data, .env, venv, admin, secrets, .claude"
+log "  - Delete $SYGEN_ROOT including data, .env, venv, secrets, .claude (and any legacy admin/)"
 if [ $LOCAL_MODE -eq 0 ]; then
     log "  - Delete /var/backups/sygen"
     if [ "$INSTALL_MODE" = "native" ]; then
         log "  - Disable + remove systemd units: sygen-backup.timer/.service,"
-        log "    sygen-core.service, sygen-admin.service, sygen-updater.service"
+        log "    sygen-core.service, sygen-updater.service (legacy sygen-admin.service if present)"
     else
         log "  - Remove systemd units: sygen-backup.timer/.service, sygen-compose.service"
     fi
@@ -402,11 +403,13 @@ if [ $LOCAL_MODE -eq 0 ]; then
     rm -f /etc/systemd/system/sygen-backup.service
     rm -f /usr/local/sbin/sygen-backup.sh
 
-    # Auto-start units. Native installs ship three (core/admin/updater);
-    # legacy Docker installs ship one (sygen-compose). Hardcoded by name
-    # to cover the case where the manifest is missing.
+    # Auto-start units. Native installs currently ship core+updater;
+    # pre-1.6.105 installs also shipped sygen-admin and we still clean
+    # it up if it survived an upgrade. Legacy Docker installs ship one
+    # unit (sygen-compose). Hardcoded by name to cover the case where
+    # the manifest is missing.
     if [ "$INSTALL_MODE" = "native" ]; then
-        log "Removing systemd native service units (sygen-core/admin/updater + host-metrics + uninstall-runner)"
+        log "Removing systemd native service units (sygen-core/updater + host-metrics + uninstall-runner; legacy sygen-admin too)"
         # sygen-host-uninstall-runner.service is THIS process's parent unit
         # — disabling it would kill us mid-uninstall. We rm the unit file
         # and rely on `systemctl daemon-reload` after the uninstall to
@@ -730,7 +733,7 @@ fi
 
 # ---------- 6b. Remove the dedicated 'sygen' system user (Linux native) ----------
 # Native installs since v1.6.75 ship a `sygen` system account that runs the
-# core/admin services. With $SYGEN_ROOT now gone the account has nothing
+# core service. With $SYGEN_ROOT now gone the account has nothing
 # left to own, so remove it on uninstall. Best-effort — userdel can fail if
 # a stray process still holds the uid; we don't want to block the rest of
 # the cleanup on that.
@@ -749,15 +752,15 @@ echo " Sygen has been removed from this host (install_mode=$INSTALL_MODE)."
 echo "---------------------------------------------------------------------"
 echo "  What was removed:"
 if [ "$INSTALL_MODE" = "native" ]; then
-    echo "    - Native services (sygen-core, sygen-admin, sygen-updater)"
+    echo "    - Native services (sygen-core, sygen-updater; legacy sygen-admin if present)"
 else
     echo "    - Containers (core, admin, updater, watchtower)"
 fi
-echo "    - $SYGEN_ROOT (data, .env, venv, admin, secrets, .claude)"
+echo "    - $SYGEN_ROOT (data, .env, venv, secrets, .claude; any legacy admin/)"
 if [ $LOCAL_MODE -eq 0 ]; then
     echo "    - /var/backups/sygen (nightly backups)"
     if [ "$INSTALL_MODE" = "native" ]; then
-        echo "    - systemd units (sygen-backup, sygen-core, sygen-admin, sygen-updater)"
+        echo "    - systemd units (sygen-backup, sygen-core, sygen-updater; legacy sygen-admin if present)"
         echo "    - System user 'sygen'"
     else
         echo "    - systemd units (sygen-backup, sygen-compose)"

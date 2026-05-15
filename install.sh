@@ -1746,8 +1746,12 @@ else
     #   node@22      — npm runtime for the Claude Code CLI install below
     #   jq           — used by provision response parsing, .env edits
     #   whisper-cpp  — voice transcription binary (ggml model fetched separately)
+    #   ffmpeg       — required by tools/media_tools/transcribe_audio.py to convert
+    #                  inbound .m4a / .ogg voice messages to the 16 kHz WAV that
+    #                  whisper-cli expects. Without it transcription silently fails
+    #                  with "ffmpeg not found" on every voice message.
     # nginx + pipx (certbot) are publicdomain-only.
-    macos_pkgs=(python@3.14 node@22 jq whisper-cpp)
+    macos_pkgs=(python@3.14 node@22 jq whisper-cpp ffmpeg)
     if [ "$SELF_HOSTED_SUBMODE" = "publicdomain" ]; then
         # certbot via pipx (isolated venv) — see publicdomain block below.
         macos_pkgs+=(nginx pipx)

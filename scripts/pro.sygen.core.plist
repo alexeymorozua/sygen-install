@@ -17,6 +17,12 @@
                             during install (Homebrew / npm-global / local
                             Claude install). Empty if install.sh could not
                             find one — core will then auto-probe at runtime.
+    __GEMINI_CLI_PATH__     absolute path to the ``gemini`` binary (npm-global
+                            install of @google/gemini-cli). Empty when the
+                            Gemini provider is disabled — core treats absent
+                            value as "shutil.which() + disable on miss".
+    __CODEX_CLI_PATH__      absolute path to the ``codex`` binary (npm-global
+                            install of @openai/codex). Empty = disabled.
     __SYGEN_WEBHOOK_TRUSTED_PROXIES__
                             CSV of trusted reverse-proxy CIDRs/IPs for the
                             public /webhooks/{slug} ingress (1.6.173 HIGH-1).
@@ -91,6 +97,16 @@
           here so PATH lookups don't need to succeed.
         -->
         <key>CLAUDE_CLI_PATH</key>         <string>__CLAUDE_CLI_PATH__</string>
+        <!--
+          Alternate-provider CLIs (multi-provider re-integration). Empty
+          string ⇒ provider disabled at startup. Same defensive-pin
+          rationale as CLAUDE_CLI_PATH: launchd's narrower PATH might
+          not see an NPM-global bin link, so we record the absolute
+          path resolved by install.sh and let the provider implementation
+          honor it (with shutil.which() as the fallback for late installs).
+        -->
+        <key>GEMINI_CLI_PATH</key>         <string>__GEMINI_CLI_PATH__</string>
+        <key>CODEX_CLI_PATH</key>          <string>__CODEX_CLI_PATH__</string>
         <!--
           1.6.173 HIGH-1: trusted-proxies allowlist for X-Forwarded-For
           parsing on POST /webhooks/{slug}. Empty by default so a Mac

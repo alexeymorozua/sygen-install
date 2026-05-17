@@ -17,6 +17,20 @@ Releases, creates a venv, writes service unit files, and starts
 everything. On Linux it also provisions DNS + TLS via Cloudflare and
 wires up an nginx reverse proxy.
 
+Agent CLIs installed alongside the venv (one global npm package each):
+
+- `@anthropic-ai/claude-code` → `claude` (primary provider — strict-fail
+  if the install can't put it on PATH; sygen-core cannot operate without it)
+- `@google/gemini-cli` → `gemini` (alternate provider — warn-and-continue
+  on failure; rerun `npm install -g @google/gemini-cli` to enable later)
+- `@openai/codex` → `codex` (alternate provider — same lenient policy)
+
+All three are tracked in `.install_manifest.json` under `installed_npm` /
+`preexisting_npm` so `uninstall.sh` removes only what `install.sh` put
+there. The absolute path each CLI resolved to is mirrored into the
+LaunchAgent / systemd unit as `CLAUDE_CLI_PATH` / `GEMINI_CLI_PATH` /
+`CODEX_CLI_PATH` so sygen-core finds them under launchd's narrower PATH.
+
 ## Usage — Linux (VPS)
 
 ### Auto-mode (default)

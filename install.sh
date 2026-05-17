@@ -419,11 +419,13 @@ _resolve_port() {
 # as "preexisting" and uninstall would orphan them on the host.
 SYGEN_MANIFEST_INSTALLED_PKGS=()
 SYGEN_MANIFEST_PREEXISTING_PKGS=()
-# v1.6.81+: npm packages installed globally by install.sh (today: only
-# @anthropic-ai/claude-code). Same preexisting/installed split as brew
-# packages — a CLI the user already had before sygen must NOT be
-# uninstalled. uninstall.sh runs `npm uninstall -g <pkg>` only for the
-# installed_npm bucket.
+# v1.6.81+: npm packages installed globally by install.sh. Today:
+#   - @anthropic-ai/claude-code (required, strict-fail)
+#   - @google/gemini-cli         (optional, warn on failure — alternate provider)
+#   - @openai/codex              (optional, warn on failure — alternate provider)
+# Same preexisting/installed split as brew packages — a CLI the user
+# already had before sygen must NOT be uninstalled. uninstall.sh runs
+# `npm uninstall -g <pkg>` only for the installed_npm bucket.
 SYGEN_MANIFEST_INSTALLED_NPM=()
 SYGEN_MANIFEST_PREEXISTING_NPM=()
 # v1.6.81+: arbitrary binaries install.sh dropped on the host outside
@@ -1687,6 +1689,36 @@ if [ $LOCAL_MODE -eq 0 ]; then
         fi
     fi
 
+    # Gemini CLI + Codex CLI — alternate provider CLIs spawned by sygen-core
+    # when a chat session is pinned to provider="gemini" or "codex". Both
+    # are OPTIONAL: install failures warn-and-continue rather than block the
+    # whole install. Claude is the primary provider; a registry blip on
+    # Google or OpenAI's npm namespace should not force the operator to
+    # rerun the entire installer. Re-run `npm install -g <pkg>` later to
+    # enable the missing provider without touching anything else.
+    if command -v gemini >/dev/null 2>&1; then
+        log "Gemini CLI already on PATH ($(command -v gemini)) — recording as pre-existing"
+        manifest_record_npm_preexisting "@google/gemini-cli"
+    else
+        log "Installing Gemini CLI via npm (@google/gemini-cli)"
+        if ! manifest_npm_install "@google/gemini-cli" gemini; then
+            warn "npm install -g @google/gemini-cli failed — Gemini provider disabled until you run: npm install -g @google/gemini-cli"
+        elif ! command -v gemini >/dev/null 2>&1; then
+            warn "@google/gemini-cli installed but ``gemini`` not on PATH — Gemini provider disabled (check ``npm prefix -g``)"
+        fi
+    fi
+    if command -v codex >/dev/null 2>&1; then
+        log "Codex CLI already on PATH ($(command -v codex)) — recording as pre-existing"
+        manifest_record_npm_preexisting "@openai/codex"
+    else
+        log "Installing Codex CLI via npm (@openai/codex)"
+        if ! manifest_npm_install "@openai/codex" codex; then
+            warn "npm install -g @openai/codex failed — Codex provider disabled until you run: npm install -g @openai/codex"
+        elif ! command -v codex >/dev/null 2>&1; then
+            warn "@openai/codex installed but ``codex`` not on PATH — Codex provider disabled (check ``npm prefix -g``)"
+        fi
+    fi
+
     # whisper-cli on Linux: always build from upstream source so every
     # Linux install runs the same whisper.cpp version regardless of distro.
     # apt packages exist on 24.10+/trixie+ but ship different versions and
@@ -1860,6 +1892,36 @@ else
                 "npm install completed but ``claude`` not on PATH (bin-link missing). Check ``npm prefix -g`` is on your PATH." \
                 "npm install -g @anthropic-ai/claude-code --force && curl -fsSL $BASE_URL/install.sh | bash" \
                 "https://docs.claude.com/en/docs/claude-code/setup#install-the-cli"
+        fi
+    fi
+
+    # Gemini CLI + Codex CLI — alternate provider CLIs. See the matching
+    # Linux block above for the rationale (optional providers, warn on
+    # failure instead of strict-fail). brew's npm is reused here so the
+    # binaries land in ``$(brew --prefix node@22)/bin/`` — already covered
+    # by the plist PATH (`/opt/homebrew/bin`). Resolved absolute paths
+    # are exposed to launchd via GEMINI_CLI_PATH / CODEX_CLI_PATH below
+    # (mirrors the CLAUDE_CLI_PATH defensive-pin pattern).
+    if command -v gemini >/dev/null 2>&1; then
+        log "Gemini CLI already on PATH ($(command -v gemini)) — recording as pre-existing"
+        manifest_record_npm_preexisting "@google/gemini-cli"
+    else
+        log "macOS: installing Gemini CLI via npm (@google/gemini-cli)"
+        if ! manifest_npm_install "@google/gemini-cli" gemini "$NPM_BIN"; then
+            warn "npm install -g @google/gemini-cli failed — Gemini provider disabled until you run: npm install -g @google/gemini-cli"
+        elif ! command -v gemini >/dev/null 2>&1; then
+            warn "@google/gemini-cli installed but ``gemini`` not on PATH — Gemini provider disabled (bin-link missing)"
+        fi
+    fi
+    if command -v codex >/dev/null 2>&1; then
+        log "Codex CLI already on PATH ($(command -v codex)) — recording as pre-existing"
+        manifest_record_npm_preexisting "@openai/codex"
+    else
+        log "macOS: installing Codex CLI via npm (@openai/codex)"
+        if ! manifest_npm_install "@openai/codex" codex "$NPM_BIN"; then
+            warn "npm install -g @openai/codex failed — Codex provider disabled until you run: npm install -g @openai/codex"
+        elif ! command -v codex >/dev/null 2>&1; then
+            warn "@openai/codex installed but ``codex`` not on PATH — Codex provider disabled (bin-link missing)"
         fi
     fi
 
@@ -2913,6 +2975,40 @@ if [ -z "$EFFECTIVE_CLAUDE_CLI_PATH" ]; then
 fi
 EFFECTIVE_CLAUDE_CLI_PATH="$(sanitize_env_value "$EFFECTIVE_CLAUDE_CLI_PATH")"
 
+# Same defensive-pin pattern for the alternate-provider CLIs. Empty
+# string is the documented "absent" value — the provider implementation
+# inside sygen-core treats it as "fall back to shutil.which()" and
+# disables the provider with a clear log line if neither resolves.
+EFFECTIVE_GEMINI_CLI_PATH="$(command -v gemini 2>/dev/null || true)"
+if [ -z "$EFFECTIVE_GEMINI_CLI_PATH" ]; then
+    for _candidate in \
+        /opt/homebrew/bin/gemini \
+        /usr/local/bin/gemini \
+        "$HOME/.npm-global/bin/gemini"
+    do
+        if [ -x "$_candidate" ]; then
+            EFFECTIVE_GEMINI_CLI_PATH="$_candidate"
+            break
+        fi
+    done
+fi
+EFFECTIVE_GEMINI_CLI_PATH="$(sanitize_env_value "$EFFECTIVE_GEMINI_CLI_PATH")"
+
+EFFECTIVE_CODEX_CLI_PATH="$(command -v codex 2>/dev/null || true)"
+if [ -z "$EFFECTIVE_CODEX_CLI_PATH" ]; then
+    for _candidate in \
+        /opt/homebrew/bin/codex \
+        /usr/local/bin/codex \
+        "$HOME/.npm-global/bin/codex"
+    do
+        if [ -x "$_candidate" ]; then
+            EFFECTIVE_CODEX_CLI_PATH="$_candidate"
+            break
+        fi
+    done
+fi
+EFFECTIVE_CODEX_CLI_PATH="$(sanitize_env_value "$EFFECTIVE_CODEX_CLI_PATH")"
+
 # 1.6.173 HIGH-1: trusted-proxies allowlist for the webhook public
 # ingress. Computed once here so both the .env file (read by systemd
 # EnvironmentFile= on Linux) and the launchd plist (which has no
@@ -3056,6 +3152,13 @@ umask 077
     # startup so a later ``npm i -g @anthropic-ai/claude-code`` works
     # without re-running install.sh (just `launchctl kickstart -k`).
     echo "CLAUDE_CLI_PATH=$EFFECTIVE_CLAUDE_CLI_PATH"
+    # Same defensive-pin for the alternate-provider CLIs. Empty means
+    # the provider is disabled; the operator can later
+    # ``npm i -g @google/gemini-cli`` (or @openai/codex) and
+    # ``launchctl kickstart -k gui/$(id -u)/pro.sygen.core`` without
+    # re-running install.sh — core re-probes PATH at process start.
+    echo "GEMINI_CLI_PATH=$EFFECTIVE_GEMINI_CLI_PATH"
+    echo "CODEX_CLI_PATH=$EFFECTIVE_CODEX_CLI_PATH"
     # Persist the install-time choices for postmortem diagnostics.
     # Pre-1.6.x there was no record of "did the operator pick
     # localhost / tailscale / publicdomain?" anywhere on disk, so a
@@ -3685,6 +3788,8 @@ if [ $LOCAL_MODE -eq 1 ]; then
             -e "s|__APNS_BUNDLE_ID__|$EFFECTIVE_APNS_BUNDLE_ID|g" \
             -e "s|__APNS_ENVIRONMENT__|$EFFECTIVE_APNS_ENVIRONMENT|g" \
             -e "s|__CLAUDE_CLI_PATH__|$EFFECTIVE_CLAUDE_CLI_PATH|g" \
+            -e "s|__GEMINI_CLI_PATH__|$EFFECTIVE_GEMINI_CLI_PATH|g" \
+            -e "s|__CODEX_CLI_PATH__|$EFFECTIVE_CODEX_CLI_PATH|g" \
             -e "s|__SYGEN_WEBHOOK_TRUSTED_PROXIES__|$EFFECTIVE_TRUSTED_PROXIES|g" \
             "$tmpl" > "$plist_dst"
         rm -f "$tmpl"

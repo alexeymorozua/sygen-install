@@ -279,7 +279,7 @@ ensure_tailscale_cli() {
         cask_installed=1
     fi
     if [ "$cask_installed" = "1" ]; then
-        die $'Tailscale.app is installed but the CLI is not on PATH — activate the CLI symlink from the GUI:\n  1. Open Tailscale (menubar icon, top right)\n  2. Settings → Command Line Integration\n  3. Click Add → enter admin password\n  4. You should see "/usr/local/bin/tailscale added" in green\n  5. Re-run install.sh'
+        die $'Tailscale установлен, но CLI не активирован\n\n  1. Открой Tailscale (иконка в menubar справа вверху экрана)\n  2. Settings → прокрути до самого низа\n  3. В строке "CLI integration" нажми "Show me how"\n     (в старой версии — сразу "Command Line Integration" → "Add")\n  4. В открывшемся окне нажми "Add"\n  5. Введи admin пароль Mac\n  6. Должно появиться "/usr/local/bin/tailscale added" зелёным\n  7. Закрой окно → нажми Retry'
     fi
 
     log "Tailscale CLI not found — attempting install"

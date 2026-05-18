@@ -284,9 +284,11 @@ bash -c "source '$SHIM_FILE' && ensure_tailscale_cli" \
 
 ERR="$(cat "$OUT_ERR")"
 if [ "$RC" = "1" ] \
-    && echo "$ERR" | grep -q 'Tailscale.app is installed but the CLI is not on PATH' \
+    && echo "$ERR" | grep -q 'Tailscale установлен, но CLI не активирован' \
+    && echo "$ERR" | grep -q 'CLI integration' \
+    && echo "$ERR" | grep -q 'Show me how' \
     && echo "$ERR" | grep -q 'Command Line Integration' \
-    && echo "$ERR" | grep -q 'Re-run install.sh' \
+    && echo "$ERR" | grep -q 'нажми Retry' \
     && ! echo "$ERR" | grep -q 'BREW-INSTALL-WAS-CALLED'; then
     PASS=$((PASS+1))
 else

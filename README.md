@@ -105,17 +105,28 @@ Homebrew (`brew install --cask tailscale-app`) — **not** the App Store
 variant, which is sandboxed and does not expose a CLI; `tailscale serve`
 and `tailscale status` won't run, and the installer's preflight will fail
 with a clear "remove App Store variant" message. After the cask install
-finishes, open Tailscale.app once and activate the CLI symlink:
-**Settings → Command Line Integration → Add** (admin password prompt);
-without this click the brew cask ships only the GUI and `tailscale` stays
-off PATH. The installer's preflight detects this state and bails with a
-"CLI is not on PATH — activate from GUI" message pointing at the same
-Settings panel. Then run `tailscale up`, and confirm `tailscale status`
-works in the terminal. Make sure HTTPS Certificates is enabled in your
-tailnet admin (https://login.tailscale.com/admin/dns → HTTPS
-Certificates). Also install Tailscale on your iPhone and join the same
-tailnet (the iPhone side is fine from the App Store — only the Mac needs
-the brew cask).
+finishes, open Tailscale.app once and activate the CLI symlink — the
+brew cask ships only the GUI, so `tailscale` stays off PATH until you do
+this:
+
+1. Open Tailscale (menubar icon, top right of the screen)
+2. **Settings** → scroll all the way down
+3. In the **"CLI integration"** row, click **"Show me how"**
+   (on older Tailscale builds, the row is labelled
+   **"Command Line Integration"** with an inline **"Add"** button — skip
+   straight to step 5)
+4. In the dialog that opens, click **"Add"**
+5. Enter your Mac admin password
+6. You should see `/usr/local/bin/tailscale added` in green
+7. Close the dialog → in your install attempt press Retry
+
+The installer's preflight detects the cask-installed-but-CLI-inactive
+state and bails with a Russian-language version of the same 7-step fix.
+Then run `tailscale up`, and confirm `tailscale status` works in the
+terminal. Make sure HTTPS Certificates is enabled in your tailnet admin
+(https://login.tailscale.com/admin/dns → HTTPS Certificates). Also
+install Tailscale on your iPhone and join the same tailnet (the iPhone
+side is fine from the App Store — only the Mac needs the brew cask).
 
 ```bash
 curl -fsSL https://install.sygen.pro/install.sh | \

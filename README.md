@@ -100,12 +100,16 @@ Security on iOS blocks plain HTTP).
 
 ### Sub-mode: `tailscale` (recommended)
 
-Install [Tailscale](https://tailscale.com/kb/1017/install) on the Mac (`brew
-install --cask tailscale` or App Store), run `tailscale up`, and confirm
-`tailscale status` works in the terminal. Make sure HTTPS Certificates is
-enabled in your tailnet admin (https://login.tailscale.com/admin/dns →
-HTTPS Certificates). Also install Tailscale on your iPhone and join the
-same tailnet.
+Install [Tailscale](https://tailscale.com/kb/1017/install) on the Mac via
+Homebrew (`brew install --cask tailscale-app`) — **not** the App Store
+variant, which is sandboxed and does not expose a CLI; `tailscale serve`
+and `tailscale status` won't run, and the installer's preflight will fail
+with a clear "remove App Store variant" message. Run `tailscale up`, and
+confirm `tailscale status` works in the terminal. Make sure HTTPS
+Certificates is enabled in your tailnet admin
+(https://login.tailscale.com/admin/dns → HTTPS Certificates). Also install
+Tailscale on your iPhone and join the same tailnet (the iPhone side is
+fine from the App Store — only the Mac needs the brew cask).
 
 ```bash
 curl -fsSL https://install.sygen.pro/install.sh | \
@@ -274,6 +278,13 @@ emit_error / emit_json_error machinery in `install.sh`.
 binary paths directly and self-heals a stale-PATH shell via
 `eval "$(brew shellenv)"`, so a user who just installed Homebrew no
 longer has to restart Terminal before re-running the wizard.
+
+`scripts/test_ensure_tailscale_cli.sh` covers the macOS Tailscale CLI
+probe (`ensure_tailscale_cli`): brew auto-install of the formula when
+the CLI is missing, and detection of the App Store variant of
+`Tailscale.app` (which is sandboxed and cannot serve as a CLI) — the
+installer bails with a concrete "remove App Store variant + brew install
+--cask" message instead of silently double-installing on top.
 
 ## Files
 

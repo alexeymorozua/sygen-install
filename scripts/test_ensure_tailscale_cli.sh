@@ -9,10 +9,12 @@
 # the brew CLI on every pass — this test pins that behaviour.
 #
 # Test matrix:
-#   1) tailscale CLI already in PATH       -> log + rc=0, no brew call
-#   2) CLI absent + brew absent            -> die with manual-install hint
-#   3) CLI absent + brew install succeeds  -> CLI now in PATH, rc=0
-#   4) CLI absent + brew install fails     -> die with retry hint
+#   1) tailscale CLI already in PATH                       -> log + rc=0, no brew call
+#   2) CLI absent + brew absent                            -> die with manual-install hint
+#   3) CLI absent + brew install succeeds                  -> CLI now in PATH, rc=0
+#   4) CLI absent + brew install fails                     -> die with retry hint
+#   5) CLI absent + App Store _MASReceipt present          -> die with App Store hint, no brew call
+#   6) CLI absent + non-App-Store .app (no receipt)        -> standard brew path runs
 #
 # Run from the repo root:    bash scripts/test_ensure_tailscale_cli.sh
 # Exit status: 0 = all pass, non-zero = failure.
@@ -49,6 +51,13 @@ fi
 
 FAIL=0
 PASS=0
+
+# Default the App Store receipt hook to a path that doesn't exist so the
+# pre-existing tests (which target the brew-install path) don't trip
+# the new App-Store branch when run on a Mac that actually has
+# Tailscale.app from the App Store installed. Test 5 overrides this
+# per-invocation to point at a fake receipt.
+export SYGEN_TEST_TAILSCALE_RECEIPT="$WORK_DIR/no-such-receipt"
 
 # ---------- Test 1: tailscale already in PATH -> short-circuit ----------
 echo "Test 1: tailscale already in PATH -> rc=0, no brew call"
@@ -162,6 +171,79 @@ ERR="$(cat "$OUT_ERR")"
 if [ "$RC" = "1" ] \
     && echo "$ERR" | grep -q 'brew install tailscale failed' \
     && echo "$ERR" | grep -q 'Try manually: brew install tailscale'; then
+    PASS=$((PASS+1))
+else
+    echo "  FAIL: rc=$RC" >&2
+    echo "  stderr: $ERR" >&2
+    FAIL=$((FAIL+1))
+fi
+
+# ---------- Test 5: App Store _MASReceipt present -> die, no brew call ----------
+echo "Test 5: App Store _MASReceipt present -> die with App Store hint, no brew call"
+mkdir -p "$WORK_DIR/t5"
+# Trap brew calls — App Store branch must short-circuit before brew runs.
+cat >"$WORK_DIR/t5/brew" <<'EOF'
+#!/usr/bin/env bash
+echo "BREW-WAS-CALLED" >&2
+exit 99
+EOF
+chmod +x "$WORK_DIR/t5/brew"
+# Fake _MASReceipt — file just needs to exist at the configured path.
+FAKE_RECEIPT="$WORK_DIR/t5/Tailscale.app/Contents/_MASReceipt/receipt"
+mkdir -p "$(dirname "$FAKE_RECEIPT")"
+: >"$FAKE_RECEIPT"
+
+OUT_ERR="$WORK_DIR/err5"
+RC=0
+PATH="$WORK_DIR/t5:/usr/bin:/bin" \
+SYGEN_TEST_TAILSCALE_RECEIPT="$FAKE_RECEIPT" \
+bash -c "source '$SHIM_FILE' && ensure_tailscale_cli" \
+    2>"$OUT_ERR" || RC=$?
+
+ERR="$(cat "$OUT_ERR")"
+if [ "$RC" = "1" ] \
+    && echo "$ERR" | grep -q 'Tailscale.app from the App Store' \
+    && echo "$ERR" | grep -q 'brew install --cask tailscale-app' \
+    && ! echo "$ERR" | grep -q 'BREW-WAS-CALLED'; then
+    PASS=$((PASS+1))
+else
+    echo "  FAIL: rc=$RC" >&2
+    echo "  stderr: $ERR" >&2
+    FAIL=$((FAIL+1))
+fi
+
+# ---------- Test 6: receipt absent -> brew path still runs ----------
+echo "Test 6: receipt absent (non-App-Store) -> brew install path runs"
+mkdir -p "$WORK_DIR/t6"
+# Reuse the working brew shim from Test 3 (creates a tailscale stub).
+cat >"$WORK_DIR/t6/brew" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "install" ] && [ "\$2" = "tailscale" ]; then
+    cat >"$WORK_DIR/t6/tailscale" <<'TS'
+#!/usr/bin/env bash
+exit 0
+TS
+    chmod +x "$WORK_DIR/t6/tailscale"
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "$WORK_DIR/t6/brew"
+# Point SYGEN_TEST_TAILSCALE_RECEIPT at a non-existent path so the
+# App Store branch is skipped — function should fall through to brew.
+MISSING_RECEIPT="$WORK_DIR/t6/does-not-exist/receipt"
+
+OUT_ERR="$WORK_DIR/err6"
+RC=0
+PATH="$WORK_DIR/t6:/usr/bin:/bin" \
+SYGEN_TEST_TAILSCALE_RECEIPT="$MISSING_RECEIPT" \
+bash -c "source '$SHIM_FILE' && ensure_tailscale_cli" \
+    2>"$OUT_ERR" || RC=$?
+
+ERR="$(cat "$OUT_ERR")"
+if [ "$RC" = "0" ] \
+    && echo "$ERR" | grep -q 'Installing tailscale via brew' \
+    && ! echo "$ERR" | grep -q 'Tailscale.app from the App Store'; then
     PASS=$((PASS+1))
 else
     echo "  FAIL: rc=$RC" >&2

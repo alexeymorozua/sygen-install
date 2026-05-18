@@ -233,10 +233,28 @@ ensure_brew_in_path() {
 # This is defensive — runs on every install pass so a wiped/uninstalled
 # CLI gets restored automatically. First-bootstrap (before install.sh
 # ever runs) is covered by a separate iOS preflight fix.
+#
+# SYGEN_TEST_TAILSCALE_RECEIPT is a hook for scripts/test_ensure_tailscale_cli.sh —
+# overrides the path probed for the App Store _MASReceipt marker so the
+# test can exercise the App-Store branch without touching /Applications.
 ensure_tailscale_cli() {
     if command -v tailscale >/dev/null 2>&1; then
         log "Tailscale CLI present at $(command -v tailscale)"
         return 0
+    fi
+
+    # App Store variant of Tailscale.app is sandboxed: the CLI binary is
+    # not symlinked into PATH and direct exec crashes with a
+    # BundleIdentifier registry error, so it can't replace the CLI we
+    # need for `tailscale serve` / `tailscale status`. Auto-installing
+    # the brew `tailscale` formula on top would also start a SECOND
+    # tailscaled daemon competing with the App Store one. Detect the
+    # _MASReceipt marker (present ONLY in App Store builds — brew cask
+    # and standalone .pkg variants do not have it) and bail with a
+    # concrete fix BEFORE the brew-install path below.
+    local ts_receipt="${SYGEN_TEST_TAILSCALE_RECEIPT:-/Applications/Tailscale.app/Contents/_MASReceipt/receipt}"
+    if [ -f "$ts_receipt" ]; then
+        die "Tailscale.app from the App Store does not expose a CLI (sandbox restriction). Remove it: Finder → Applications → drag Tailscale to Trash → Empty Trash. Reinstall via Homebrew: brew install --cask tailscale-app. Then open Tailscale, sign in with the same account as your iPhone, and re-run install.sh."
     fi
 
     log "Tailscale CLI not found — attempting install"

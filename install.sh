@@ -237,6 +237,8 @@ ensure_brew_in_path() {
 # SYGEN_TEST_TAILSCALE_RECEIPT is a hook for scripts/test_ensure_tailscale_cli.sh —
 # overrides the path probed for the App Store _MASReceipt marker so the
 # test can exercise the App-Store branch without touching /Applications.
+# SYGEN_TEST_TAILSCALE_CASK_INSTALLED forces the cask-detection branch
+# on (1) or off (0); when unset, real `brew list --cask` runs.
 ensure_tailscale_cli() {
     if command -v tailscale >/dev/null 2>&1; then
         log "Tailscale CLI present at $(command -v tailscale)"
@@ -255,6 +257,29 @@ ensure_tailscale_cli() {
     local ts_receipt="${SYGEN_TEST_TAILSCALE_RECEIPT:-/Applications/Tailscale.app/Contents/_MASReceipt/receipt}"
     if [ -f "$ts_receipt" ]; then
         die "Tailscale.app from the App Store does not expose a CLI (sandbox restriction). Remove it: Finder → Applications → drag Tailscale to Trash → Empty Trash. Reinstall via Homebrew: brew install --cask tailscale-app. Then open Tailscale, sign in with the same account as your iPhone, and re-run install.sh."
+    fi
+
+    # `brew install --cask tailscale-app` (the recommended path) ships
+    # only the GUI .app — the `/usr/local/bin/tailscale` CLI symlink is
+    # NOT created at install time. The user has to open Tailscale.app
+    # → Settings → Command Line Integration → Add (which prompts for
+    # the admin password and writes the symlink). Without that one
+    # click there's nothing on PATH for `tailscale serve` to run from,
+    # the iOS preflight's `which tailscale` probe returns empty, and
+    # install.sh would otherwise fall through to `brew install
+    # tailscale` (which installs a SECOND daemon competing with the
+    # cask). Detect this state and point at the GUI fix.
+    local cask_installed=0
+    if [ -n "${SYGEN_TEST_TAILSCALE_CASK_INSTALLED:-}" ]; then
+        [ "$SYGEN_TEST_TAILSCALE_CASK_INSTALLED" = "1" ] && cask_installed=1
+    elif command -v brew >/dev/null 2>&1 \
+        && brew list --cask 2>/dev/null | grep -qx 'tailscale-app'; then
+        cask_installed=1
+    elif [ -d /Applications/Tailscale.app ]; then
+        cask_installed=1
+    fi
+    if [ "$cask_installed" = "1" ]; then
+        die $'Tailscale.app is installed but the CLI is not on PATH — activate the CLI symlink from the GUI:\n  1. Open Tailscale (menubar icon, top right)\n  2. Settings → Command Line Integration\n  3. Click Add → enter admin password\n  4. You should see "/usr/local/bin/tailscale added" in green\n  5. Re-run install.sh'
     fi
 
     log "Tailscale CLI not found — attempting install"

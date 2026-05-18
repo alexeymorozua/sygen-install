@@ -104,12 +104,18 @@ Install [Tailscale](https://tailscale.com/kb/1017/install) on the Mac via
 Homebrew (`brew install --cask tailscale-app`) — **not** the App Store
 variant, which is sandboxed and does not expose a CLI; `tailscale serve`
 and `tailscale status` won't run, and the installer's preflight will fail
-with a clear "remove App Store variant" message. Run `tailscale up`, and
-confirm `tailscale status` works in the terminal. Make sure HTTPS
-Certificates is enabled in your tailnet admin
-(https://login.tailscale.com/admin/dns → HTTPS Certificates). Also install
-Tailscale on your iPhone and join the same tailnet (the iPhone side is
-fine from the App Store — only the Mac needs the brew cask).
+with a clear "remove App Store variant" message. After the cask install
+finishes, open Tailscale.app once and activate the CLI symlink:
+**Settings → Command Line Integration → Add** (admin password prompt);
+without this click the brew cask ships only the GUI and `tailscale` stays
+off PATH. The installer's preflight detects this state and bails with a
+"CLI is not on PATH — activate from GUI" message pointing at the same
+Settings panel. Then run `tailscale up`, and confirm `tailscale status`
+works in the terminal. Make sure HTTPS Certificates is enabled in your
+tailnet admin (https://login.tailscale.com/admin/dns → HTTPS
+Certificates). Also install Tailscale on your iPhone and join the same
+tailnet (the iPhone side is fine from the App Store — only the Mac needs
+the brew cask).
 
 ```bash
 curl -fsSL https://install.sygen.pro/install.sh | \
@@ -281,10 +287,12 @@ longer has to restart Terminal before re-running the wizard.
 
 `scripts/test_ensure_tailscale_cli.sh` covers the macOS Tailscale CLI
 probe (`ensure_tailscale_cli`): brew auto-install of the formula when
-the CLI is missing, and detection of the App Store variant of
-`Tailscale.app` (which is sandboxed and cannot serve as a CLI) — the
-installer bails with a concrete "remove App Store variant + brew install
---cask" message instead of silently double-installing on top.
+the CLI is missing, detection of the App Store variant of `Tailscale.app`
+(which is sandboxed and cannot serve as a CLI), and detection of the
+brew `tailscale-app` cask installed without the CLI symlink activated
+(GUI Settings → Command Line Integration → Add was never clicked) —
+each case bails with a concrete fix-it message instead of silently
+double-installing on top.
 
 ## Files
 

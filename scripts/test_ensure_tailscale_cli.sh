@@ -15,6 +15,8 @@
 #   4) CLI absent + brew install fails                     -> die with retry hint
 #   5) CLI absent + App Store _MASReceipt present          -> die with App Store hint, no brew call
 #   6) CLI absent + non-App-Store .app (no receipt)        -> standard brew path runs
+#   7) CLI absent + brew cask `tailscale-app` registered   -> die with CLI-activation hint, no brew install
+#   8) CLI absent + cask NOT registered (override)         -> standard brew path still runs
 #
 # Run from the repo root:    bash scripts/test_ensure_tailscale_cli.sh
 # Exit status: 0 = all pass, non-zero = failure.
@@ -58,6 +60,12 @@ PASS=0
 # Tailscale.app from the App Store installed. Test 5 overrides this
 # per-invocation to point at a fake receipt.
 export SYGEN_TEST_TAILSCALE_RECEIPT="$WORK_DIR/no-such-receipt"
+
+# Same idea for the brew-cask detection: force the override OFF so a
+# tester running this on a Mac that actually has `tailscale-app` cask
+# installed doesn't have every test fall into the new cask branch.
+# Tests 7 and 8 override this per-invocation.
+export SYGEN_TEST_TAILSCALE_CASK_INSTALLED=0
 
 # ---------- Test 1: tailscale already in PATH -> short-circuit ----------
 echo "Test 1: tailscale already in PATH -> rc=0, no brew call"
@@ -244,6 +252,68 @@ ERR="$(cat "$OUT_ERR")"
 if [ "$RC" = "0" ] \
     && echo "$ERR" | grep -q 'Installing tailscale via brew' \
     && ! echo "$ERR" | grep -q 'Tailscale.app from the App Store'; then
+    PASS=$((PASS+1))
+else
+    echo "  FAIL: rc=$RC" >&2
+    echo "  stderr: $ERR" >&2
+    FAIL=$((FAIL+1))
+fi
+
+# ---------- Test 7: cask `tailscale-app` registered + CLI missing -> die ----------
+echo "Test 7: tailscale-app cask installed + CLI missing -> die with CLI-activation hint, no brew install"
+mkdir -p "$WORK_DIR/t7"
+# Trap brew install — the cask-installed branch must short-circuit
+# BEFORE attempting `brew install tailscale` (which would start a
+# second tailscaled competing with the cask daemon).
+cat >"$WORK_DIR/t7/brew" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "install" ]; then
+    echo "BREW-INSTALL-WAS-CALLED" >&2
+    exit 99
+fi
+exit 0
+EOF
+chmod +x "$WORK_DIR/t7/brew"
+
+OUT_ERR="$WORK_DIR/err7"
+RC=0
+PATH="$WORK_DIR/t7:/usr/bin:/bin" \
+SYGEN_TEST_TAILSCALE_CASK_INSTALLED=1 \
+bash -c "source '$SHIM_FILE' && ensure_tailscale_cli" \
+    2>"$OUT_ERR" || RC=$?
+
+ERR="$(cat "$OUT_ERR")"
+if [ "$RC" = "1" ] \
+    && echo "$ERR" | grep -q 'Tailscale.app is installed but the CLI is not on PATH' \
+    && echo "$ERR" | grep -q 'Command Line Integration' \
+    && echo "$ERR" | grep -q 'Re-run install.sh' \
+    && ! echo "$ERR" | grep -q 'BREW-INSTALL-WAS-CALLED'; then
+    PASS=$((PASS+1))
+else
+    echo "  FAIL: rc=$RC" >&2
+    echo "  stderr: $ERR" >&2
+    FAIL=$((FAIL+1))
+fi
+
+# ---------- Test 8: cask NOT registered + CLI + brew absent -> generic die ----------
+# Asserts the cask override of 0 keeps the function on its old code path
+# (the existing Test 2 "no brew, no CLI" behaviour) — i.e. the new
+# branch is gated behind real cask detection, not a default-on heuristic.
+echo "Test 8: cask override=0 + CLI + brew absent -> generic brew-install hint"
+mkdir -p "$WORK_DIR/t8"
+# Empty PATH dir — neither tailscale nor brew available.
+
+OUT_ERR="$WORK_DIR/err8"
+RC=0
+PATH="$WORK_DIR/t8:/usr/bin:/bin" \
+SYGEN_TEST_TAILSCALE_CASK_INSTALLED=0 \
+bash -c "source '$SHIM_FILE' && ensure_tailscale_cli" \
+    2>"$OUT_ERR" || RC=$?
+
+ERR="$(cat "$OUT_ERR")"
+if [ "$RC" = "1" ] \
+    && echo "$ERR" | grep -q 'Tailscale CLI required but neither installed nor reachable via brew' \
+    && ! echo "$ERR" | grep -q 'Command Line Integration'; then
     PASS=$((PASS+1))
 else
     echo "  FAIL: rc=$RC" >&2

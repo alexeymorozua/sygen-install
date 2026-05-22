@@ -17,10 +17,16 @@
                             during install (Homebrew / npm-global / local
                             Claude install). Empty if install.sh could not
                             find one — core will then auto-probe at runtime.
-    __GEMINI_CLI_PATH__     absolute path to the ``gemini`` binary (npm-global
-                            install of @google/gemini-cli). Empty when the
-                            Gemini provider is disabled — core treats absent
-                            value as "shutil.which() + disable on miss".
+    __AGY_CLI_PATH__        absolute path to the Antigravity ``agy`` binary
+                            (curl|bash installer drops it at
+                            ``$HOME/.local/bin/agy``). Empty when the
+                            Gemini provider is disabled — core treats
+                            absent value as "shutil.which() + disable on
+                            miss". Phase 2c (2026-05-22) replaced the
+                            legacy ``__GEMINI_CLI_PATH__`` placeholder;
+                            the ``GEMINI_CLI_PATH`` env var name is still
+                            honored at runtime as a back-compat fallback
+                            for plist files produced before the rename.
     __CODEX_CLI_PATH__      absolute path to the ``codex`` binary (npm-global
                             install of @openai/codex). Empty = disabled.
     __SYGEN_WEBHOOK_TRUSTED_PROXIES__
@@ -105,7 +111,7 @@
           path resolved by install.sh and let the provider implementation
           honor it (with shutil.which() as the fallback for late installs).
         -->
-        <key>GEMINI_CLI_PATH</key>         <string>__GEMINI_CLI_PATH__</string>
+        <key>AGY_CLI_PATH</key>            <string>__AGY_CLI_PATH__</string>
         <key>CODEX_CLI_PATH</key>          <string>__CODEX_CLI_PATH__</string>
         <!--
           1.6.173 HIGH-1: trusted-proxies allowlist for X-Forwarded-For

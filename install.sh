@@ -464,8 +464,11 @@ SYGEN_MANIFEST_INSTALLED_PKGS=()
 SYGEN_MANIFEST_PREEXISTING_PKGS=()
 # v1.6.81+: npm packages installed globally by install.sh. Today:
 #   - @anthropic-ai/claude-code (required, strict-fail)
-#   - @google/gemini-cli         (optional, warn on failure — alternate provider)
 #   - @openai/codex              (optional, warn on failure — alternate provider)
+# Phase 2c (2026-05-22) note: the legacy ``@google/gemini-cli`` npm
+# package has been replaced by Antigravity (``agy`` Go binary delivered
+# via curl|bash) — see install_agy_cli below. The binary path lands in
+# the ``installed_binaries`` bucket, not the npm bucket.
 # Same preexisting/installed split as brew packages — a CLI the user
 # already had before sygen must NOT be uninstalled. uninstall.sh runs
 # `npm uninstall -g <pkg>` only for the installed_npm bucket.
@@ -676,6 +679,87 @@ manifest_npm_install() {
     fi
     manifest_record_npm_installed "$pkg"
     "$npm_bin" install -g "$pkg"
+}
+
+# Antigravity (`agy`) CLI installer. Phase 2c (2026-05-22) replaced the
+# legacy ``@google/gemini-cli`` npm package with Antigravity — a single
+# ~140 MB Go binary delivered via curl|bash. The installer drops
+# ``agy`` into ``<home>/.local/bin/agy`` and appends PATH lines to
+# ``<home>/.zshrc`` / ``<home>/.zprofile`` (we accept the rc-file
+# touch; it lives in the operator's real $HOME so it's discoverable
+# from the terminal where they'll later run ``agy auth login``).
+#
+# Tracking strategy: the binary path is recorded in the
+# ``installed_binaries`` manifest bucket (not ``installed_npm`` —
+# there's no npm package to ``npm uninstall -g``). uninstall.sh's
+# existing rm-loop over that bucket handles cleanup. We deliberately
+# do NOT track the .zshrc / .zprofile edits — those are tiny PATH
+# entries and removing them would risk clobbering user customizations.
+#
+# Failure mode: warn-and-continue, matching the codex npm install
+# path. Provider stays disabled until the user reruns the curl|bash
+# command manually. We never strict-fail on agy install because
+# Claude is the primary provider and a transient network issue must
+# not block the entire installer.
+#
+# $1 = home directory to install into. Pass the operator's real
+#      $HOME on install.sh runs; sygen-core's antigravity_migration
+#      shim passes $SYGEN_HOME/data when called from launchd-isolated
+#      context so the binary lands where find_gemini_cli's fallback
+#      will see it (see feedback_launchd_path_isolation memory).
+install_agy_cli() {
+    local home_dir="$1"
+    if [ -z "$home_dir" ]; then
+        warn "install_agy_cli: missing home_dir argument — Antigravity install skipped"
+        return 1
+    fi
+    local agy_bin="$home_dir/.local/bin/agy"
+    if [ -x "$agy_bin" ]; then
+        log "Antigravity CLI already installed at $agy_bin — recording as pre-existing"
+        manifest_record_binary_preexisting "$agy_bin"
+        return 0
+    fi
+    if command -v agy >/dev/null 2>&1; then
+        local existing
+        existing="$(command -v agy)"
+        log "Antigravity CLI already on PATH ($existing) — recording as pre-existing"
+        manifest_record_binary_preexisting "$existing"
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        warn "curl not found — cannot fetch Antigravity installer. Gemini provider disabled until you run: curl -fsSL https://antigravity.google/cli/install.sh | bash"
+        return 1
+    fi
+    log "Installing Antigravity CLI (agy) into $home_dir/.local/bin/ via curl|bash"
+    # HOME override so the installer writes its binary + rc entries under
+    # the directory we want, regardless of which shell user we're running
+    # as. Important for the migration shim which runs under launchd HOME
+    # isolation; harmless on a normal interactive install.sh run because
+    # the caller passes the user's real $HOME.
+    #
+    # Capture combined stdout+stderr to a tmpfile so we can surface a tail
+    # of the installer output on failure — 140 MB of network IO has many
+    # ways to fail (5xx, partial download, disk full, EBADF on ~/.local/bin)
+    # and a generic "install failed" message is unactionable in production.
+    local agy_log
+    agy_log="$(mktemp -t sygen-agy-install.XXXXXX.log)"
+    if ! HOME="$home_dir" bash -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash' >"$agy_log" 2>&1; then
+        warn "Antigravity CLI install failed — Gemini provider disabled until you run: curl -fsSL https://antigravity.google/cli/install.sh | bash"
+        warn "Last lines of installer output:"
+        tail -n 20 "$agy_log" | while IFS= read -r line; do warn "  $line"; done
+        rm -f "$agy_log"
+        return 1
+    fi
+    if [ ! -x "$agy_bin" ]; then
+        warn "Antigravity installer completed but ``$agy_bin`` not present — Gemini provider disabled (check the installer output)"
+        warn "Last lines of installer output:"
+        tail -n 20 "$agy_log" | while IFS= read -r line; do warn "  $line"; done
+        rm -f "$agy_log"
+        return 1
+    fi
+    rm -f "$agy_log"
+    log "  Antigravity CLI installed at $agy_bin"
+    manifest_record_binary_installed "$agy_bin"
 }
 
 # Atomic JSON writer. Schema is consumed by uninstall.sh AND by the
@@ -1732,24 +1816,21 @@ if [ $LOCAL_MODE -eq 0 ]; then
         fi
     fi
 
-    # Gemini CLI + Codex CLI — alternate provider CLIs spawned by sygen-core
-    # when a chat session is pinned to provider="gemini" or "codex". Both
-    # are OPTIONAL: install failures warn-and-continue rather than block the
-    # whole install. Claude is the primary provider; a registry blip on
-    # Google or OpenAI's npm namespace should not force the operator to
-    # rerun the entire installer. Re-run `npm install -g <pkg>` later to
-    # enable the missing provider without touching anything else.
-    if command -v gemini >/dev/null 2>&1; then
-        log "Gemini CLI already on PATH ($(command -v gemini)) — recording as pre-existing"
-        manifest_record_npm_preexisting "@google/gemini-cli"
-    else
-        log "Installing Gemini CLI via npm (@google/gemini-cli)"
-        if ! manifest_npm_install "@google/gemini-cli" gemini; then
-            warn "npm install -g @google/gemini-cli failed — Gemini provider disabled until you run: npm install -g @google/gemini-cli"
-        elif ! command -v gemini >/dev/null 2>&1; then
-            warn "@google/gemini-cli installed but ``gemini`` not on PATH — Gemini provider disabled (check ``npm prefix -g``)"
-        fi
-    fi
+    # Gemini (Antigravity) + Codex CLIs — alternate provider CLIs spawned by
+    # sygen-core when a chat session is pinned to provider="gemini" or
+    # "codex". Both are OPTIONAL: install failures warn-and-continue rather
+    # than block the whole install. Claude is the primary provider; a
+    # registry/network blip on Google or OpenAI must not force the operator
+    # to rerun the entire installer.
+    #
+    # Phase 2c (2026-05-22): @google/gemini-cli has been replaced by
+    # Antigravity (binary name ``agy``) — the legacy Node CLI's free tier
+    # is deprecated on 2026-06-18. Antigravity ships as a single ~140 MB
+    # Go binary delivered via curl|bash, NOT via npm. The installer writes
+    # ``$HOME/.local/bin/agy`` plus PATH entries in ``~/.zshrc`` /
+    # ``~/.zprofile``; the binary itself is what install_native_plist
+    # pins under AGY_CLI_PATH so launchd's narrower PATH still resolves it.
+    install_agy_cli "$HOME"
     if command -v codex >/dev/null 2>&1; then
         log "Codex CLI already on PATH ($(command -v codex)) — recording as pre-existing"
         manifest_record_npm_preexisting "@openai/codex"
@@ -1938,24 +2019,15 @@ else
         fi
     fi
 
-    # Gemini CLI + Codex CLI — alternate provider CLIs. See the matching
-    # Linux block above for the rationale (optional providers, warn on
-    # failure instead of strict-fail). brew's npm is reused here so the
-    # binaries land in ``$(brew --prefix node@22)/bin/`` — already covered
-    # by the plist PATH (`/opt/homebrew/bin`). Resolved absolute paths
-    # are exposed to launchd via GEMINI_CLI_PATH / CODEX_CLI_PATH below
+    # Gemini (Antigravity) + Codex CLIs — alternate provider CLIs. See the
+    # matching Linux block above for rationale. Phase 2c replaces the
+    # legacy ``@google/gemini-cli`` npm package with the Antigravity ``agy``
+    # binary (curl|bash installer). Codex remains npm-distributed; brew's
+    # npm puts the binary in ``$(brew --prefix node@22)/bin/`` — already
+    # covered by the plist PATH (``/opt/homebrew/bin``). Resolved absolute
+    # paths are exposed to launchd via AGY_CLI_PATH / CODEX_CLI_PATH below
     # (mirrors the CLAUDE_CLI_PATH defensive-pin pattern).
-    if command -v gemini >/dev/null 2>&1; then
-        log "Gemini CLI already on PATH ($(command -v gemini)) — recording as pre-existing"
-        manifest_record_npm_preexisting "@google/gemini-cli"
-    else
-        log "macOS: installing Gemini CLI via npm (@google/gemini-cli)"
-        if ! manifest_npm_install "@google/gemini-cli" gemini "$NPM_BIN"; then
-            warn "npm install -g @google/gemini-cli failed — Gemini provider disabled until you run: npm install -g @google/gemini-cli"
-        elif ! command -v gemini >/dev/null 2>&1; then
-            warn "@google/gemini-cli installed but ``gemini`` not on PATH — Gemini provider disabled (bin-link missing)"
-        fi
-    fi
+    install_agy_cli "$HOME"
     if command -v codex >/dev/null 2>&1; then
         log "Codex CLI already on PATH ($(command -v codex)) — recording as pre-existing"
         manifest_record_npm_preexisting "@openai/codex"
@@ -3022,20 +3094,27 @@ EFFECTIVE_CLAUDE_CLI_PATH="$(sanitize_env_value "$EFFECTIVE_CLAUDE_CLI_PATH")"
 # string is the documented "absent" value — the provider implementation
 # inside sygen-core treats it as "fall back to shutil.which()" and
 # disables the provider with a clear log line if neither resolves.
-EFFECTIVE_GEMINI_CLI_PATH="$(command -v gemini 2>/dev/null || true)"
-if [ -z "$EFFECTIVE_GEMINI_CLI_PATH" ]; then
+EFFECTIVE_AGY_PATH="$(command -v agy 2>/dev/null || true)"
+if [ -z "$EFFECTIVE_AGY_PATH" ]; then
+    # ``agy`` lands in ``<home>/.local/bin/agy`` by default (curl|bash
+    # installer). The HOME-isolated launchd PATH only sees /opt/homebrew
+    # + /usr/local + /usr/bin + /bin, so the defensive-pin below makes
+    # the resolved absolute path visible to the core regardless of where
+    # the install actually wrote it. The Homebrew / /usr/local paths are
+    # kept for operators who copy or symlink ``agy`` into a system bin
+    # dir manually.
     for _candidate in \
-        /opt/homebrew/bin/gemini \
-        /usr/local/bin/gemini \
-        "$HOME/.npm-global/bin/gemini"
+        "$HOME/.local/bin/agy" \
+        /opt/homebrew/bin/agy \
+        /usr/local/bin/agy
     do
         if [ -x "$_candidate" ]; then
-            EFFECTIVE_GEMINI_CLI_PATH="$_candidate"
+            EFFECTIVE_AGY_PATH="$_candidate"
             break
         fi
     done
 fi
-EFFECTIVE_GEMINI_CLI_PATH="$(sanitize_env_value "$EFFECTIVE_GEMINI_CLI_PATH")"
+EFFECTIVE_AGY_PATH="$(sanitize_env_value "$EFFECTIVE_AGY_PATH")"
 
 EFFECTIVE_CODEX_CLI_PATH="$(command -v codex 2>/dev/null || true)"
 if [ -z "$EFFECTIVE_CODEX_CLI_PATH" ]; then
@@ -3196,11 +3275,15 @@ umask 077
     # without re-running install.sh (just `launchctl kickstart -k`).
     echo "CLAUDE_CLI_PATH=$EFFECTIVE_CLAUDE_CLI_PATH"
     # Same defensive-pin for the alternate-provider CLIs. Empty means
-    # the provider is disabled; the operator can later
-    # ``npm i -g @google/gemini-cli`` (or @openai/codex) and
+    # the provider is disabled; the operator can later install agy
+    # (``curl -fsSL https://antigravity.google/cli/install.sh | bash``)
+    # or codex (``npm i -g @openai/codex``) and
     # ``launchctl kickstart -k gui/$(id -u)/pro.sygen.core`` without
     # re-running install.sh — core re-probes PATH at process start.
-    echo "GEMINI_CLI_PATH=$EFFECTIVE_GEMINI_CLI_PATH"
+    # Phase 2c: ``AGY_CLI_PATH`` replaces the legacy ``GEMINI_CLI_PATH``
+    # name (still honored as a fallback by find_gemini_cli for
+    # back-compat with .env files produced before 2026-05-22).
+    echo "AGY_CLI_PATH=$EFFECTIVE_AGY_PATH"
     echo "CODEX_CLI_PATH=$EFFECTIVE_CODEX_CLI_PATH"
     # Persist the install-time choices for postmortem diagnostics.
     # Pre-1.6.x there was no record of "did the operator pick
@@ -3831,7 +3914,7 @@ if [ $LOCAL_MODE -eq 1 ]; then
             -e "s|__APNS_BUNDLE_ID__|$EFFECTIVE_APNS_BUNDLE_ID|g" \
             -e "s|__APNS_ENVIRONMENT__|$EFFECTIVE_APNS_ENVIRONMENT|g" \
             -e "s|__CLAUDE_CLI_PATH__|$EFFECTIVE_CLAUDE_CLI_PATH|g" \
-            -e "s|__GEMINI_CLI_PATH__|$EFFECTIVE_GEMINI_CLI_PATH|g" \
+            -e "s|__AGY_CLI_PATH__|$EFFECTIVE_AGY_PATH|g" \
             -e "s|__CODEX_CLI_PATH__|$EFFECTIVE_CODEX_CLI_PATH|g" \
             -e "s|__SYGEN_WEBHOOK_TRUSTED_PROXIES__|$EFFECTIVE_TRUSTED_PROXIES|g" \
             "$tmpl" > "$plist_dst"

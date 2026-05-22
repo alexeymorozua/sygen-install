@@ -17,18 +17,25 @@ Releases, creates a venv, writes service unit files, and starts
 everything. On Linux it also provisions DNS + TLS via Cloudflare and
 wires up an nginx reverse proxy.
 
-Agent CLIs installed alongside the venv (one global npm package each):
+Agent CLIs installed alongside the venv:
 
-- `@anthropic-ai/claude-code` → `claude` (primary provider — strict-fail
-  if the install can't put it on PATH; sygen-core cannot operate without it)
-- `@google/gemini-cli` → `gemini` (alternate provider — warn-and-continue
-  on failure; rerun `npm install -g @google/gemini-cli` to enable later)
-- `@openai/codex` → `codex` (alternate provider — same lenient policy)
+- `@anthropic-ai/claude-code` → `claude` (primary provider, global npm —
+  strict-fail if the install can't put it on PATH; sygen-core cannot operate
+  without it)
+- Antigravity → `agy` (alternate Gemini provider, fetched via
+  `curl -fsSL https://antigravity.google/cli/install.sh | bash` — single Go
+  binary at `~/.local/bin/agy`; warn-and-continue on failure; rerun the
+  curl|bash command to enable later. Phase 2c replaced the legacy
+  `@google/gemini-cli` Node package — Google deprecated its free tier on
+  2026-06-18.)
+- `@openai/codex` → `codex` (alternate provider, global npm — same lenient
+  policy)
 
-All three are tracked in `.install_manifest.json` under `installed_npm` /
-`preexisting_npm` so `uninstall.sh` removes only what `install.sh` put
-there. The absolute path each CLI resolved to is mirrored into the
-LaunchAgent / systemd unit as `CLAUDE_CLI_PATH` / `GEMINI_CLI_PATH` /
+Claude + Codex are tracked in `.install_manifest.json` under `installed_npm` /
+`preexisting_npm`; the Antigravity binary lives in the `installed_binaries`
+bucket (no npm package to `npm uninstall -g`). `uninstall.sh` removes only what
+`install.sh` put there. The absolute path each CLI resolved to is mirrored into
+the LaunchAgent / systemd unit as `CLAUDE_CLI_PATH` / `AGY_CLI_PATH` /
 `CODEX_CLI_PATH` so sygen-core finds them under launchd's narrower PATH.
 
 ## Usage — Linux (VPS)

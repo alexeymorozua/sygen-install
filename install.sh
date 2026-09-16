@@ -354,7 +354,7 @@ PY
 _port_already_assigned() {
     local needle="$1"
     local p
-    if [ "${#SYGEN_ASSIGNED_PORTS[@]:-0}" -eq 0 ]; then
+    if [ "${#SYGEN_ASSIGNED_PORTS[@]}" -eq 0 ]; then
         return 1
     fi
     for p in "${SYGEN_ASSIGNED_PORTS[@]}"; do

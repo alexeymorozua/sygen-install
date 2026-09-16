@@ -681,6 +681,187 @@ manifest_npm_install() {
     "$npm_bin" install -g "$pkg"
 }
 
+# Run a command under a wall-clock limit. Returns 124 on expiry, matching
+# timeout(1). macOS ships neither `timeout` nor `gtimeout` (that is
+# coreutils, and we cannot assume brew), and install.sh is driven over SSH
+# from the iOS app — an unbounded network stall there hangs the install with
+# nothing to look at. So fall back to supervising the child ourselves.
+#
+# Every exit status is captured into a local rather than left as the last
+# command's status: `set -e` is active and these are all expected failures.
+#
+# $1 = seconds, rest = command + args (no prefix assignments; use `env`)
+run_with_timeout() {
+    local limit="$1"
+    shift
+    local rc=0
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$limit" "$@" || rc=$?
+        return "$rc"
+    fi
+    if command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$limit" "$@" || rc=$?
+        return "$rc"
+    fi
+    "$@" &
+    local pid=$!
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$limit" ]; then
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 2
+            kill -KILL "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$pid" || rc=$?
+    return "$rc"
+}
+
+# Resolve a symlink chain without realpath(1) — macOS ships neither
+# `readlink -f` nor a reliable `realpath`, and this has to behave the same
+# on bash 3.2 (macOS) and 5.x (Linux). Bounded at 16 hops so a symlink
+# loop can't spin forever.
+_resolve_symlink_chain() {
+    local path="$1"
+    local hops=0
+    local target dir
+    while [ -L "$path" ] && [ "$hops" -lt 16 ]; do
+        target="$(readlink "$path")"
+        case "$target" in
+            /*) path="$target" ;;
+            *)  path="$(dirname "$path")/$target" ;;
+        esac
+        hops=$((hops + 1))
+    done
+    dir="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)" || dir="$(dirname "$path")"
+    printf '%s/%s\n' "$dir" "$(basename "$path")"
+}
+
+# True when $1 lives under directory $2. Pass $1 through
+# _resolve_symlink_chain first: the root is normalised here with `pwd -P`,
+# so an unresolved path (/var/... vs /private/var/...) would compare
+# unequal against an equivalent root. Refuses an empty or "/" root — that
+# would match everything.
+_path_is_under() {
+    local path="$1"
+    local root="$2"
+    [ -n "$root" ] || return 1
+    [ "$root" != "/" ] || return 1
+    root="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
+    case "$path" in
+        "$root"/*) return 0 ;;
+    esac
+    return 1
+}
+
+# Actionable "how do I update this myself" line for a CLI we refuse to
+# touch. Anthropic's native installer puts claude under
+# ``<home>/.local/share/claude/versions/<version>`` with a symlink from
+# ``<home>/.local/bin/claude``; that build ships its own updater, and npm
+# may *also* hold a global copy on the same host — telling the operator to
+# ``npm install -g`` would update the copy nothing on PATH resolves to and
+# leave the stale binary in place. Anything else gets a deliberately
+# neutral line: we do not know what put it there.
+#
+# $1 = binary name   $2 = symlink-resolved path to it
+_cli_update_hint() {
+    local bin="$1"
+    local resolved="$2"
+    case "$resolved" in
+        */.local/share/claude/versions/*)
+            printf 'native install, it updates itself — run `%s update`' "$bin"
+            ;;
+        *)
+            printf 'update it the same way it was installed'
+            ;;
+    esac
+}
+
+# Update a CLI that was already on PATH when we got here.
+#
+# The pre-existing manifest bucket answers exactly one question: "may
+# uninstall.sh remove this?" It must NOT also mean "never update it".
+# Because it did, a Debian host that picked up @anthropic-ai/claude-code
+# once sat on 2.1.87 while upstream shipped 2.1.273 — every bug report
+# from that machine was against a CLI ~200 releases stale. The package
+# stays in the pre-existing bucket afterwards, so uninstall still leaves
+# it alone; only the version moves.
+#
+# We only touch the copy npm itself owns:
+#   * `npm ls -g` reports the package globally, AND
+#   * the binary PATH resolves to lives under `npm prefix -g`.
+# A brew / distro / hand-built CLI is left alone: `npm install -g` on top
+# of one installs a *second* copy and whichever comes first in PATH wins,
+# which is a worse outcome than being out of date.
+#
+# Always returns 0. `set -e` is active for the whole installer and no
+# version skew — nor an offline registry, nor a read-only global prefix —
+# is worth aborting an install over. Every skip path warns with the
+# command the operator can run by hand.
+#
+# $1 = npm package name   $2 = binary name   $3 = optional npm path
+manifest_npm_refresh_preexisting() {
+    local pkg="$1"
+    local bin="$2"
+    local npm_bin="${3:-}"
+    [ -x "$npm_bin" ] || npm_bin="$(command -v npm 2>/dev/null || true)"
+    if [ ! -x "$npm_bin" ]; then
+        warn "npm not found — leaving pre-existing $bin at its current version (update manually: npm install -g $pkg@latest)"
+        return 0
+    fi
+
+    local bin_path
+    bin_path="$(command -v "$bin" 2>/dev/null || true)"
+    if [ -z "$bin_path" ]; then
+        return 0
+    fi
+
+    local prefix resolved
+    prefix="$("$npm_bin" prefix -g 2>/dev/null || true)"
+    resolved="$(_resolve_symlink_chain "$bin_path")"
+
+    # --parseable prints the install path when the package is present and
+    # nothing when it isn't. Exit status is unreliable across npm majors
+    # (an unrelated extraneous/invalid global dep flips it), so match on
+    # the path instead: it always ends with the package name.
+    local listed
+    listed="$("$npm_bin" ls -g --depth=0 --parseable "$pkg" 2>/dev/null | tail -n 1 || true)"
+    case "$listed" in
+        */"$pkg") ;;
+        *)
+            warn "$bin at $bin_path is not an npm global package (brew, distro package or manual install) — not touching it. sygen needs a recent $bin: $(_cli_update_hint "$bin" "$resolved")"
+            return 0
+            ;;
+    esac
+
+    if ! _path_is_under "$resolved" "$prefix"; then
+        warn "$bin resolves to $resolved, outside the global npm prefix (${prefix:-unknown}) — npm has its own copy, but it is not the one PATH finds, so updating it would change nothing. Leaving both alone: $(_cli_update_hint "$bin" "$resolved")"
+        return 0
+    fi
+
+    local before after
+    before="$("$bin" --version 2>/dev/null | head -n 1 || true)"
+    log "Updating pre-existing $bin (${before:-version unknown}) — npm install -g $pkg@latest"
+    # Bounded fetch so an unreachable registry costs a minute, not the
+    # npm default retry ladder. Unknown config keys are warnings on old
+    # npm, not errors, so this stays safe on whatever npm the host has.
+    if ! "$npm_bin" install -g "$pkg@latest" --fetch-timeout=60000 --fetch-retries=1; then
+        warn "npm install -g $pkg@latest failed — keeping the $bin already installed. Usual causes: no network, blocked registry, or no write access to ${prefix:-the global prefix}. Update manually when convenient."
+        return 0
+    fi
+    after="$("$bin" --version 2>/dev/null | head -n 1 || true)"
+    if [ -n "$after" ] && [ "$before" != "$after" ]; then
+        log "  $bin updated: ${before:-unknown} -> $after"
+    else
+        log "  $bin already current (${after:-version unknown})"
+    fi
+    return 0
+}
+
 # Antigravity (`agy`) CLI installer. Phase 2c (2026-05-22) replaced the
 # legacy ``@google/gemini-cli`` npm package with Antigravity — a single
 # ~140 MB Go binary delivered via curl|bash. The installer drops
@@ -717,6 +898,33 @@ install_agy_cli() {
     if [ -x "$agy_bin" ]; then
         log "Antigravity CLI already installed at $agy_bin — recording as pre-existing"
         manifest_record_binary_preexisting "$agy_bin"
+        # Refresh in place. Re-running the curl|bash installer would mean
+        # another ~140 MB download on every install re-run, so we use the
+        # CLI's own updater instead — agy only self-updates when it is
+        # actually invoked, and a core that spawns it under launchd may go
+        # months without an interactive run.
+        #
+        # </dev/null: if a future agy build ever prompts, it must hit EOF
+        # and give up rather than hang a non-interactive installer. That
+        # covers a stuck prompt but not a stuck socket, hence the timeout —
+        # this pulls a ~140 MB binary and the npm path next to it is already
+        # bounded by --fetch-timeout. 300 s is ~470 KB/s for a full
+        # re-download, and blowing the limit costs nothing: the agy already
+        # on disk keeps working.
+        local agy_update_log
+        agy_update_log="$(mktemp -t sygen-agy-update.XXXXXX.log)"
+        local agy_update_rc=0
+        run_with_timeout 300 env HOME="$home_dir" "$agy_bin" update \
+            </dev/null >"$agy_update_log" 2>&1 || agy_update_rc=$?
+        if [ "$agy_update_rc" -eq 0 ]; then
+            log "  agy update: $(tail -n 1 "$agy_update_log" 2>/dev/null || echo 'done')"
+        elif [ "$agy_update_rc" -eq 124 ]; then
+            warn "agy update timed out after 300s — keeping the Antigravity CLI already installed. Update manually when the network is better: agy update"
+        else
+            warn "agy update failed — keeping the Antigravity CLI already installed. Update manually: agy update"
+            tail -n 5 "$agy_update_log" 2>/dev/null | while IFS= read -r line; do warn "  $line"; done
+        fi
+        rm -f "$agy_update_log"
         return 0
     fi
     if command -v agy >/dev/null 2>&1; then
@@ -724,6 +932,10 @@ install_agy_cli() {
         existing="$(command -v agy)"
         log "Antigravity CLI already on PATH ($existing) — recording as pre-existing"
         manifest_record_binary_preexisting "$existing"
+        # Deliberately NOT updated: this copy lives somewhere we did not
+        # put it, so it is the operator's install (or another tool's).
+        # Running its updater could move a binary other software pins.
+        log "  not updating $existing — installed outside $agy_bin; refresh it with: agy update"
         return 0
     fi
     if ! command -v curl >/dev/null 2>&1; then
@@ -1794,6 +2006,7 @@ if [ $LOCAL_MODE -eq 0 ]; then
     if command -v claude >/dev/null 2>&1; then
         log "Claude Code CLI already on PATH ($(command -v claude)) — recording as pre-existing"
         manifest_record_npm_preexisting "@anthropic-ai/claude-code"
+        manifest_npm_refresh_preexisting "@anthropic-ai/claude-code" claude
     else
         log "Installing Claude Code CLI via npm (@anthropic-ai/claude-code)"
         # Strict — sygen-core fundamentally cannot operate without the
@@ -1830,10 +2043,11 @@ if [ $LOCAL_MODE -eq 0 ]; then
     # ``$HOME/.local/bin/agy`` plus PATH entries in ``~/.zshrc`` /
     # ``~/.zprofile``; the binary itself is what install_native_plist
     # pins under AGY_CLI_PATH so launchd's narrower PATH still resolves it.
-    install_agy_cli "$HOME"
+    install_agy_cli "$HOME" || true
     if command -v codex >/dev/null 2>&1; then
         log "Codex CLI already on PATH ($(command -v codex)) — recording as pre-existing"
         manifest_record_npm_preexisting "@openai/codex"
+        manifest_npm_refresh_preexisting "@openai/codex" codex
     else
         log "Installing Codex CLI via npm (@openai/codex)"
         if ! manifest_npm_install "@openai/codex" codex; then
@@ -1987,16 +2201,19 @@ else
     # not publish a ``claude`` command to your shell PATH, so sygen-core
     # has nothing to spawn. We install ``@anthropic-ai/claude-code``
     # globally via npm regardless of what other Anthropic products exist.
+    # Use the brew-resolved npm so this works whether or not the user has
+    # node@22 linked into PATH. Resolved before the branch because the
+    # pre-existing refresh needs it too — and because the codex block
+    # further down reads $NPM_BIN regardless of which branch ran here.
+    NPM_BIN="$(dirname "$NODE_BREW_BIN")/npm"
+    [ -x "$NPM_BIN" ] || NPM_BIN="$(command -v npm || true)"
     if command -v claude >/dev/null 2>&1; then
         log "Claude Code CLI already on PATH ($(command -v claude)) — recording as pre-existing"
         manifest_record_npm_preexisting "@anthropic-ai/claude-code"
+        manifest_npm_refresh_preexisting "@anthropic-ai/claude-code" claude "$NPM_BIN"
     else
         log "macOS: installing Claude Code CLI via npm (@anthropic-ai/claude-code)"
         log "  → this is the terminal CLI (separate from Claude.app desktop and IDE plugins)"
-        # Use the brew-resolved npm so this works whether or not the user
-        # has node@22 linked into PATH.
-        NPM_BIN="$(dirname "$NODE_BREW_BIN")/npm"
-        [ -x "$NPM_BIN" ] || NPM_BIN="$(command -v npm || true)"
         if [ ! -x "$NPM_BIN" ]; then
             emit_error "NPM_MISSING" "deps" \
                 "npm not found alongside node — Claude CLI cannot be installed" \
@@ -2027,10 +2244,11 @@ else
     # covered by the plist PATH (``/opt/homebrew/bin``). Resolved absolute
     # paths are exposed to launchd via AGY_CLI_PATH / CODEX_CLI_PATH below
     # (mirrors the CLAUDE_CLI_PATH defensive-pin pattern).
-    install_agy_cli "$HOME"
+    install_agy_cli "$HOME" || true
     if command -v codex >/dev/null 2>&1; then
         log "Codex CLI already on PATH ($(command -v codex)) — recording as pre-existing"
         manifest_record_npm_preexisting "@openai/codex"
+        manifest_npm_refresh_preexisting "@openai/codex" codex "$NPM_BIN"
     else
         log "macOS: installing Codex CLI via npm (@openai/codex)"
         if ! manifest_npm_install "@openai/codex" codex "$NPM_BIN"; then
